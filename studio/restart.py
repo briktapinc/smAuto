@@ -95,7 +95,7 @@ def release_gpu_lock_for_restart(
     listen_port: int | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
-    """Clear Bubble Pod holders after kill / before os._exit (see gpu_lock.release_on_studio_restart)."""
+    """Clear Stickman Automation holders after kill / before os._exit (see gpu_lock.release_on_studio_restart)."""
     try:
         from studio.gpu_lock import release_on_studio_restart
 

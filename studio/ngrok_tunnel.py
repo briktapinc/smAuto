@@ -1,4 +1,4 @@
-"""Managed ngrok tunnel for Bubble Pod Studio (ChatGPT MCP / remote access).
+"""Managed ngrok tunnel for Stickman Automation Studio (ChatGPT MCP / remote access).
 
 Ngrok agent v3+ applies HTTP Basic Auth via a Traffic Policy file
 (--traffic-policy-file). Older agents that still accept --basic-auth are
@@ -167,12 +167,12 @@ def write_basic_auth_policy(username: str, password: str) -> Path:
     policy = {
         "on_http_request": [
             {
-                "name": "Bubble Pod Studio basic auth",
+                "name": "Stickman Automation Studio basic auth",
                 "actions": [
                     {
                         "type": "basic-auth",
                         "config": {
-                            "realm": "Bubble Pod Studio",
+                            "realm": "Stickman Automation Studio",
                             "credentials": [f"{username}:{password}"],
                             "enforce": True,
                         },

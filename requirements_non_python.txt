@@ -1,5 +1,5 @@
 ffmpeg (not a Python library; required to mux the final mp4).
-The Bubble Pod Electron installer ships ffmpeg/ffprobe under resources/ffmpeg/.
+The Stickman Automation Electron installer ships ffmpeg/ffprobe under resources/ffmpeg/.
 Dev builds: run `npm run ensure-ffmpeg` (or `npm run dist`) to download into desktop/bin/ffmpeg/.
 Or install ffmpeg yourself and put it on PATH / set FFMPEG_BINARY.
 

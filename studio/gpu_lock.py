@@ -577,7 +577,7 @@ def release_on_studio_restart(
     listen_port: int | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
-    """Clear Bubble Pod gpu.lock after API restart/kill.
+    """Clear Stickman Automation gpu.lock after API restart/kill.
 
     clear_stale() alone is not enough during restart: it runs while the old API
     PID is still alive, so the holder looks valid. Call this *after* kill_listener

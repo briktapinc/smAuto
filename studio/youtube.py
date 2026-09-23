@@ -57,7 +57,7 @@ max-width:28rem;box-shadow:6px 8px 0 #ead9c2}
 h1{margin:0 0 8px;font-size:1.4rem}p{margin:0;color:#6e6256;line-height:1.45}
 </style></head><body><div class="card">
 <h1>YouTube connected</h1>
-<p>You can close this tab and return to Bubble Pod. Pick a channel in Settings if you have more than one.</p>
+<p>You can close this tab and return to Stickman Automation. Pick a channel in Settings if you have more than one.</p>
 </div></body></html>
 """
 

@@ -1,4 +1,4 @@
-"""Point Claude Desktop (and Claude Code, if present) at the Bubble Pod stdio MCP server."""
+"""Point Claude Desktop (and Claude Code, if present) at the Stickman Automation stdio MCP server."""
 
 from __future__ import annotations
 

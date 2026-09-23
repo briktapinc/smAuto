@@ -172,7 +172,7 @@ DEFAULTS = {
     "smtp_use_tls": True,
     "smtp_use_ssl": False,
     "email_from": "",
-    "email_from_name": "Bubble Pod",
+    "email_from_name": "Stickman Automation",
     "email_reply_to": "",
     "email_templates": {},
 }
@@ -790,7 +790,7 @@ def public_settings() -> dict[str, Any]:
     data["smtp_use_tls"] = normalize_bool(data.get("smtp_use_tls"), True)
     data["smtp_use_ssl"] = normalize_bool(data.get("smtp_use_ssl"), False)
     data["email_from"] = str(data.get("email_from") or "")
-    data["email_from_name"] = str(data.get("email_from_name") or "Bubble Pod")
+    data["email_from_name"] = str(data.get("email_from_name") or "Stickman Automation")
     data["email_reply_to"] = str(data.get("email_reply_to") or "")
     data["email_configured"] = bool(data["email_enabled"] and data["smtp_host"])
     try:

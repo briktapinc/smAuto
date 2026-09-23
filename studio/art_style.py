@@ -1,4 +1,4 @@
-"""Illustration art styles for line/cover prompts. Classic (default) = current Bubble Pod look."""
+"""Illustration art styles for line/cover prompts. Classic (default) = current Stickman Automation look."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""JWT login for Bubble Pod Studio (HTTP UI + /api) and MCP HTTP auth.
+"""JWT login for Stickman Automation Studio (HTTP UI + /api) and MCP HTTP auth.
 
 Credentials live in user_data/auth.json (bcrypt hash + JWT secret).
 First boot defaults: username admin / password bubblepod
@@ -709,12 +709,12 @@ def authorize_mcp_http(request: Request) -> str:
         _bind_mcp_username(request, admin, method="basic" if basic_ok else "tunnel_gate")
         return admin
 
-    www = 'Bearer realm="Bubble Pod MCP"'
+    www = 'Bearer realm="Stickman Automation MCP"'
     try:
         from studio.settings import load_settings
 
         if str(load_settings().get("ngrok_basic_auth_password") or "").strip():
-            www = 'Basic realm="Bubble Pod Studio", Bearer realm="Bubble Pod MCP"'
+            www = 'Basic realm="Stickman Automation Studio", Bearer realm="Stickman Automation MCP"'
     except Exception:
         pass
 

@@ -647,7 +647,7 @@ class McpAuthASGIMiddleware:
         try:
             studio_auth.authorize_mcp_http(request)
         except HTTPException as exc:
-            headers = {"WWW-Authenticate": 'Bearer realm="Bubble Pod MCP"'}
+            headers = {"WWW-Authenticate": 'Bearer realm="Stickman Automation MCP"'}
             # Prefer challenge headers from authorize_mcp_http when present.
             if getattr(exc, "headers", None):
                 headers.update(exc.headers)
@@ -850,7 +850,7 @@ def create_app() -> FastAPI:
                 await inner_cm.__aexit__(None, None, None)
 
     app = FastAPI(
-        title="Bubble Pod",
+        title="Stickman Automation",
         lifespan=studio_lifespan,
         # Docs/OpenAPI served only to authenticated sessions (AuthMiddleware).
         docs_url="/docs",

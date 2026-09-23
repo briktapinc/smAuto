@@ -15,9 +15,9 @@ from studio.settings import load_settings, save_settings
 _log = logging.getLogger("bubblepod.stripe")
 _lock = threading.Lock()
 
-MEMBERSHIP_PRODUCT_NAME = "Bubble Pod Membership"
+MEMBERSHIP_PRODUCT_NAME = "Stickman Automation Membership"
 MEMBERSHIP_PRODUCT_DESC = (
-    "Full Bubble Pod Studio access. Every member has the same privileges — "
+    "Full Stickman Automation Studio access. Every member has the same privileges — "
     "scripts, pictures, voice, render, Topics, YouTube, and MCP."
 )
 DEFAULT_PRICE_CENTS = 2900

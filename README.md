@@ -9,9 +9,9 @@ Creating a video using this lazykh code is a 5-step-process! (That sounds intimi
 
 2022-07-20 UPDATE: I added frame-caching to Step 4 (frame drawing), which speeds up the frame-drawing by about 5 times! (Now, if it detects that the current frame has the exact same parameters as a previously-rendered frame, it will just copy-paste that frame, which is much faster.) So, to render a 5-minute video, it only takes around 10-12 minutes on my machine, instead of one hour.
 
-## Bubble Pod (GUI + ChatGPT MCP)
+## Stickman Automation (GUI + ChatGPT MCP)
 
-Bubble Pod is based on [lazykh](https://github.com/carykh/lazykh). It wraps the original 5-step pipeline: you give a **topic** and a **length**, OpenAI writes a lazykh-legal script (tagged + raw), each line gets a doodle illustration prompt, ChatGPT draws the pictures, TTS speaks the raw script, Gentle in Docker timestamps phonemes, then the original renderer muxes the video.
+Stickman Automation is based on [lazykh](https://github.com/carykh/lazykh). It wraps the original 5-step pipeline: you give a **topic** and a **length**, OpenAI writes a lazykh-legal script (tagged + raw), each line gets a doodle illustration prompt, ChatGPT draws the pictures, TTS speaks the raw script, Gentle in Docker timestamps phonemes, then the original renderer muxes the video.
 
 ```bash
 pip install -r requirements.txt
@@ -40,7 +40,7 @@ npm run dist:mac      # macOS — run on macOS (x64 + arm64 dmg/zip)
 
 electron-builder writes installers to `dist/` (Python + `pip install -r requirements.txt` still required on the machine). Set `PYTHON` if `python` / `python3` is not on PATH. Windows uses `desktop/icons/icon.ico`; macOS uses `icon.png` (or `icon.icns` if you add one). **Building macOS targets from Windows is not supported** by electron-builder — use a Mac for `.dmg` / `.app`.
 
-Optional Mac launcher: double-click `Launch Bubble Pod.command` (same role as `Launch Bubble Pod.bat` on Windows).
+Optional Mac launcher: double-click `Launch Stickman Automation.command` (same role as `Launch Stickman Automation.bat` on Windows).
 
 ### Gentle without Docker
 
@@ -89,7 +89,7 @@ Studio room images (clock, wall, floor behind the stick figure) come from `backg
 3. Point the client at `https://YOUR-SUBDOMAIN.ngrok-free.dev/mcp` with **HTTP Basic only** (that username + password). Do **not** also send `Authorization: Bearer` — many HTTP clients drop Basic when both headers are set.
 4. Optional: use `?mcp_pin=YOUR_PIN` or a Studio login JWT instead of / in addition to Basic.
 
-After a Studio update: fully quit ChatGPT Desktop, reopen, start a **new thread**, type `/mcp`, and confirm **Bubble Pod** is listed.
+After a Studio update: fully quit ChatGPT Desktop, reopen, start a **new thread**, type `/mcp`, and confirm **Stickman Automation** is listed.
 
 Do not paste `http://127.0.0.1:7878/mcp` into ChatGPT **web** connectors — web ChatGPT only accepts a public HTTPS URL.
 

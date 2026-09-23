@@ -347,7 +347,7 @@ async def _read_upload(item) -> bytes:
 
 
 def create_app():
-    app = FastAPI(title="Bubble Pod local Gentle")
+    app = FastAPI(title="Stickman Automation local Gentle")
 
     @app.get("/")
     def root():

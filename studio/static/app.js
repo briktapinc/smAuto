@@ -2528,7 +2528,7 @@ function fillMcpSettings(data) {
     deskLine.textContent = desk.configured
       ? `Claude Desktop: configured (${desk.key}) · ${desk.path}`
       : desk.exists
-        ? `Claude Desktop: config exists but Bubble Pod not listed · ${desk.path}`
+        ? `Claude Desktop: config exists but Stickman Automation not listed · ${desk.path}`
         : `Claude Desktop: no config yet · ${desk.path || "…"}`;
   }
   const codeLine = $("#mcp-claude-code-line");
@@ -2536,7 +2536,7 @@ function fillMcpSettings(data) {
     codeLine.textContent = code.configured
       ? `Claude Code: configured (${code.key}) · ${code.path}`
       : code.exists
-        ? `Claude Code: config exists but Bubble Pod not listed · ${code.path}`
+        ? `Claude Code: config exists but Stickman Automation not listed · ${code.path}`
         : `Claude Code: no ~/.claude.json yet (Install only updates it if the file already exists)`;
   }
   const toolsList = $("#mcp-tools-list");

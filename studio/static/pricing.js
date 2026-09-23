@@ -159,7 +159,7 @@ function applyPlan(me) {
   const actions = statusCopy(me);
 
   $("#pricing-who").textContent = `${me.username || "Member"}${me.email ? ` · ${me.email}` : ""}`;
-  $("#plan-name").textContent = catalog.membership_name || "Bubble Pod Membership";
+  $("#plan-name").textContent = catalog.membership_name || "Stickman Automation Membership";
   $("#plan-price").textContent = amount != null ? money(amount, cur) : "—";
   $("#plan-interval").textContent = amount != null ? `per ${interval}` : "";
   const pill = $("#plan-status");

@@ -388,7 +388,7 @@ async function loadEmailForm() {
   $("#smtp-tls").checked = settings.smtp_use_tls !== false;
   $("#smtp-ssl").checked = !!settings.smtp_use_ssl;
   $("#email-from").value = settings.email_from || "";
-  $("#email-from-name").value = settings.email_from_name || "Bubble Pod";
+  $("#email-from-name").value = settings.email_from_name || "Stickman Automation";
   $("#email-reply-to").value = settings.email_reply_to || "";
   $("#email-status").textContent = settings.email_configured
     ? "Email is enabled and SMTP host is set."

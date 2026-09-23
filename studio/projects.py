@@ -645,7 +645,7 @@ def project_video_layout(project_id: str) -> str:
 
 
 def project_art_style(project_id: str | dict[str, Any] | None = None) -> str:
-    """Per-job art style id (classic = current Bubble Pod default)."""
+    """Per-job art style id (classic = current Stickman Automation default)."""
     from studio.art_style import DEFAULT_ART_STYLE, normalize_art_style
 
     if isinstance(project_id, dict):

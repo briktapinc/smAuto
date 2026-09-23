@@ -57,7 +57,7 @@ def resolve_ffmpeg() -> str:
     if which:
         return which
     raise FileNotFoundError(
-        "ffmpeg was not found. Install it, add it to PATH, or use the Bubble Pod "
+        "ffmpeg was not found. Install it, add it to PATH, or use the Stickman Automation "
         "desktop build that ships ffmpeg under resources/ffmpeg/. "
         "You can also set FFMPEG_BINARY to the full path of ffmpeg.exe."
     )

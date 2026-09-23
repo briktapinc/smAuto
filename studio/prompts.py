@@ -242,7 +242,7 @@ CHATGPT_IMAGE_INSTRUCTIONS_DEFAULT = (
 IMAGES_COVER_INTRO_DEFAULT = """
 {art_style_short}
 
-Bubble Pod 5-second title-card still for: {title}
+Stickman Automation 5-second title-card still for: {title}
 Clean flat 2D cartoon, educational explainer aesthetic.
 
 {background_room}

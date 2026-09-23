@@ -1,4 +1,4 @@
-"""Transactional email (SMTP) + built-in templates for Bubble Pod Studio."""
+"""Transactional email (SMTP) + built-in templates for Stickman Automation Studio."""
 
 from __future__ import annotations
 
@@ -115,7 +115,7 @@ def email_public_status(settings: dict[str, Any] | None = None) -> dict[str, Any
         "smtp_use_tls": _truthy(data.get("smtp_use_tls"), True),
         "smtp_use_ssl": _truthy(data.get("smtp_use_ssl"), False),
         "email_from": (data.get("email_from") or "").strip(),
-        "email_from_name": (data.get("email_from_name") or "Bubble Pod").strip() or "Bubble Pod",
+        "email_from_name": (data.get("email_from_name") or "Stickman Automation").strip() or "Stickman Automation",
         "email_reply_to": (data.get("email_reply_to") or "").strip(),
         "configured": email_enabled(data),
     }
@@ -191,7 +191,7 @@ def send_email(
     from_addr = (data.get("email_from") or user or "").strip()
     if not from_addr:
         raise RuntimeError("Set email_from (or smtp_user) in Admin → Email.")
-    from_name = (data.get("email_from_name") or "Bubble Pod").strip() or "Bubble Pod"
+    from_name = (data.get("email_from_name") or "Stickman Automation").strip() or "Stickman Automation"
     reply_to = (data.get("email_reply_to") or "").strip()
     use_ssl = _truthy(data.get("smtp_use_ssl"), False)
     use_tls = _truthy(data.get("smtp_use_tls"), True) and not use_ssl
@@ -236,7 +236,7 @@ def send_template(
     data = settings or _settings()
     tmpl = get_template(key, data)
     ctx = {
-        "app_name": (data.get("email_from_name") or "Bubble Pod").strip() or "Bubble Pod",
+        "app_name": (data.get("email_from_name") or "Stickman Automation").strip() or "Stickman Automation",
         "studio_url": _base_url(data) + "/",
         "login_url": _base_url(data) + "/",
         "portal_hint": "Pricing page → Manage / cancel",
@@ -364,9 +364,9 @@ def send_test_email(to: str) -> dict[str, Any]:
         raise RuntimeError("Enable email and set SMTP host first.")
     return send_email(
         to=to,
-        subject=f"Test email from {(data.get('email_from_name') or 'Bubble Pod')}",
+        subject=f"Test email from {(data.get('email_from_name') or 'Stickman Automation')}",
         text=(
-            "This is a Bubble Pod Studio test message.\n"
+            "This is a Stickman Automation Studio test message.\n"
             "If you received it, SMTP settings are working.\n"
         ),
         settings=data,

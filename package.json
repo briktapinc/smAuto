@@ -1,10 +1,10 @@
 {
-  "name": "lazykh-studio",
-  "productName": "Bubble Pod",
+  "name": "stickman-automation",
+  "productName": "Stickman Automation",
   "version": "1.0.0",
-  "description": "Desktop window for Bubble Pod (Python uvicorn + Gentle)",
+  "description": "Desktop window for Stickman Automation (Python uvicorn + Gentle)",
   "main": "desktop/main.js",
-  "author": "Bubble Pod",
+  "author": "Stickman Automation",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
@@ -25,7 +25,7 @@
   },
   "build": {
     "appId": "com.lazykh.studio",
-    "productName": "Bubble Pod",
+    "productName": "Stickman Automation",
     "directories": {
       "output": "dist",
       "buildResources": "desktop/icons"
@@ -123,7 +123,7 @@
       "identity": null
     },
     "dmg": {
-      "title": "Bubble Pod"
+      "title": "Stickman Automation"
     },
     "nsis": {
       "oneClick": false,
@@ -133,7 +133,7 @@
       "installerIcon": "desktop/icons/icon.ico",
       "uninstallerIcon": "desktop/icons/icon.ico",
       "installerHeaderIcon": "desktop/icons/icon.ico",
-      "shortcutName": "Bubble Pod"
+      "shortcutName": "Stickman Automation"
     }
   }
 }

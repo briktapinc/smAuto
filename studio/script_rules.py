@@ -57,7 +57,7 @@ get_prompt / list_prompts show the catalog; do not freeform a different look.
 
 COVER_TITLE_ON_IMAGE_REQUIREMENT = """
 COVER TITLE CARD (5s intro still — not every line billboard):
-The cover (kind=cover / script_cover_16x9.png / script_cover_9x16.png) is a Bubble Pod
+The cover (kind=cover / script_cover_16x9.png / script_cover_9x16.png) is a Stickman Automation
 studio-room scene matching the project's selected background_file:
 - Yellow Bubblehead stick figure OUTSIDE the TV (left on 16:9; lower on 9:16) in a unique pose
 - Large TV/billboard with the exact video title as large bold on-screen headline text PLUS
@@ -317,8 +317,8 @@ to this topic, eight years later?
 
 
 CHATGPT_PLAYBOOK_DEFAULT = """
-You are helping produce a Bubble Pod lip-sync explainer through this MCP server.
-Same tools as the Bubble Pod GUI at http://127.0.0.1:7878. FastMCP HTTP is POST /mcp
+You are helping produce a Stickman Automation lip-sync explainer through this MCP server.
+Same tools as the Stickman Automation GUI at http://127.0.0.1:7878. FastMCP HTTP is POST /mcp
 (streamable HTTP, same tools as stdio `python -m studio.mcp_server`).
 HTTP /mcp auth (any one): ngrok HTTP Basic (Settings → Ngrok — Basic only, not Basic+Bearer),
 MCP PIN (header X-MCP-Pin, query ?mcp_pin=, or Bearer <pin>), or Studio JWT.
@@ -444,7 +444,7 @@ COVER (always the first clip, 5 seconds, per aspect)
   it does not stretch the 16:9 still, and it does not overwrite script_cover_16x9.png
   or script_final_16x9.mp4 (and the reverse). script_final.mp4 is a copy of the last
   render. kind='cover'.
-- Composition (Bubble Pod studio title card): match selected background_file room;
+- Composition (Stickman Automation studio title card): match selected background_file room;
   yellow Bubblehead OUTSIDE left (16:9) or lower (9:16) in a unique pose; large TV/billboard
   with the exact video title as bold on-screen headline text + topic art on the screen.
   Presenter never inside the TV. Cover prompts from list_illustration_jobs / images.cover_intro

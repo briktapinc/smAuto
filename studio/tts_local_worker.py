@@ -18,7 +18,7 @@ def main(argv: list[str] | None = None) -> int:
     # Prevent nested subprocess if worker code ever calls write_local_wav.
     os.environ["BUBBLEPOD_TTS_WORKER"] = "1"
 
-    parser = argparse.ArgumentParser(description="Bubble Pod local TTS worker (isolated process).")
+    parser = argparse.ArgumentParser(description="Stickman Automation local TTS worker (isolated process).")
     parser.add_argument("--text-file", required=True, help="UTF-8 script text path")
     parser.add_argument("--dest", required=True, help="Output WAV path")
     parser.add_argument("--result-file", required=True, help="JSON result path written on success or soft failure")

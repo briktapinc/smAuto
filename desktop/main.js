@@ -21,7 +21,7 @@ function studioUrl() {
   return `http://${HOST}:${studioPort}`;
 }
 
-app.setName("Bubble Pod");
+app.setName("Stickman Automation");
 if (IS_WIN) {
   app.setAppUserModelId("com.lazykh.studio");
 }
@@ -268,7 +268,7 @@ async function ensureStudio() {
           reloadWindow();
           return;
         }
-        dialog.showErrorBox("Bubble Pod", `Studio process exited (${code}).`);
+        dialog.showErrorBox("Stickman Automation", `Studio process exited (${code}).`);
       });
     }
   });
@@ -435,7 +435,7 @@ function createWindow() {
     height: 920,
     minWidth: 960,
     minHeight: 640,
-    title: "Bubble Pod",
+    title: "Stickman Automation",
     autoHideMenuBar: true,
     ...(icon ? { icon } : {}),
     webPreferences: {
@@ -471,7 +471,7 @@ app.whenReady().then(async () => {
     createWindow();
     startHealthWatch();
   } catch (err) {
-    dialog.showErrorBox("Bubble Pod", String(err && err.message ? err.message : err));
+    dialog.showErrorBox("Stickman Automation", String(err && err.message ? err.message : err));
     app.quit();
   }
 });

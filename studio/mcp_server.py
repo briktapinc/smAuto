@@ -207,7 +207,7 @@ def handshake_instructions() -> str:
     playbook = with_playbook_runtime_notes(get_prompt("mcp.chatgpt_playbook"))
     tools = ", ".join(MCP_TOOL_NAMES)
     return (
-        f"Bubble Pod MCP build {MCP_BUILD}. "
+        f"Stickman Automation MCP build {MCP_BUILD}. "
         "stdio: python -m studio.mcp_server (Codex mcp_servers.lazykh; Claude Desktop mcpServers.lazykh). "
         "HTTP: FastMCP streamable POST /mcp on Studio — same tools. "
         "HTTP /mcp AUTH (any one): (1) ngrok HTTP Basic — Settings → Ngrok username/password; "
@@ -499,7 +499,7 @@ def build_mcp() -> "FastMCP":
     if Middleware is not None:
         middleware = [_LivePlaybookMiddleware(holder), _AuditToolMiddleware()]
     mcp = FastMCP(
-        "Bubble Pod",
+        "Stickman Automation",
         instructions=handshake_instructions(),
         middleware=middleware,
     )
@@ -507,7 +507,7 @@ def build_mcp() -> "FastMCP":
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def search(query: str) -> dict:
-        """Search Bubble Pod projects, scripts, and illustration jobs."""
+        """Search Stickman Automation projects, scripts, and illustration jobs."""
         q = (query or "").strip().lower()
         ids = []
         try:
@@ -1127,7 +1127,7 @@ def build_mcp() -> "FastMCP":
 
     @mcp.tool
     def set_art_style(style: str, project_id: str = "") -> dict:
-        """Set this job's illustration art style (classic, pixar_3d, cinematic, claymation, watercolor, anime, comic_book, paper_craft, voxel). Classic is the original Bubble Pod hand-drawn look. Pass project_id. Regenerates line image_prompts; regenerate covers/line PNGs to apply visually."""
+        """Set this job's illustration art style (classic, pixar_3d, cinematic, claymation, watercolor, anime, comic_book, paper_craft, voxel). Classic is the original Stickman Automation hand-drawn look. Pass project_id. Regenerates line image_prompts; regenerate covers/line PNGs to apply visually."""
         if not project_id:
             raise ValueError("project_id is required (art_style is per-job).")
         return write_project_art_style(project_id, style)

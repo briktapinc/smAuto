@@ -1,4 +1,4 @@
-"""Estimated Flux / OpenAI spend for Bubble Pod Studio.
+"""Estimated Flux / OpenAI spend for Stickman Automation Studio.
 
 Flux 2 Dev (~2MP) ballpark from the operator: ~4.6¢/image, ~$2.60 per ~10-min
 video (~56 images), ~$15–16/day at 6 videos.
