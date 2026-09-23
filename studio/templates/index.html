@@ -5,6 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Stickman Automation</title>
   <link rel="stylesheet" href="/static/app.css" />
+  <style>
+    /* Hide workspace until session boot finishes (no chrome flash on expiry). */
+    html:not(.studio-ready) #studio-app { display: none !important; }
+    html:not(.studio-ready):not(.desktop-boot) #login-gate:not([hidden]) { display: grid !important; }
+  </style>
 </head>
 <body>
   <div id="login-gate" class="login-gate" hidden>

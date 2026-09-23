@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex" />
+  <title>Sign in — Stickman Automation</title>
+  <link rel="stylesheet" href="/static/app.css" />
+  <style>
+    /* Login shell only — never paint workspace chrome before JS runs */
+    #studio-app, .app { display: none !important; }
+    #login-gate { display: grid !important; }
+    #login-gate[hidden] { display: none !important; }
+  </style>
+</head>
+<body class="login-only">
+  <div id="login-gate" class="login-gate">
+    <form id="login-form" class="card login-card" autocomplete="on">
+      <div class="brand login-brand">
+        <span class="scribble">SA</span>
+        <div>
+          <strong>Stickman Automation</strong>
+          <small>Sign in to Studio</small>
+        </div>
+      </div>
+      <label>
+        Username or email
+        <input id="login-user" name="username" type="text" autocomplete="username" required />
+      </label>
+      <label>
+        Password
+        <input id="login-pass" name="password" type="password" autocomplete="current-password" required />
+      </label>
+      <p id="login-error" class="login-error" hidden></p>
+      <button type="submit" class="primary" id="login-submit">Sign in</button>
+      <button type="button" class="ghost" id="login-forgot-toggle">Forgot password?</button>
+      <button type="button" class="ghost" id="login-signup-toggle">Need an account? Sign up</button>
+      <p class="hint" style="margin:0">Members share equal Studio access for their own jobs.</p>
+    </form>
+    <form id="forgot-form" class="card login-card" autocomplete="on" hidden>
+      <div class="brand login-brand">
+        <span class="scribble">SA</span>
+        <div>
+          <strong>Stickman Automation</strong>
+          <small>Reset password</small>
+        </div>
+      </div>
+      <label>
+        Email
+        <input id="forgot-email" name="email" type="email" autocomplete="email" />
+      </label>
+      <label>
+        Or username
+        <input id="forgot-user" name="username" type="text" autocomplete="username" />
+      </label>
+      <p id="forgot-error" class="login-error" hidden></p>
+      <p id="forgot-ok" class="hint" hidden></p>
+      <button type="submit" class="primary" id="forgot-submit">Send reset link</button>
+      <button type="button" class="ghost" id="forgot-login-toggle">Back to sign in</button>
+    </form>
+    <form id="reset-form" class="card login-card" autocomplete="on" hidden>
+      <div class="brand login-brand">
+        <span class="scribble">SA</span>
+        <div>
+          <strong>Stickman Automation</strong>
+          <small>Choose a new password</small>
+        </div>
+      </div>
+      <label>
+        New password
+        <input id="reset-pass" name="password" type="password" autocomplete="new-password" required minlength="6" />
+      </label>
+      <label>
+        Confirm password
+        <input id="reset-pass2" name="confirm" type="password" autocomplete="new-password" required minlength="6" />
+      </label>
+      <p id="reset-error" class="login-error" hidden></p>
+      <button type="submit" class="primary" id="reset-submit">Update password</button>
+      <button type="button" class="ghost" id="reset-login-toggle">Back to sign in</button>
+    </form>
+    <form id="signup-form" class="card login-card" autocomplete="on" hidden>
+      <div class="brand login-brand">
+        <span class="scribble">SA</span>
+        <div>
+          <strong>Stickman Automation</strong>
+          <small>Create a member account</small>
+        </div>
+      </div>
+      <label>
+        Username
+        <input id="signup-user" name="username" type="text" autocomplete="username" required />
+      </label>
+      <label>
+        Email
+        <input id="signup-email" name="email" type="email" autocomplete="email" />
+      </label>
+      <label>
+        Password
+        <input id="signup-pass" name="password" type="password" autocomplete="new-password" required minlength="6" />
+      </label>
+      <p id="signup-error" class="login-error" hidden></p>
+      <button type="submit" class="primary" id="signup-submit">Create account</button>
+      <button type="button" class="ghost" id="signup-login-toggle">Back to sign in</button>
+    </form>
+  </div>
+  <script src="/static/login.js"></script>
+</body>
+</html>

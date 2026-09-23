@@ -104,10 +104,17 @@ function showLoginGate(message = "", view = "login") {
     showStudioApp();
     return;
   }
+  // Prefer a clean login-only document (no workspace DOM) when the session is gone.
+  if (view === "login" && !message) {
+    const hash = (location.hash || "").startsWith("#reset=") ? location.hash : "";
+    location.replace(withBase("/") + (hash || ""));
+    return;
+  }
   const app = $("#studio-app");
   const gate = $("#login-gate");
   if (app) app.hidden = true;
   if (gate) gate.hidden = false;
+  document.documentElement.classList.remove("studio-ready");
   const show = (id) => {
     ["#login-form", "#signup-form", "#forgot-form", "#reset-form"].forEach((sel) => {
       const el = $(sel);
@@ -134,6 +141,7 @@ function showStudioApp() {
   const gate = $("#login-gate");
   if (gate) gate.hidden = true;
   if (app) app.hidden = false;
+  document.documentElement.classList.add("studio-ready");
 }
 function toast(msg, bad = false) {
   const banner = $("#run-status");
@@ -398,7 +406,8 @@ async function api(path, opts = {}) {
   if (res.status === 401 && path !== "/api/auth/login" && path !== "/api/auth/me") {
     if (!desktopMode) {
       setAuthToken("");
-      showLoginGate("Session expired. Sign in again.");
+      try { sessionStorage.setItem("bubblepod.authMsg", "Session expired. Sign in again."); } catch {}
+      location.replace(withBase("/"));
     }
     throw new Error("Not authenticated");
   }
@@ -4932,11 +4941,12 @@ async function checkSession() {
 
 async function startApp() {
   try {
-    const health = await fetch("/api/health").then((r) => (r.ok ? r.json() : null));
+    const health = await fetch(withBase("/api/health")).then((r) => (r.ok ? r.json() : null));
     if (health && health.desktop_mode) desktopMode = true;
   } catch { /* ignore */ }
   if (desktopMode || (typeof window !== "undefined" && window.bubblePod && window.bubblePod.isDesktop)) {
     desktopMode = true;
+    document.documentElement.classList.add("desktop-boot");
     applyDesktopModeUi();
     showStudioApp();
     await boot();
@@ -4956,7 +4966,8 @@ async function startApp() {
   }
   const ok = await checkSession();
   if (!ok) {
-    showLoginGate();
+    // Drop workspace document; server serves login-only HTML at /.
+    location.replace(withBase("/") + (hash || ""));
     return;
   }
   showStudioApp();
@@ -5283,7 +5294,8 @@ $("#logout-btn")?.addEventListener("click", async () => {
   setAuthToken("");
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   if (topicsTimer) { clearInterval(topicsTimer); topicsTimer = null; }
-  showLoginGate();
+  // Full navigation so the workspace shell is not left in the DOM.
+  location.replace(withBase("/"));
 });
 
 $("#jobs-search")?.addEventListener("input", (e) => {

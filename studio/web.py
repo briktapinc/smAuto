@@ -724,7 +724,7 @@ def _pref_path(path: str) -> str:
     return prefix + path
 
 
-def _render_html(page: Path) -> HTMLResponse:
+def _render_html(page: Path, *, cache_control: str = "no-store") -> HTMLResponse:
     """Serve an HTML template, injecting window.__STUDIO_BASE__ and rewriting asset hrefs."""
     import json
 
@@ -747,7 +747,19 @@ def _render_html(page: Path) -> HTMLResponse:
             ('href="/#', f'href="{prefix}/#'),
         ):
             html = html.replace(old, new)
-    return HTMLResponse(html)
+    headers = {"Cache-Control": cache_control} if cache_control else None
+    return HTMLResponse(html, headers=headers)
+
+
+def _session_ok(request: Request) -> bool:
+    """True when the request carries a valid Studio session (cookie or Bearer)."""
+    if studio_auth.is_desktop_mode():
+        return True
+    try:
+        studio_auth.require_session(request)
+        return True
+    except HTTPException:
+        return False
 
 
 def _redir(path: str, status_code: int = 303) -> RedirectResponse:
@@ -948,7 +960,13 @@ def create_app() -> FastAPI:
         app.mount("/mcp", mcp_app)
 
     @app.get("/", response_class=HTMLResponse)
-    def home():
+    def home(request: Request):
+        # SaaS: never ship the workspace shell to logged-out browsers.
+        if not studio_auth.is_desktop_mode() and not _session_ok(request):
+            login = TEMPLATES_DIR / "login.html"
+            if login.is_file():
+                return _render_html(login)
+            raise HTTPException(status_code=401, detail="Sign in required")
         index = TEMPLATES_DIR / "index.html"
         return _render_html(index)
 
@@ -1117,10 +1135,15 @@ def create_app() -> FastAPI:
         return {"ok": True, "desktop_mode": studio_auth.is_desktop_mode()}
 
     @app.get("/api/auth/me")
-    def auth_me(request: Request):
+    def auth_me(request: Request, response: Response):
         from studio.members import public_session
 
         user = studio_auth.require_session(request)
+        # Re-assert HttpOnly cookie so HTML / can see Bearer-only sessions.
+        if not studio_auth.is_desktop_mode():
+            token = studio_auth.extract_token(request)
+            if token:
+                studio_auth.set_auth_cookie(response, token, studio_auth.TOKEN_TTL_SEC)
         out = public_session(user)
         out["desktop_mode"] = studio_auth.is_desktop_mode()
         out["auth_required"] = not studio_auth.is_desktop_mode()
