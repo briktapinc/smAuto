@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from studio.paths import USER_DATA, ensure_dirs
+from studio.paths import REPO_ROOT, USER_DATA, ensure_dirs, load_repo_dotenv
 from studio.settings import load_settings, save_settings
 
 DEFAULT_PUBLIC_URL = ""
@@ -35,6 +35,7 @@ _output: deque[str] = deque(maxlen=80)
 _last_error: str = ""
 _started_at: float | None = None
 _last_revealed_password: str | None = None
+_authtoken_applied: bool = False
 
 COMMON_WIN_PATHS = (
     Path(os.environ.get("LOCALAPPDATA", "")) / "ngrok" / "ngrok.exe",
@@ -42,6 +43,16 @@ COMMON_WIN_PATHS = (
     Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")) / "ngrok" / "ngrok.exe",
     Path.home() / "ngrok" / "ngrok.exe",
     Path(r"C:\ngrok\ngrok.exe"),
+)
+
+COMMON_UNIX_PATHS = (
+    Path("/usr/local/bin/ngrok"),
+    Path("/usr/bin/ngrok"),
+    Path("/snap/bin/ngrok"),
+    Path.home() / ".local" / "bin" / "ngrok",
+    Path.home() / "ngrok" / "ngrok",
+    REPO_ROOT / "desktop" / "bin" / "ngrok",
+    REPO_ROOT / "bin" / "ngrok",
 )
 
 
@@ -223,16 +234,85 @@ def build_command_line(local_port: int, public_url: str, *, basic_auth: bool = T
 
 
 def find_ngrok() -> str | None:
+    """Locate the ngrok agent binary (PATH, NGROK_PATH/NGROK_BIN, common install dirs)."""
+    load_repo_dotenv()
+    for key in ("NGROK_PATH", "NGROK_BIN"):
+        raw = (os.environ.get(key) or "").strip()
+        if raw:
+            path = Path(raw).expanduser()
+            if path.is_file():
+                return str(path.resolve())
     which = shutil.which("ngrok")
     if which:
         path = Path(which)
         if path.is_file():
             return str(path)
-    if os.name == "nt":
-        for candidate in COMMON_WIN_PATHS:
+    candidates = COMMON_WIN_PATHS if os.name == "nt" else COMMON_UNIX_PATHS
+    for candidate in candidates:
+        try:
             if candidate.is_file():
-                return str(candidate)
+                return str(candidate.resolve())
+        except OSError:
+            continue
     return None
+
+
+def ngrok_authtoken() -> str:
+    """Agent authtoken from env (never invent one). Empty means user must configure ngrok."""
+    load_repo_dotenv()
+    return (os.environ.get("NGROK_AUTHTOKEN") or os.environ.get("NGROK_TOKEN") or "").strip()
+
+
+def ensure_ngrok_authtoken(exe: str | None = None) -> dict[str, Any]:
+    """If NGROK_AUTHTOKEN is set, write it into the local ngrok agent config once.
+
+    Returns ok=True when a token is configured (env applied or already present in config),
+    or ok=False with a clear message when missing — does not invent a token.
+    """
+    global _authtoken_applied
+    token = ngrok_authtoken()
+    binary = exe or find_ngrok()
+    if not binary:
+        return {
+            "ok": False,
+            "configured": False,
+            "detail": "ngrok binary not found.",
+        }
+    if not token:
+        return {
+            "ok": False,
+            "configured": False,
+            "detail": (
+                "ngrok authtoken not set. Add NGROK_AUTHTOKEN to .env "
+                "(from https://dashboard.ngrok.com/get-started/your-authtoken) "
+                "or run: ngrok config add-authtoken YOUR_TOKEN"
+            ),
+        }
+    if _authtoken_applied:
+        return {"ok": True, "configured": True, "detail": "NGROK_AUTHTOKEN already applied."}
+    try:
+        result = subprocess.run(
+            [binary, "config", "add-authtoken", token],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            **_popen_kwargs(),
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "configured": False,
+            "detail": f"Failed to apply NGROK_AUTHTOKEN: {exc}",
+        }
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
+        return {
+            "ok": False,
+            "configured": False,
+            "detail": f"ngrok config add-authtoken failed: {err}",
+        }
+    _authtoken_applied = True
+    return {"ok": True, "configured": True, "detail": "NGROK_AUTHTOKEN applied to ngrok agent config."}
 
 
 def _pid_alive(pid: int) -> bool:
@@ -446,9 +526,19 @@ def start_ngrok(*, wait: float = 2.5) -> dict[str, Any]:
             status["ok"] = False
             status["error"] = (
                 "ngrok was not found on PATH or in common install folders. "
-                "Install from https://ngrok.com/download and ensure `ngrok` works in a terminal."
+                "Install from https://ngrok.com/download and ensure `ngrok` works in a terminal, "
+                "or set NGROK_PATH to the binary."
             )
             status["detail"] = status["error"]
+            return status
+
+        token_state = ensure_ngrok_authtoken(exe)
+        if not token_state.get("configured"):
+            status = ngrok_status()
+            status["ok"] = False
+            status["error"] = token_state.get("detail") or "ngrok authtoken missing."
+            status["detail"] = status["error"]
+            status["authtoken_configured"] = False
             return status
 
         if _owned_running():
@@ -478,6 +568,10 @@ def start_ngrok(*, wait: float = 2.5) -> dict[str, Any]:
             "--traffic-policy-file",
             str(policy),
         ]
+        child_env = os.environ.copy()
+        token = ngrok_authtoken()
+        if token:
+            child_env["NGROK_AUTHTOKEN"] = token
         try:
             _proc = subprocess.Popen(
                 args,
@@ -489,6 +583,7 @@ def start_ngrok(*, wait: float = 2.5) -> dict[str, Any]:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                env=child_env,
                 **_popen_kwargs(),
             )
         except Exception as exc:
@@ -596,8 +691,21 @@ def ngrok_status(*, reveal_password: bool = False) -> dict[str, Any]:
     error = _last_error or None
     username = cfg["ngrok_basic_auth_user"]
     password = str(settings.get("ngrok_basic_auth_password") or "")
+    token_set = bool(ngrok_authtoken())
+    # Detect existing agent config without reading the secret value.
+    ngrok_config = Path.home() / ".config" / "ngrok" / "ngrok.yml"
+    if not ngrok_config.is_file():
+        ngrok_config = Path.home() / ".ngrok2" / "ngrok.yml"
+    config_present = ngrok_config.is_file()
+    authtoken_configured = token_set or config_present
     if not exe:
         detail = "ngrok binary not found."
+        ok = False
+    elif not authtoken_configured:
+        detail = (
+            "ngrok binary found, but authtoken is missing. "
+            "Set NGROK_AUTHTOKEN in .env or run: ngrok config add-authtoken YOUR_TOKEN"
+        )
         ok = False
     elif running:
         detail = (
@@ -618,6 +726,8 @@ def ngrok_status(*, reveal_password: bool = False) -> dict[str, Any]:
         "pid": pid,
         "ngrok_found": bool(exe),
         "ngrok_path": exe,
+        "authtoken_configured": authtoken_configured,
+        "authtoken_env_set": token_set,
         "public_url": cfg["public_url"],
         "mcp_url": cfg["mcp_url"],
         "local_port": cfg["local_port"],

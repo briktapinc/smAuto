@@ -2510,7 +2510,9 @@ function fillMcpSettings(data) {
   if (publicInput) {
     const pub = data.public_mcp_url || data.public_url || (data.ngrok && data.ngrok.running ? data.ngrok.mcp_url : "");
     publicInput.value = pub || "";
-    publicInput.placeholder = pub ? "" : "Start ngrok on the Ngrok card to expose /mcp";
+    publicInput.placeholder = pub
+      ? ""
+      : "Set PUBLIC_BASE_URL or start ngrok to expose /mcp";
   }
   if (data.ngrok) applyNgrokStatus(data.ngrok);
   const stdioInput = $("#mcp-stdio-line");

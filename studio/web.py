@@ -243,6 +243,7 @@ class SettingsBody(BaseModel):
     youtube_client_secret: str | None = None
     youtube_channel_id: str | None = None
     youtube_auto_upload: bool | None = None
+    youtube_delete_file_after_upload: bool | None = None
     youtube_privacy: str | None = None
     auto_scheduler: bool | None = None
     hands_off: bool | None = None
@@ -1313,6 +1314,8 @@ def create_app() -> FastAPI:
         port = normalize_listen_port(settings.get("port"), DEFAULT_LISTEN_PORT)
         local = local_base_url(settings)
         public = resolve_public_base_url(settings)
+        mcp_path = "/mcp" if mcp_app is not None else None
+        mcp_url = f"{public.rstrip('/')}{mcp_path}" if mcp_path and public else mcp_path
         out = {
             "ok": True,
             "host": host,
@@ -1322,7 +1325,9 @@ def create_app() -> FastAPI:
             "public_base_url": public,
             "app_env": app_env(),
             "gentle": gentle_status(),
-            "mcp": "/mcp" if mcp_app is not None else None,
+            "mcp": mcp_path,
+            "mcp_url": mcp_url,
+            "public_mcp_url": mcp_url,
             "mcp_build": mcp_build,
             "auto_scheduler": normalize_auto_scheduler(settings.get("auto_scheduler", True)),
             "hands_off": normalize_hands_off(settings.get("hands_off")),
@@ -1542,6 +1547,8 @@ def create_app() -> FastAPI:
             updates["music_volume_pct"] = body.music_volume_pct
         if body.youtube_auto_upload is not None:
             updates["youtube_auto_upload"] = body.youtube_auto_upload
+        if body.youtube_delete_file_after_upload is not None:
+            updates["youtube_delete_file_after_upload"] = body.youtube_delete_file_after_upload
         if body.auto_scheduler is not None:
             updates["auto_scheduler"] = body.auto_scheduler
         if body.hands_off is not None:

@@ -95,7 +95,11 @@ Studio room images (clock, wall, floor behind the stick figure) come from `backg
 
 **Remote HTTP (ChatGPT URL connectors, Muse, other agents over the internet):**
 
-1. Install [ngrok](https://ngrok.com/download) and run `ngrok config add-authtoken YOUR_TOKEN` once ([get a token](https://dashboard.ngrok.com/get-started/your-authtoken)). If Start fails with `ERR_NGROK_107`, the token was revoked — add a fresh one.
+**Production (this VPS):** MCP is already public at `https://stickmanautomation.com/mcp` via `PUBLIC_BASE_URL` — no ngrok required. Authenticate with MCP PIN, Studio JWT, or (optional) ngrok Basic if you also run a tunnel.
+
+**Optional ngrok tunnel (local or reserved subdomain):**
+
+1. Install [ngrok](https://ngrok.com/download) (or set `NGROK_PATH`). Set `NGROK_AUTHTOKEN` in `.env` or run `ngrok config add-authtoken YOUR_TOKEN` once ([get a token](https://dashboard.ngrok.com/get-started/your-authtoken)). If Start fails with `ERR_NGROK_107`, the token was revoked — add a fresh one.
 2. In Studio **Settings → Ngrok**: set your reserved public URL, click **Start ngrok**, copy the **Basic auth** username/password (and the Public MCP URL).
 3. Point the client at `https://YOUR-SUBDOMAIN.ngrok-free.dev/mcp` with **HTTP Basic only** (that username + password). Do **not** also send `Authorization: Bearer` — many HTTP clients drop Basic when both headers are set.
 4. Optional: use `?mcp_pin=YOUR_PIN` or a Studio login JWT instead of / in addition to Basic.

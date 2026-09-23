@@ -373,13 +373,20 @@ def studio_health_payload() -> dict:
     """Same shape as GET /api/health (no HTTP round-trip)."""
     from studio.gpu_lock import gpu_lock_public
     from studio.paths import asset_warnings
+    from studio.settings import resolve_public_base_url
     from studio.topics import SCHEDULER_INTERVAL_SEC
 
     pub = public_settings()
+    public = resolve_public_base_url().rstrip("/")
+    mcp_path = "/mcp"
+    mcp_url = f"{public}{mcp_path}" if public else mcp_path
     return {
         "ok": True,
         "gentle": gentle_status(),
-        "mcp": "/mcp",
+        "mcp": mcp_path,
+        "mcp_url": mcp_url,
+        "public_mcp_url": mcp_url,
+        "public_base_url": public,
         "mcp_build": MCP_BUILD,
         "auto_scheduler": pub.get("auto_scheduler", True),
         "hands_off": pub.get("hands_off", False),

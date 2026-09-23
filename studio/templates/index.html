@@ -843,17 +843,17 @@
               <div class="field-group">
                 <label>HTTP endpoint (ChatGPT Desktop)
                   <div class="row mcp-copy-row">
-                    <input id="mcp-http-url" type="text" readonly value="http://127.0.0.1:7878/mcp" />
+                    <input id="mcp-http-url" type="text" readonly value="" placeholder="Resolving…" />
                     <button type="button" id="mcp-copy-http">Copy</button>
                   </div>
                 </label>
-                <label>Public MCP URL (ngrok)
+                <label>Public MCP URL
                   <div class="row mcp-copy-row">
-                    <input id="mcp-public-url" type="text" readonly value="" placeholder="Start ngrok to expose /mcp" />
+                    <input id="mcp-public-url" type="text" readonly value="" placeholder="PUBLIC_BASE_URL/mcp or ngrok when running" />
                     <button type="button" id="mcp-copy-public">Copy</button>
                   </div>
                 </label>
-                <p class="hint" id="mcp-chatgpt-hint">Remote HTTP clients need the <strong>Public MCP URL</strong> (ngrok must be running). Local LAN: use the HTTP endpoint above. After a Studio update: fully quit ChatGPT, reopen, type <code>/mcp</code>, start a new thread.</p>
+                <p class="hint" id="mcp-chatgpt-hint">Remote HTTP clients use the <strong>Public MCP URL</strong> (production domain via PUBLIC_BASE_URL, or ngrok when running). Local LAN: loopback HTTP endpoint. After a Studio update: fully quit ChatGPT, reopen, type <code>/mcp</code>, start a new thread.</p>
               </div>
               <div class="field-group">
                 <label>Stdio command (Claude / Codex)
@@ -1053,6 +1053,10 @@
                 <input type="checkbox" id="yt-auto" name="youtube_auto_upload" form="settings-form" />
                 Auto-upload when video completes
               </label>
+              <label class="check">
+                <input type="checkbox" id="yt-delete-after" name="youtube_delete_file_after_upload" form="settings-form" checked />
+                When video is uploaded delete file from server to save space
+              </label>
               <label>Default privacy
                 <select id="yt-privacy" name="youtube_privacy" form="settings-form">
                   <option value="private">private</option>
@@ -1060,7 +1064,7 @@
                   <option value="public">public</option>
                 </select>
               </label>
-              <p class="hint">Auto-upload default is unlisted. Per-job override lives on the Video step. If the browser does not return to Studio, paste the redirect URL or code below.</p>
+              <p class="hint">Auto-upload default is unlisted. Per-job override lives on the Video step. Checked delete-after-upload removes the local mp4 after a successful YouTube upload. If the browser does not return to Studio, paste the redirect URL or code below.</p>
               <div class="row settings-row">
                 <label class="grow">Paste redirect URL or code
                   <input id="yt-code" type="text" placeholder="http://127.0.0.1:7878/api/youtube/oauth/callback?code=…" autocomplete="off" />
