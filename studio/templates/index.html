@@ -413,11 +413,12 @@
                 <option value="flux" selected>Flux (fal-ai/flux-2)</option>
                 <option value="chatgpt">ChatGPT (native in-chat)</option>
                 <option value="comfyui">ComfyUI (local API)</option>
+                <option value="external">External (MCP / agent upload)</option>
               </select>
             </label>
             <button id="gen-flux" class="primary">Generate backgrounds with Flux</button>
           </div>
-          <p id="pictures-help">Flux (default) queues a server job that fills missing line backgrounds via fal-ai/flux-2 (Flux Dev 2). ChatGPT means generate in the built-in image tool, then upload or MCP-save. ComfyUI posts your uploaded API JSON to a local ComfyUI server. Never DALL-E / OpenAI Images API.</p>
+          <p id="pictures-help">Flux (default) queues a server job that fills missing line backgrounds via fal-ai/flux-2 (Flux Dev 2). ChatGPT / External means generate in MCP or the built-in image tool, then upload or MCP-save. ComfyUI posts your uploaded API JSON to a local ComfyUI server. Never DALL-E / OpenAI Images API.</p>
           <p id="pictures-live" class="meta" hidden></p>
           <p class="hint">Every render starts with a generated 5-second title card (full-bleed topic art, no narrator), then the lip-sync explainer. 16:9 jobs: 1920×1080 landscape. 9:16 jobs: 1080×1920 portrait. Cover layout is full-bleed for line art; billboard layout is a 16:9 TV screen (opaque art, thin dark bezel, no brown wood). Colors should change from line to line. Flux Dev 2 at ~2MP is about <strong>~4.6¢/image</strong>; a ~10-min video (~56 images) is about <strong>~$2.60</strong> (≈$15–16/day at 6 videos).</p>
           <div id="picture-list" class="pictures"></div>
@@ -701,12 +702,14 @@
                     <option value="flux" selected>Flux (fal-ai/flux-2)</option>
                     <option value="chatgpt">ChatGPT (native in-chat)</option>
                     <option value="comfyui">ComfyUI (local API)</option>
+                    <option value="external">External (MCP / agent upload)</option>
                   </select>
                 </label>
                 <label>Cover provider override
                   <select name="cover_provider">
                     <option value="" selected>Same as image provider</option>
                     <option value="manual">Manual / agent upload only</option>
+                    <option value="external">External (MCP / agent upload)</option>
                     <option value="chatgpt">ChatGPT (native / agent upload)</option>
                     <option value="comfyui">ComfyUI (local)</option>
                     <option value="flux">Flux (fal)</option>

@@ -93,7 +93,7 @@ class UnsupervisedImageGateTests(unittest.TestCase):
         # Must not mutate chatgpt → flux when slots are already filled.
         self.assertEqual(project_image_provider(pid), "chatgpt")
 
-    def test_prepare_unsupervised_raises_when_missing(self) -> None:
+    def test_prepare_unsupervised_notes_when_chatgpt_missing(self) -> None:
         from studio.topics import _prepare_unsupervised_job
 
         pid = self._new_project()
@@ -101,13 +101,31 @@ class UnsupervisedImageGateTests(unittest.TestCase):
             mock.patch("studio.settings.load_settings", return_value={"fal_key": ""}),
             mock.patch("studio.topics.hands_off_enabled", return_value=False),
             mock.patch("studio.topics._script_ready", return_value=True),
-            mock.patch("studio.settings.is_native_text_provider", return_value=False),
+            mock.patch("studio.settings.is_native_text_provider", return_value=True),
+            mock.patch("studio.settings.is_api_text_provider", return_value=False),
         ):
-            with self.assertRaises(RuntimeError) as ctx:
-                _prepare_unsupervised_job(pid)
-        err = str(ctx.exception)
-        self.assertIn("cannot generate pictures unsupervised", err)
-        self.assertIn("chatgpt", err)
+            notes = _prepare_unsupervised_job(pid)
+        self.assertTrue(
+            any("save_illustration_image" in n and "chatgpt" in n for n in notes),
+            notes,
+        )
+        from studio.projects import project_image_provider
+
+        self.assertEqual(project_image_provider(pid), "chatgpt")
+
+    def test_prepare_external_notes_when_missing(self) -> None:
+        from studio.topics import _prepare_unsupervised_job
+
+        pid = self._new_project()
+        self._set_image_provider(pid, "external")
+        with (
+            mock.patch("studio.settings.load_settings", return_value={"fal_key": ""}),
+            mock.patch("studio.topics.hands_off_enabled", return_value=False),
+            mock.patch("studio.topics._script_ready", return_value=True),
+            mock.patch("studio.settings.is_native_text_provider", return_value=True),
+        ):
+            notes = _prepare_unsupervised_job(pid)
+        self.assertTrue(any("image_provider is external" in n for n in notes), notes)
 
     def test_repro_project_inventory_matches_list_jobs(self) -> None:
         """Live inventory sanity for the reported filled project (skip if absent)."""

@@ -812,23 +812,26 @@ def _run_resume(project_id: str) -> None:
     _check_stop(project_id)
     arts = inspect_artifacts(project_id)
     provider = project_image_provider(project_id)
-    if provider == "chatgpt":
+    if provider in ("chatgpt", "external"):
         skip_msg = unsupervised_image_provider_gate_skip_message(project_id)
         if skip_msg:
             _log.info("skip_decision=provider_gate_skip project_id=%s detail=%s", project_id, skip_msg)
             print(skip_msg)
-        else:
+        elif provider == "chatgpt":
             from studio.projects import set_image_provider
-            from studio.settings import load_settings
+            from studio.settings import is_api_text_provider, load_settings
 
-            if (load_settings().get("fal_key") or "").strip():
+            if (load_settings().get("fal_key") or "").strip() and is_api_text_provider():
                 set_image_provider(project_id, "flux")
                 provider = "flux"
             else:
-                raise RuntimeError(
-                    "image_provider is chatgpt, which cannot generate pictures unsupervised. "
-                    "Set image_provider to flux (fal_key) or comfyui."
-                )
+                from studio.illustrations import require_external_images
+
+                require_external_images(project_id, provider="chatgpt")
+        else:
+            from studio.illustrations import require_external_images
+
+            require_external_images(project_id, provider="external")
     need_images = (not arts["cover"]) or (is_studio_image_provider(provider) and not arts["illustrations"])
     need_audio = not arts["audio"]
     need_video = not arts["video"]
@@ -1698,11 +1701,16 @@ def start_audio_job(project_id: str, provider: str | None = None, voice_id: str 
 
 
 def start_illustrations_job(project_id: str) -> dict:
-    from studio.illustrations import CHATGPT_COVER_HELP
+    from studio.illustrations import CHATGPT_COVER_HELP, require_external_images
     from studio.comfyui import ensure_comfyui_ready
 
     provider = project_image_provider(project_id)
-    if provider == "chatgpt":
+    if provider in ("chatgpt", "external"):
+        if provider == "external":
+            require_external_images(project_id)
+            st = job_status(project_id)
+            st["detail"] = "External pictures already on disk."
+            return st
         raise RuntimeError(
             "This job's image_provider is chatgpt (Settings, or a per-job override). "
             "Generate the 5-second title-card cover first with ChatGPT's built-in image tool "
@@ -1711,6 +1719,7 @@ def start_illustrations_job(project_id: str) -> dict:
             "width/height (billboard TV doodles stay 1920x1080 even on 9:16 video), "
             "and call save_illustration_image. Do not call generate_illustrations_with_flux "
             "or generate_cover — those are Flux/fal and ChatGPT jobs do not need FAL_KEY. "
+            "Or set image_provider=external after uploading. "
             + CHATGPT_COVER_HELP
         )
     illustration_jobs(project_id)

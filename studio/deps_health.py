@@ -239,10 +239,15 @@ def image_provider_status(settings: dict | None = None) -> dict[str, Any]:
         elif not comfy_url:
             error = "image_provider is comfyui but comfyui_url is empty."
             fix = "Set comfyui_url in Settings to your ComfyUI server."
-    elif provider == "chatgpt":
+    elif provider in ("chatgpt", "external"):
         ready = True
         error = ""
-        fix = ""
+        fix = (
+            "Upload cover + line art with save_illustration_image "
+            "(missing slots → EXTERNAL_IMAGES_MISSING)."
+            if provider == "external"
+            else ""
+        )
 
     return {
         "ok": ready,

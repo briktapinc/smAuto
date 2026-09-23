@@ -93,7 +93,7 @@ from studio.tts import list_voices
 from studio.utils_script import parse_tagged_script, raw_from_tagged, script_structure_warnings, validate_tagged_script
 from studio import youtube as yt
 
-MCP_BUILD = "2026-09-23-saas-phase5"
+MCP_BUILD = "2026-09-23-external-images"
 
 # Keep in sync with every @mcp.tool in build_mcp (stdio and FastMCP HTTP /mcp).
 MCP_TOOL_NAMES = (
@@ -730,7 +730,7 @@ def build_mcp() -> "FastMCP":
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def get_studio_settings() -> dict:
-        """Live Studio settings: text_provider/script_provider (openai billed API, chatgpt MCP, claude MCP, lmstudio local), lmstudio_base_url, lmstudio_model, image_provider (flux|chatgpt|comfyui), comfyui_url, comfyui_workflow_loaded, video_layout, character_size (large/medium/small), default_aspect, music_volume_pct, tts_provider (openai|elevenlabs|local/resemble Chatterbox), local_tts status, fal_key_set (optional; flux only), voices, prompt keys, YouTube auto_upload/privacy/connected, auto_scheduler (default on), hands_off / hands_off_interval_hours / hands_off_min_queue, gpu_lock {busy, holder, waiters}, mcp_build, mcp_tools. Prefer set_hands_off / restart_api for walk-away and recycling 7878."""
+        """Live Studio settings: text_provider/script_provider (openai billed API, chatgpt MCP, claude MCP, lmstudio local), lmstudio_base_url, lmstudio_model, image_provider (flux|chatgpt|comfyui|external), comfyui_url, comfyui_workflow_loaded, video_layout, character_size (large/medium/small), default_aspect, music_volume_pct, tts_provider (openai|elevenlabs|local/resemble Chatterbox|external), local_tts status, fal_key_set (optional; flux only), voices, prompt keys, YouTube auto_upload/privacy/connected, auto_scheduler (default on), hands_off / hands_off_interval_hours / hands_off_min_queue, gpu_lock {busy, holder, waiters}, mcp_build, mcp_tools. Prefer set_hands_off / restart_api for walk-away and recycling 7878."""
         return studio_settings_payload()
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -1030,7 +1030,7 @@ def build_mcp() -> "FastMCP":
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def hands_off() -> dict:
-        """Unsupervised readiness + one-shot recipe. Checks hands_off, text_provider (openai/lmstudio walk-away; chatgpt/claude skip auto-gen), image_provider (flux/comfyui; chatgpt cannot run headless), tts, auto_scheduler, YouTube connect/auto-upload, and next due topic. Playbook: set_hands_off(true) then walk away. Does not start a job."""
+        """Unsupervised readiness + one-shot recipe. Checks hands_off, text_provider (openai/lmstudio walk-away; chatgpt/claude skip auto-gen), image_provider (flux/comfyui/external MCP uploads; chatgpt MCP uploads or fal fallback), tts, auto_scheduler, YouTube connect/auto-upload, and next due topic. Playbook: set_hands_off(true) then walk away. Does not start a job."""
         return hands_off_status()
 
     @mcp.tool
@@ -1242,7 +1242,7 @@ def build_mcp() -> "FastMCP":
 
     @mcp.tool
     def set_image_provider(provider: str, project_id: str = "") -> dict:
-        """Set image provider to 'flux' (fal-ai/flux-2), 'chatgpt' (native), or 'comfyui' (local). If project_id is set, store the override in that job's meta.json; otherwise update the studio default. While a Pictures/illustrations (or cover) job is generating, changing the provider cancels the in-flight image, keeps completed PNGs, and restarts the current + remaining unfinished slots with the new generator (GPU lock released so the new backend can run)."""
+        """Set image provider to 'flux' (fal-ai/flux-2), 'chatgpt' (native MCP upload), 'comfyui' (local), or 'external' (MCP/agent upload only — like tts_provider=external). If project_id is set, store the override in that job's meta.json; otherwise update the studio default. External/chatgpt: generate pictures yourself then save_illustration_image; missing slots fail with EXTERNAL_IMAGES_MISSING. While a Pictures/illustrations (or cover) job is generating, changing the provider cancels the in-flight image, keeps completed PNGs, and restarts unfinished slots with the new generator."""
         if project_id:
             return write_project_image_provider(project_id, provider)
         from studio.settings import normalize_image_provider

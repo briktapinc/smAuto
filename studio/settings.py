@@ -63,22 +63,25 @@ def scrub_secret_updates(updates: dict[str, Any]) -> dict[str, Any]:
         out[key] = value
     return out
 
-IMAGE_PROVIDERS = ("flux", "chatgpt", "comfyui")
+IMAGE_PROVIDERS = ("flux", "chatgpt", "comfyui", "external")
 IMAGE_PROVIDER_LABELS = {
     "flux": "Flux (fal-ai/flux-2)",
     "chatgpt": "ChatGPT (native in-chat)",
     "comfyui": "ComfyUI (local API)",
+    "external": "External (MCP / agent upload)",
 }
-COVER_PROVIDERS = ("", "flux", "chatgpt", "comfyui", "manual")
+COVER_PROVIDERS = ("", "flux", "chatgpt", "comfyui", "manual", "external")
 COVER_PROVIDER_LABELS = {
     "": "Same as image_provider",
     "flux": "Flux (fal)",
     "chatgpt": "ChatGPT (native / agent upload)",
     "comfyui": "ComfyUI (local)",
     "manual": "Manual / agent upload only",
+    "external": "External (MCP / agent upload)",
 }
 COMFYUI_DEFAULT_URL = "http://127.0.0.1:8188"
 STUDIO_IMAGE_PROVIDERS = frozenset({"flux", "comfyui"})
+AGENT_IMAGE_PROVIDERS = frozenset({"chatgpt", "external", "manual"})
 TEXT_PROVIDERS = ("openai", "chatgpt", "claude", "lmstudio")
 TEXT_PROVIDER_LABELS = {
     "openai": "OpenAI",
@@ -301,6 +304,22 @@ def normalize_image_provider(value: str | None, default: str = "flux") -> str:
     if raw in ("chatgpt", "openai", "native", "chat") or compact in ("chatgpt", "openai", "native", "chat"):
         return "chatgpt"
     if raw in (
+        "external",
+        "agent",
+        "upload",
+        "mcp",
+        "manual",
+    ) or compact in (
+        "external",
+        "agent",
+        "upload",
+        "mcp",
+        "manual",
+        "agentupload",
+        "mcpupload",
+    ):
+        return "external"
+    if raw in (
         "flux",
         "fal",
         "flux-2",
@@ -325,7 +344,9 @@ def normalize_image_provider(value: str | None, default: str = "flux") -> str:
         return "comfyui"
     if not raw:
         return default if default in IMAGE_PROVIDERS else "flux"
-    raise RuntimeError(f"Unknown image provider: {value}. Use 'flux', 'chatgpt', or 'comfyui'.")
+    raise RuntimeError(
+        f"Unknown image provider: {value}. Use 'flux', 'chatgpt', 'comfyui', or 'external'."
+    )
 
 
 def normalize_cover_provider(value: str | None, default: str = "") -> str:
@@ -335,6 +356,8 @@ def normalize_cover_provider(value: str | None, default: str = "") -> str:
         return ""
     if raw in ("manual", "agent", "upload", "none"):
         return "manual"
+    if raw in ("external", "mcp"):
+        return "external"
     if raw in ("chatgpt", "openai", "native", "chat"):
         return "chatgpt"
     if raw in ("comfyui", "comfy"):
@@ -342,7 +365,7 @@ def normalize_cover_provider(value: str | None, default: str = "") -> str:
     if raw in ("flux", "fal", "flux2", "flux_2"):
         return "flux"
     raise RuntimeError(
-        f"Unknown cover_provider: {value}. Use '', 'manual', 'chatgpt', 'comfyui', or 'flux'."
+        f"Unknown cover_provider: {value}. Use '', 'manual', 'external', 'chatgpt', 'comfyui', or 'flux'."
     )
 
 
@@ -374,7 +397,7 @@ def normalize_comfyui_url(value: str | None, default: str = COMFYUI_DEFAULT_URL)
 
 
 def is_studio_image_provider(value: str | None = None) -> bool:
-    """True when Studio generates PNGs itself (Flux or ComfyUI), not ChatGPT native."""
+    """True when Studio generates PNGs itself (Flux or ComfyUI), not agent/MCP upload."""
     try:
         provider = normalize_image_provider(value) if value not in (None, "") else normalize_image_provider(
             load_settings().get("image_provider")
@@ -382,6 +405,17 @@ def is_studio_image_provider(value: str | None = None) -> bool:
     except RuntimeError:
         return False
     return provider in STUDIO_IMAGE_PROVIDERS
+
+
+def is_agent_image_provider(value: str | None = None) -> bool:
+    """True when pictures come from MCP/ChatGPT/agent upload (not Flux/ComfyUI)."""
+    try:
+        provider = normalize_image_provider(value) if value not in (None, "") else normalize_image_provider(
+            load_settings().get("image_provider")
+        )
+    except RuntimeError:
+        return False
+    return provider in AGENT_IMAGE_PROVIDERS or provider == "external"
 
 
 def uses_short_image_prompt(value: str | None = None) -> bool:

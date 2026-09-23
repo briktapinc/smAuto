@@ -1215,6 +1215,8 @@ function updatePicturesHelp() {
     : "Cover layout fills the whole frame at the job size (16:9 → 1920×1080, 9:16 → 1080×1920). Not square or 4:5.";
   if (provider === "chatgpt") {
     help.innerHTML = `This job uses <strong>ChatGPT native</strong> images. Generate the <strong>5s title card</strong> first (studio room + Bubblehead + TV with topic title on screen) at the video size, then each line. ${shape} Upload here or MCP-save with <code>kind=cover</code> for the intro. <strong>Regenerate cover</strong> keeps prior versions in history — pick one with <strong>Use this</strong>.`;
+  } else if (provider === "external") {
+    help.innerHTML = `This job uses <strong>External</strong> pictures (MCP / agent upload — same idea as external TTS). Generate cover + line art outside Studio, then upload here or call <code>save_illustration_image</code> / <code>save_illustration_images</code> for every slot. Studio will not call Flux or ComfyUI. Missing slots fail with <code>EXTERNAL_IMAGES_MISSING</code>. ${shape}`;
   } else if (provider === "comfyui") {
     help.innerHTML = `This job uses <strong>ComfyUI</strong>. Click <strong>Generate backgrounds with ComfyUI</strong> to POST the uploaded API JSON to your local ComfyUI at the job size (${size}), or <strong>Regenerate</strong> / <strong>Regenerate cover</strong> next to one picture. Cover history keeps prior title cards. Safe to refresh. ${shape}`;
   } else {
@@ -1228,8 +1230,9 @@ function updateGenerateButton() {
   if (!btn) return;
   const p = current?.image_provider || lastSettings.image_provider || "flux";
   if (p === "comfyui") btn.textContent = "Generate backgrounds with ComfyUI";
-  else if (p === "chatgpt") btn.textContent = "Generate backgrounds";
+  else if (p === "chatgpt" || p === "external") btn.textContent = "Upload / MCP save pictures";
   else btn.textContent = "Generate backgrounds with Flux";
+  btn.disabled = !!membershipLocked || p === "external";
 }
 
 function stepForJobKind(kind) {
@@ -2391,7 +2394,13 @@ $("#image-provider")?.addEventListener("change", async (e) => {
   if (!current) return;
   const next = e.target.value;
   const wasGenerating = illustrationWorkRunning();
-  const label = next === "comfyui" ? "ComfyUI" : next === "chatgpt" ? "ChatGPT" : "Flux";
+  const label = next === "comfyui"
+    ? "ComfyUI"
+    : next === "chatgpt"
+      ? "ChatGPT"
+      : next === "external"
+        ? "External"
+        : "Flux";
   try {
     if (wasGenerating) {
       setBusy(true, `Switching to ${label}… canceling current image`);
@@ -2412,7 +2421,9 @@ $("#image-provider")?.addEventListener("change", async (e) => {
         ? `This job will use Flux (${FLUX_MODEL_ID}).`
         : current.image_provider === "comfyui"
           ? "This job will use ComfyUI (uploaded API JSON)."
-          : "This job will use ChatGPT’s native image tool.");
+          : current.image_provider === "external"
+            ? "This job will use External pictures (MCP / agent upload)."
+            : "This job will use ChatGPT’s native image tool.");
     }
   } catch (err) {
     toast(err.message, true);
@@ -4709,7 +4720,10 @@ function handsOffWarnText(data) {
   const src = data || lastSettings || {};
   const bits = [];
   if ((src.image_provider || "") === "chatgpt") {
-    bits.push("ChatGPT images cannot run unsupervised. Switch to Flux or ComfyUI for hands-off.");
+    bits.push("ChatGPT images need MCP save_illustration_image (or image_provider=external). API text + fal_key may fall back to Flux.");
+  }
+  if ((src.image_provider || "") === "external") {
+    bits.push("External images: upload every slot with save_illustration_image before start/resume.");
   }
   const text = src.text_provider || src.script_provider || "";
   if (text === "chatgpt" || text === "claude") {

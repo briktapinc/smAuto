@@ -104,7 +104,8 @@ Playbook: set_hands_off(true) with headless providers (text openai/lmstudio, ima
 IMAGE_PROVIDER_REQUIREMENT = """
 IMAGE PROVIDER (get_image_provider / set_image_provider; settings image_provider):
 - flux: Studio generates via fal-ai/flux-2. Call generate_illustrations_with_flux. SHORT app prompts only (images.flux_instructions + art.*). Needs FAL_KEY.
-- chatgpt: YOU generate natively using jobs[].prompt from list_illustration_jobs (app art style — do not invent one), then save_illustration_image so Pictures sees the file. Do not call generate_illustrations_with_flux or fal. Cannot run unsupervised — schedule_topic fails unless fal_key exists (then the job falls back to flux).
+- chatgpt: YOU generate natively using jobs[].prompt from list_illustration_jobs (app art style — do not invent one), then save_illustration_image so Pictures sees the file. Do not call generate_illustrations_with_flux or fal. Unsupervised: upload every slot first (or set image_provider=external); with openai/lmstudio text + fal_key, empty slots may fall back to flux.
+- external: like tts_provider=external — Studio never generates art. Generate in MCP/ChatGPT then save_illustration_image / save_illustration_images for cover + every line. Missing slots → EXTERNAL_IMAGES_MISSING. Preferred for MCP-driven unsupervised runs.
 - comfyui: Studio generates via local ComfyUI (default http://127.0.0.1:8188). Upload a ComfyUI API Format JSON in Settings (Save (API Format) / /prompt graph) or save_comfyui_workflow. Call generate_illustrations — generate_illustrations_with_flux also dispatches here and does not fal. Studio POSTs that workflow to ComfyUI. Injects the short scene prompt (images.flux_instructions + art.*) into CLIPTextEncode / text widgets; sets EmptyLatentImage / ImageResize to 1920x1080 (16:9) or 1080x1920 (9:16). Billboard line art stays 1920x1080. Sequential GPU. Do NOT generate in chat. Do NOT fal. get_comfyui_status. If no JSON is uploaded, generation fails and Fal is not called.
 - Mid-run switch: while Pictures/illustrations (or cover) are generating, set_image_provider (or Pictures UI / Settings when it drives the job) cancels the in-flight image (fal cancel, ComfyUI /interrupt, ChatGPT wait cleared), keeps completed PNGs, and restarts the current + remaining unfinished slots with the new generator. GPU lock releases so the new backend can acquire.
 """.strip()
@@ -390,11 +391,13 @@ SETTINGS (get_studio_settings / update_studio_settings)
   themselves and must not call generate_script_via_api. If provider is lmstudio, Studio
   generates via the local LLM — ChatGPT/Claude should call generate_script_via_api rather
   than writing the body themselves. update_studio_settings(lmstudio_base_url, lmstudio_model).
-- image_provider: 'flux' (fal-ai/flux-2), 'chatgpt' (native in-chat images), or
-  'comfyui' (local ComfyUI). This is the Studio Settings default. A job can override
+- image_provider: 'flux' (fal-ai/flux-2), 'chatgpt' (native in-chat / MCP upload),
+  'comfyui' (local ComfyUI), or 'external' (MCP/agent upload only — like external TTS).
+  This is the Studio Settings default. A job can override
   it (get_image_provider / set_image_provider with project_id). NEVER assume Flux and
   NEVER always call fal. Cover + line illustrations MUST follow this setting.
-  comfyui = local ComfyUI at comfyui_url (default http://127.0.0.1:8188). Upload
+  external/chatgpt: YOU generate then save_illustration_image; missing slots →
+  EXTERNAL_IMAGES_MISSING. comfyui = local ComfyUI at comfyui_url (default http://127.0.0.1:8188). Upload
   File → Save (API Format) JSON in Settings (user_data/comfyui_workflow.json) or
   save_comfyui_workflow. Sizes: 16:9 → 1920x1080, 9:16 → 1080x1920 (never square).
   Billboard line art stays 1920x1080 even on 9:16 video. Cover always matches that

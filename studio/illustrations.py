@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
+from typing import Any
 
 import httpx
 from PIL import Image
@@ -1374,16 +1375,26 @@ def illustration_jobs(project_id: str) -> dict:
     }
 
 
-def illustration_slot_inventory(project_id: str) -> dict[str, int]:
+def illustration_slot_inventory(project_id: str) -> dict[str, Any]:
     """total/missing/filled from the same jobs list as list_illustration_jobs."""
     try:
         info = illustration_jobs(project_id)
     except Exception:
-        return {"total": 0, "missing": 0, "filled": 0}
+        return {"total": 0, "missing": 0, "filled": 0, "missing_names": []}
     jobs = info.get("jobs") or []
     total = len(jobs)
-    missing = sum(1 for job in jobs if not job.get("has_image"))
-    return {"total": total, "missing": int(missing), "filled": max(0, total - int(missing))}
+    missing_names = [
+        str(job.get("filename") or job.get("name") or job.get("id") or "?")
+        for job in jobs
+        if not job.get("has_image")
+    ]
+    missing = len(missing_names)
+    return {
+        "total": total,
+        "missing": int(missing),
+        "filled": max(0, total - int(missing)),
+        "missing_names": missing_names,
+    }
 
 
 def all_illustration_slots_filled(project_id: str) -> bool:
@@ -1396,7 +1407,7 @@ def unsupervised_image_provider_gate_skip_message(project_id: str) -> str | None
     """If every illustration slot is filled, return the skip log line; else None.
 
     Unsupervised entry points (start_job / resume_job / schedule / hands-off) use this
-    before requiring flux+fal or comfyui when image_provider is chatgpt.
+    before requiring flux+fal or comfyui when image_provider is chatgpt/external.
     """
     inv = illustration_slot_inventory(project_id)
     if inv["total"] > 0 and inv["missing"] == 0:
@@ -1404,6 +1415,35 @@ def unsupervised_image_provider_gate_skip_message(project_id: str) -> str | None
             f"image provider gate skipped: all {inv['total']} illustration slots already filled"
         )
     return None
+
+
+def require_external_images(project_id: str, *, provider: str = "external") -> dict[str, Any]:
+    """Ensure MCP/agent-uploaded cover + line art exist for chatgpt/external providers."""
+    from studio.job_errors import EXTERNAL_IMAGES_MISSING
+
+    label = (provider or "external").strip() or "external"
+    inv = illustration_slot_inventory(project_id)
+    if inv["total"] <= 0:
+        raise RuntimeError(
+            f"[{EXTERNAL_IMAGES_MISSING}] image_provider={label} but this job has no "
+            "illustration slots yet (save a tagged script first, then "
+            "save_illustration_image / save_illustration_images for cover + each line)."
+        )
+    if inv["missing"] > 0:
+        missing = ", ".join(str(x) for x in (inv.get("missing_names") or [])[:8])
+        extra = f" Missing: {missing}." if missing else ""
+        raise RuntimeError(
+            f"[{EXTERNAL_IMAGES_MISSING}] image_provider={label} but {inv['missing']} of "
+            f"{inv['total']} picture slots are empty.{extra} "
+            "Generate in MCP/ChatGPT then call save_illustration_image (or bulk "
+            "save_illustration_images). Studio will not call Flux/ComfyUI."
+        )
+    return {
+        "ok": True,
+        "total": inv["total"],
+        "missing": 0,
+        "provider": label,
+    }
 
 
 def _decode_image_bytes(image: str, image_url: str | None = None) -> bytes:
@@ -1925,14 +1965,15 @@ def ensure_fal_ready() -> None:
 
 
 def ensure_image_backend_ready(provider: str | None = None) -> str:
-    """Ping Flux or ComfyUI before queueing a Studio image job. Refuses ChatGPT native."""
+    """Ping Flux or ComfyUI before queueing a Studio image job. Refuses agent/MCP upload providers."""
     from studio.settings import normalize_image_provider
 
     provider = normalize_image_provider(provider or load_settings().get("image_provider"))
-    if provider == "chatgpt":
+    if provider in ("chatgpt", "external"):
         raise RuntimeError(
-            "This job's image_provider is chatgpt. Generate natively in ChatGPT's image tool "
-            "and call save_illustration_image. Do not call generate_illustrations_with_flux or fal."
+            f"This job's image_provider is {provider}. Generate natively / in MCP, then call "
+            "save_illustration_image (or save_illustration_images). Do not call "
+            "generate_illustrations_with_flux or fal."
         )
     if provider == "comfyui":
         from studio.comfyui import ensure_comfyui_ready

@@ -253,7 +253,7 @@ def _script_ready(job_id: str) -> bool:
 
 
 def _prepare_unsupervised_job(job_id: str) -> list[str]:
-    """Fail chatgpt pictures (or fall back to flux). Native text needs save_script first."""
+    """Gate image backends for walk-away runs. Native text needs save_script first."""
     from studio.comfyui import workflow_public_status
     from studio.illustrations import unsupervised_image_provider_gate_skip_message
     from studio.projects import project_image_provider, set_image_provider
@@ -267,22 +267,33 @@ def _prepare_unsupervised_job(job_id: str) -> list[str]:
     if skip_msg:
         _log.info(skip_msg)
         notes.append(skip_msg)
+    elif provider == "external":
+        notes.append(
+            "image_provider is external — Studio will not generate pictures. "
+            "Call save_illustration_image / save_illustration_images for every slot "
+            "(cover + lines), then start/resume. Missing slots fail with EXTERNAL_IMAGES_MISSING."
+        )
     elif provider == "chatgpt":
-        if fal_key:
+        from studio.settings import is_api_text_provider
+
+        # MCP/ChatGPT text: leave agent uploads alone. API text + fal_key: hands-off
+        # convenience fallback to flux when slots are still empty.
+        if fal_key and is_api_text_provider():
             set_image_provider(job_id, "flux")
             notes.append(
-                "image_provider chatgpt cannot run unsupervised; this job fell back to flux."
+                "image_provider chatgpt cannot auto-generate unsupervised; this job fell back to flux."
             )
         else:
-            raise RuntimeError(
-                "image_provider is chatgpt, which cannot generate pictures unsupervised "
-                "(ChatGPT must click Pictures). Set image_provider to flux (needs fal_key) "
-                "or comfyui, then schedule again."
+            notes.append(
+                "image_provider is chatgpt — Studio will not auto-generate pictures. "
+                "Generate in MCP/ChatGPT and call save_illustration_image for every slot "
+                "(or set image_provider=external). Missing slots fail with EXTERNAL_IMAGES_MISSING. "
+                "Optional: set flux (fal_key) or comfyui for Studio-generated art."
             )
     elif provider == "flux" and not fal_key:
         raise RuntimeError(
             "image_provider is flux but fal_key is not set. Add a fal key in Settings "
-            "or switch to comfyui for a walk-away run."
+            "or switch to comfyui / external for a walk-away run."
         )
     elif provider == "comfyui":
         wf = workflow_public_status()
@@ -1296,12 +1307,17 @@ def hands_off_status() -> dict[str, Any]:
     elif image == "comfyui":
         image_ok = bool(wf.get("loaded"))
         image_note = "comfyui" if image_ok else "comfyui needs an uploaded API workflow"
-    else:
-        image_ok = fal_key
+    elif image == "external":
+        image_ok = True
         image_note = (
-            "chatgpt cannot generate pictures unsupervised; schedule will fall back to flux "
-            if fal_key
-            else "chatgpt cannot run unsupervised (no fal_key for flux fallback). Use flux or comfyui."
+            "external (each job needs save_illustration_image for cover + lines "
+            "before start/resume; missing → EXTERNAL_IMAGES_MISSING)"
+        )
+    else:
+        image_ok = True
+        image_note = (
+            "chatgpt (MCP/agent uploads via save_illustration_image; "
+            "API-text + fal_key may fall back to flux when slots are empty)"
         )
     tts_ok = tts in ("openai", "elevenlabs", "local", "external")
     if tts == "external":
@@ -1321,7 +1337,13 @@ def hands_off_status() -> dict[str, Any]:
     warnings: list[str] = []
     if image == "chatgpt":
         warnings.append(
-            "ChatGPT images cannot run unsupervised. Switch to Flux or ComfyUI for walk-away."
+            "ChatGPT images: upload via MCP save_illustration_image (or use image_provider=external). "
+            "With openai/lmstudio text + fal_key, empty slots may fall back to flux."
+        )
+    if image == "external":
+        warnings.append(
+            "External images: Studio will not generate art — upload every slot with "
+            "save_illustration_image before start/resume."
         )
     if not text_ok:
         warnings.append(
@@ -1333,7 +1355,8 @@ def hands_off_status() -> dict[str, Any]:
         )
     recipe = (
         "HANDS-OFF WALK-AWAY: "
-        "1) text_provider openai or lmstudio; image_provider flux (fal_key) or comfyui (workflow uploaded). "
+        "1) text_provider openai or lmstudio; image_provider flux (fal_key), comfyui (workflow), "
+        "or external (MCP save_illustration_image for every slot). "
         "2) set_hands_off(true) or update_studio_settings(hands_off=true) — also a toggle on Settings and Topics. "
         "Optional interval: hands_off_interval_hours (0 = due now FIFO; e.g. 2 = every 2 hours). "
         "3) Studio's ~30s loop keeps drafts+queued at hands_off_min_queue (default 5) via generate_topics, "
@@ -1341,7 +1364,8 @@ def hands_off_status() -> dict[str, Any]:
         "4) Each hands-off job sets youtube_auto_upload=true and youtube_privacy=private on THAT job only "
         "(Settings defaults are not changed). If YouTube is disconnected, render still happens and upload is pending. "
         "5) chatgpt/claude text: will not auto-generate topics (existing drafts still schedule). "
-        "chatgpt pictures cannot run headless. "
+        "chatgpt/external pictures: MCP save_illustration_image for every slot "
+        "(API text + fal_key may fall back empty chatgpt slots to flux). "
         "GPU: never fire illustrations + local TTS + another job in parallel — wait for get_gpu_lock."
     )
     return {

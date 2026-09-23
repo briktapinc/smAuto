@@ -6,6 +6,7 @@ from typing import Any
 
 
 EXTERNAL_AUDIO_MISSING = "EXTERNAL_AUDIO_MISSING"
+EXTERNAL_IMAGES_MISSING = "EXTERNAL_IMAGES_MISSING"
 TTS_MODEL_LOAD_FAILED = "tts_model_load_failed"
 PROVIDER_GATE = "provider_gate"
 UPLOAD_RESET = "upload_reset"
@@ -25,6 +26,12 @@ def classify_error(exc: BaseException | str | None) -> str:
         return "unknown"
     if "EXTERNAL_AUDIO_MISSING" in text or "narration_external" in low:
         return EXTERNAL_AUDIO_MISSING
+    if (
+        "EXTERNAL_IMAGES_MISSING" in text
+        or "external images" in low
+        or ("image_provider=external" in low and "missing" in low)
+    ):
+        return EXTERNAL_IMAGES_MISSING
     if "upload" in low and ("reset" in low or "broken pipe" in low or "connection reset" in low):
         return UPLOAD_RESET
     if "too large" in low or ("payload" in low and "limit" in low):
