@@ -17,7 +17,7 @@ import os
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,18 +27,96 @@ QUEUE_PATH = USER_DATA / "job_queue.json"
 QUEUE_MUTEX_PATH = USER_DATA / "job_queue.mutex"
 
 STATUS_QUEUED = "queued"
+STATUS_CLAIMED = "claimed"
 STATUS_RUNNING = "running"
 STATUS_DONE = "done"
 STATUS_FAILED = "failed"
 STATUS_CANCELLED = "cancelled"
 
-_ACTIVE = frozenset({STATUS_QUEUED, STATUS_RUNNING})
+_ACTIVE = frozenset({STATUS_QUEUED, STATUS_CLAIMED, STATUS_RUNNING})
 _TERMINAL = frozenset({STATUS_DONE, STATUS_FAILED, STATUS_CANCELLED})
 
 _lock = threading.RLock()
 _pump_lock = threading.Lock()
 _last_served_owner: str = ""
 _HISTORY_LIMIT = 80
+_lease_thread: threading.Thread | None = None
+_lease_stop = threading.Event()
+
+# Restart-safe engine defaults (overridable via env).
+DEFAULT_LEASE_SEC = 60
+DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_HEARTBEAT_SEC = 20
+
+
+def lease_seconds() -> int:
+    raw = (os.environ.get("BUBBLEPOD_JOB_LEASE_SEC") or "").strip()
+    try:
+        return max(15, min(600, int(raw))) if raw else DEFAULT_LEASE_SEC
+    except (TypeError, ValueError):
+        return DEFAULT_LEASE_SEC
+
+
+def max_job_attempts() -> int:
+    raw = (os.environ.get("BUBBLEPOD_JOB_MAX_ATTEMPTS") or "").strip()
+    try:
+        return max(1, min(10, int(raw))) if raw else DEFAULT_MAX_ATTEMPTS
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_ATTEMPTS
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except ValueError:
+        return None
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _lease_expiry_iso(*, from_dt: datetime | None = None) -> str:
+    base = from_dt or _utcnow()
+    return (base + timedelta(seconds=lease_seconds())).replace(microsecond=0).isoformat()
+
+
+def is_transient_failure(error: str | None) -> bool:
+    text = (error or "").lower()
+    needles = (
+        "exit -15",
+        "sigterm",
+        "killed",
+        "timeout",
+        "timed out",
+        "connection reset",
+        "connection aborted",
+        "broken pipe",
+        "temporarily unavailable",
+        "chatterbox",
+        "nonetype",
+        "model-load",
+        "model load",
+        "gentle",
+        "ffmpeg",
+        "errno 11",
+        "resource temporarily",
+        "gpu busy",
+    )
+    return any(n in text for n in needles)
+
+
+def _retry_delay_sec(attempts: int) -> int:
+    # 5, 10, 20, ... capped at 300
+    return min(300, 5 * (2 ** max(0, attempts - 1)))
 
 
 def _now() -> str:
@@ -176,24 +254,64 @@ def _live_running_ids() -> set[str]:
         return set()
 
 
-def _reconcile(data: dict[str, Any]) -> dict[str, Any]:
-    """Align persisted running rows with live worker threads after restart."""
+def _reconcile(data: dict[str, Any], *, boot: bool = False) -> dict[str, Any]:
+    """Align persisted rows with live workers; expire dead leases back to queued."""
     live = _live_running_ids()
+    now = _utcnow()
     changed = False
     for job in data.get("jobs") or []:
         status = str(job.get("status") or "")
         pid = str(job.get("project_id") or "")
-        if status == STATUS_RUNNING and pid and pid not in live:
-            job["status"] = STATUS_QUEUED
-            job["detail"] = "Re-queued after Studio restart."
-            job["started_at"] = None
-            job["updated_at"] = _now()
+        # Normalize legacy/partial rows
+        if "attempts" not in job:
+            job["attempts"] = int(job.get("attempts") or 0)
             changed = True
+        if "max_attempts" not in job:
+            job["max_attempts"] = max_job_attempts()
+            changed = True
+        if status in (STATUS_RUNNING, STATUS_CLAIMED) and pid and pid not in live:
+            lease_at = _parse_iso(str(job.get("lease_expires_at") or ""))
+            expired = boot or lease_at is None or lease_at <= now
+            if expired:
+                attempts = int(job.get("attempts") or 0) + (0 if boot else 1)
+                max_a = int(job.get("max_attempts") or max_job_attempts())
+                job["attempts"] = attempts
+                job["max_attempts"] = max_a
+                if not boot and attempts >= max_a:
+                    job["status"] = STATUS_FAILED
+                    job["finished_at"] = _now()
+                    job["error"] = job.get("error") or "Worker lease expired repeatedly."
+                    job["detail"] = (
+                        f"Failed after {attempts}/{max_a} attempts (lease expired)."
+                    )
+                    job["lease_expires_at"] = None
+                    job["updated_at"] = _now()
+                    changed = True
+                    continue
+                job["status"] = STATUS_QUEUED
+                job["kind"] = "resume"
+                job["detail"] = (
+                    "Re-queued after Studio restart (resume from checkpoint)."
+                    if boot
+                    else "Lease expired — re-queued for resume from checkpoint."
+                )
+                job["started_at"] = None
+                job["claimed_at"] = None
+                job["lease_expires_at"] = None
+                job["next_retry_at"] = None
+                job["updated_at"] = _now()
+                changed = True
         elif status == STATUS_QUEUED and pid and pid in live:
             job["status"] = STATUS_RUNNING
             job["started_at"] = job.get("started_at") or _now()
+            job["lease_expires_at"] = _lease_expiry_iso()
             job["updated_at"] = _now()
             changed = True
+        elif status == STATUS_RUNNING and pid and pid in live:
+            # Refresh missing lease while live
+            if not job.get("lease_expires_at"):
+                job["lease_expires_at"] = _lease_expiry_iso()
+                changed = True
     if changed:
         _write_store(data)
     return data
@@ -216,8 +334,16 @@ def _owner_key(owner_id: str | None) -> str:
 
 
 def _queue_order(jobs: list[dict[str, Any]], *, last_owner: str = "") -> list[dict[str, Any]]:
-    """Round-robin across owners; FIFO (enqueued_at) within each owner."""
-    queued = [j for j in jobs if j.get("status") == STATUS_QUEUED]
+    """Round-robin across owners; FIFO (enqueued_at) within each owner. Honor next_retry_at."""
+    now = _utcnow()
+    queued = []
+    for j in jobs:
+        if j.get("status") != STATUS_QUEUED:
+            continue
+        retry_at = _parse_iso(str(j.get("next_retry_at") or ""))
+        if retry_at and retry_at > now:
+            continue
+        queued.append(j)
     if not queued:
         return []
     by_owner: dict[str, list[dict[str, Any]]] = {}
@@ -259,11 +385,19 @@ def _public_job(job: dict[str, Any], *, position: int | None = None) -> dict[str
         "finished_at": job.get("finished_at"),
         "detail": job.get("detail"),
         "error": job.get("error"),
+        "error_code": job.get("error_code"),
         "updated_at": job.get("updated_at"),
+        "attempts": int(job.get("attempts") or 0),
+        "max_attempts": int(job.get("max_attempts") or max_job_attempts()),
+        "lease_expires_at": job.get("lease_expires_at"),
+        "next_retry_at": job.get("next_retry_at"),
+        "checkpoint": job.get("checkpoint") if isinstance(job.get("checkpoint"), dict) else None,
+        "progress_pct": job.get("progress_pct"),
+        "step": job.get("step"),
     }
     if position is not None and job.get("status") == STATUS_QUEUED:
         out["queue_position"] = position
-    elif job.get("status") == STATUS_RUNNING:
+    elif job.get("status") in (STATUS_RUNNING, STATUS_CLAIMED):
         out["queue_position"] = 0
     return out
 
@@ -327,6 +461,15 @@ def enqueue(
                 "finished_at": None,
                 "detail": detail or "Waiting for a free pipeline slot.",
                 "error": None,
+                "error_code": None,
+                "attempts": 0,
+                "max_attempts": max_job_attempts(),
+                "lease_expires_at": None,
+                "claimed_at": None,
+                "next_retry_at": None,
+                "checkpoint": None,
+                "progress_pct": None,
+                "step": None,
                 "updated_at": _now(),
             }
             data["jobs"].append(row)
@@ -377,9 +520,13 @@ def mark_running(project_id: str, *, queue_id: str | None = None) -> dict[str, A
             _last_served_owner = _owner_key(job.get("owner_id"))
             job["status"] = STATUS_RUNNING
             job["started_at"] = job.get("started_at") or _now()
+            job["claimed_at"] = job.get("claimed_at") or _now()
+            job["lease_expires_at"] = _lease_expiry_iso()
+            job["next_retry_at"] = None
             job["updated_at"] = _now()
             job["detail"] = "Pipeline running."
             _write_store(data)
+            _ensure_lease_thread()
             return _public_job(job, position=0)
 
 
@@ -413,17 +560,56 @@ def mark_finished(
                         break
             if not job:
                 return None
+            err_text = error or (detail if status == STATUS_FAILED else "") or ""
+            if status == STATUS_FAILED:
+                attempts = int(job.get("attempts") or 0) + 1
+                job["attempts"] = attempts
+                max_a = int(job.get("max_attempts") or max_job_attempts())
+                job["max_attempts"] = max_a
+                from studio.job_errors import classify_error
+
+                job["error_code"] = classify_error(err_text)
+                job["error"] = err_text or None
+                if attempts < max_a and is_transient_failure(err_text):
+                    delay = _retry_delay_sec(attempts)
+                    job["status"] = STATUS_QUEUED
+                    job["kind"] = "resume"
+                    job["finished_at"] = None
+                    job["started_at"] = None
+                    job["claimed_at"] = None
+                    job["lease_expires_at"] = None
+                    job["next_retry_at"] = (_utcnow() + timedelta(seconds=delay)).replace(
+                        microsecond=0
+                    ).isoformat()
+                    job["detail"] = (
+                        f"Transient failure — retry {attempts}/{max_a} in {delay}s. {err_text}"
+                    )[:500]
+                    job["updated_at"] = _now()
+                    _write_store(data)
+                    return _public_job(job)
+                job["status"] = STATUS_FAILED
+                job["finished_at"] = _now()
+                job["detail"] = detail or err_text or "failed"
+                job["lease_expires_at"] = None
+                job["updated_at"] = _now()
+                _write_store(data)
+                return _public_job(job)
+
             job["status"] = status
             job["finished_at"] = _now()
+            job["lease_expires_at"] = None
+            job["next_retry_at"] = None
             if outcome_n == "paused":
                 job["detail"] = detail or "Paused — slot freed."
                 job["error"] = None
+                job["kind"] = "resume"
             elif outcome_n == "stopped":
                 job["detail"] = detail or "Stopped — slot freed."
                 job["error"] = None
             else:
                 job["detail"] = detail or outcome_n
-                job["error"] = error or (detail if status == STATUS_FAILED else None)
+                job["error"] = None
+                job["error_code"] = None
             job["updated_at"] = _now()
             _write_store(data)
             return _public_job(job)
@@ -723,14 +909,95 @@ def on_pipeline_finished(project_id: str, outcome: str, detail: str = "") -> Non
         pass
 
 
+def heartbeat(project_id: str, *, checkpoint: dict[str, Any] | None = None) -> None:
+    """Extend the lease for a live worker; optionally persist a checkpoint blob."""
+    pid = str(project_id or "").strip()
+    if not pid:
+        return
+    with _lock:
+        with _file_mutex(QUEUE_MUTEX_PATH):
+            data = _read_store()
+            for job in data.get("jobs") or []:
+                if str(job.get("project_id") or "") != pid:
+                    continue
+                if job.get("status") not in (STATUS_RUNNING, STATUS_CLAIMED):
+                    continue
+                job["lease_expires_at"] = _lease_expiry_iso()
+                job["updated_at"] = _now()
+                if checkpoint and isinstance(checkpoint, dict):
+                    job["checkpoint"] = dict(checkpoint)
+                    if checkpoint.get("step"):
+                        job["step"] = checkpoint.get("step")
+                    if checkpoint.get("progress_pct") is not None:
+                        job["progress_pct"] = checkpoint.get("progress_pct")
+                    if checkpoint.get("detail"):
+                        job["detail"] = str(checkpoint.get("detail"))[:400]
+                _write_store(data)
+                return
+
+
+def sync_job_progress(
+    project_id: str,
+    *,
+    step: str | None = None,
+    detail: str | None = None,
+    progress_pct: Any = None,
+    checkpoint: dict[str, Any] | None = None,
+) -> None:
+    """Mirror live pipeline progress into the durable queue row + refresh lease."""
+    blob: dict[str, Any] = {}
+    if step is not None:
+        blob["step"] = step
+    if detail is not None:
+        blob["detail"] = detail
+    if progress_pct is not None:
+        blob["progress_pct"] = progress_pct
+    if checkpoint:
+        blob.update(checkpoint)
+        blob["step"] = checkpoint.get("step") or step
+    heartbeat(project_id, checkpoint=blob or None)
+
+
+def _lease_loop() -> None:
+    while not _lease_stop.wait(DEFAULT_HEARTBEAT_SEC):
+        try:
+            live = _live_running_ids()
+            with _lock:
+                with _file_mutex(QUEUE_MUTEX_PATH):
+                    data = _reconcile(_read_store(), boot=False)
+                    changed = False
+                    for job in data.get("jobs") or []:
+                        pid = str(job.get("project_id") or "")
+                        if job.get("status") == STATUS_RUNNING and pid in live:
+                            job["lease_expires_at"] = _lease_expiry_iso()
+                            job["updated_at"] = _now()
+                            changed = True
+                    if changed:
+                        _write_store(data)
+            # Re-pump if anything became eligible after retry backoff / lease expiry
+            pump()
+        except Exception:
+            continue
+
+
+def _ensure_lease_thread() -> None:
+    global _lease_thread
+    if _lease_thread and _lease_thread.is_alive():
+        return
+    _lease_stop.clear()
+    _lease_thread = threading.Thread(target=_lease_loop, name="bubblepod-job-lease", daemon=True)
+    _lease_thread.start()
+
+
 def ensure_queue_boot() -> None:
     """Reconcile persisted queue on Studio startup and try to fill free slots."""
     try:
         with _lock:
             with _file_mutex(QUEUE_MUTEX_PATH):
-                _reconcile(_read_store())
+                _reconcile(_read_store(), boot=True)
     except Exception:
         pass
+    _ensure_lease_thread()
     try:
         pump()
     except Exception:

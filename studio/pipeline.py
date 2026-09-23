@@ -638,6 +638,17 @@ def _has_frames(frames_folder: str | Path) -> bool:
     return len(list(folder.glob("f*.png"))) >= 2
 
 
+def _frames_resume_at(frames_folder: str | Path) -> int:
+    """Count consecutive f000000.png… frames already on disk (checkpoint for videoDrawer)."""
+    folder = Path(frames_folder)
+    if not folder.is_dir():
+        return 0
+    n = 0
+    while (folder / f"f{n:06d}.png").is_file():
+        n += 1
+    return n
+
+
 def _youtube_uploaded(project_id: str) -> bool:
     meta = load_meta(project_id)
     blob = meta.get("youtube")
@@ -1155,7 +1166,28 @@ def _set_job(project_id: str, **fields) -> None:
     meta = load_meta(project_id)
     stored = {k: snapshot[k] for k in _PERSIST if k in snapshot}
     meta["job"] = stored
+    # Durable checkpoint for restart-safe resume
+    meta["job_checkpoint"] = {
+        "step": snapshot.get("step"),
+        "detail": snapshot.get("detail"),
+        "progress_pct": snapshot.get("progress_pct"),
+        "active_step": snapshot.get("active_step"),
+        "waiting_on": snapshot.get("waiting_on"),
+        "updated_at": _now(),
+    }
     save_meta(project_id, meta)
+    try:
+        from studio.job_queue import sync_job_progress
+
+        sync_job_progress(
+            project_id,
+            step=snapshot.get("step"),
+            detail=snapshot.get("detail"),
+            progress_pct=snapshot.get("progress_pct"),
+            checkpoint=meta["job_checkpoint"],
+        )
+    except Exception:
+        pass
 
 
 def _run_code(script: str, extra: list[str]) -> None:
@@ -1923,21 +1955,36 @@ def _render_one_canvas(
             _progress(project_id, step="schedule", detail="Building pose/phoneme schedule...")
             _run_code("scheduler.py", ["--input_file", render_prefix])
             _check_stop(project_id)
-            _progress(project_id, step="frames", detail=f"Drawing {canvas} frames...")
-            _run_code(
-                "videoDrawer.py",
-                [
-                    "--input_file", render_prefix,
-                    "--use_billboards", "T" if use_billboards else "F",
-                    "--layout", canvas_layout,
-                    "--character_size", character_size,
-                    "--include_bubblehead", "T" if include_bubblehead else "F",
-                    "--jiggly_transitions", "F",
-                    "--aspect", canvas,
-                    "--background", str(room_path),
-                    "--frames_dir", str(frames_path),
-                ],
+            resume_at = _frames_resume_at(frames_path)
+            detail = f"Drawing {canvas} frames..."
+            if resume_at > 0:
+                detail = f"Drawing {canvas} frames (resuming from frame {resume_at})..."
+                _log.info(
+                    "frame draw resume: project=%s aspect=%s start_frame=%s",
+                    project_id,
+                    canvas,
+                    resume_at,
+                )
+            _progress(
+                project_id,
+                step="frames",
+                detail=detail,
+                waiting_on="videoDrawer",
             )
+            drawer_args = [
+                "--input_file", render_prefix,
+                "--use_billboards", "T" if use_billboards else "F",
+                "--layout", canvas_layout,
+                "--character_size", character_size,
+                "--include_bubblehead", "T" if include_bubblehead else "F",
+                "--jiggly_transitions", "F",
+                "--aspect", canvas,
+                "--background", str(room_path),
+                "--frames_dir", str(frames_path),
+            ]
+            if resume_at > 0:
+                drawer_args.extend(["--start_frame", str(resume_at)])
+            _run_code("videoDrawer.py", drawer_args)
         else:
             _progress(project_id, step="ffmpeg", detail=f"{canvas} frames already exist; muxing video...")
         _check_stop(project_id)
