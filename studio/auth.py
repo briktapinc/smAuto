@@ -137,6 +137,7 @@ MEMBERSHIP_GATED_MCP_TOOLS = frozenset({
     "set_job_music",
     "set_project_youtube",
     "upload_to_youtube",
+    "create_api_key",
 })
 
 DOCS_PATHS = frozenset({
@@ -580,7 +581,7 @@ def enforce_mcp_tool_membership(tool_name: str, request: Request | None = None) 
         return
     raise PermissionError(
         "Membership required to create/edit jobs, generate topics, or run video production. "
-        "Connect with a Studio JWT, or the admin MCP PIN (?mcp_pin=…). "
+        "Connect with a Studio JWT, Bearer bp_live_… API key, or the admin MCP PIN (?mcp_pin=…). "
         "Delete/read-only tools remain available."
     )
 
@@ -809,7 +810,7 @@ def authorize_mcp_http(request: Request) -> str:
             status_code=401,
             detail=(
                 "MCP requires a Studio JWT, MCP PIN (?mcp_pin=... / X-MCP-Pin), "
-                "or ngrok HTTP basic-auth (Settings -> Ngrok). "
+                "Bearer bp_live_… API key, or ngrok HTTP basic-auth (Settings -> Ngrok). "
                 "Through the tunnel, Basic is checked by ngrok then stripped; "
                 "restart ngrok after updating Studio so the tunnel gate header is stamped."
             ),

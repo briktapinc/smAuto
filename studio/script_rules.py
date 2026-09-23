@@ -121,6 +121,18 @@ Never fire generate_illustrations + generate_speech(local) + start_job in parall
 """.strip()
 
 
+SAAS_MCP_REQUIREMENT = """
+MULTI-TENANT SAAS (Phases 1–5):
+HTTP /mcp auth (any one): ngrok Basic; owner MCP PIN (X-MCP-Pin / ?mcp_pin= / Bearer <pin> = admin);
+Bearer bp_live_… API key (create_api_key; per-user projects + per-key rate limit, default 60/min —
+owner agents: rate_limit=600+); Studio JWT.
+Owner PIN behavior is unchanged. Tools: get_my_usage, list_api_keys, create_api_key, revoke_api_key,
+get_queue_status (leases/attempts/block_reason), admin_overview, list_failed_jobs, retry_failed_job,
+run_backup (admin/PIN only). Plan quotas may return error_code=quota_exhausted; API abuse → rate_limited;
+oversized narration → upload_too_large (HTTP 413). Daily JSON backup under user_data/backups/.
+""".strip()
+
+
 def with_hook_outro_requirement(text: str) -> str:
     """Append hook+subscribe rules if a stale override omitted them."""
     blob = (text or "").lower()
@@ -159,6 +171,9 @@ def with_playbook_runtime_notes(text: str) -> str:
         blob = (text or "").lower()
     if "get_gpu_lock" not in blob and "gpu lock" not in blob:
         text = (text or "").rstrip() + "\n\n" + GPU_LOCK_REQUIREMENT
+        blob = (text or "").lower()
+    if "bp_live_" not in blob and "get_my_usage" not in blob:
+        text = (text or "").rstrip() + "\n\n" + SAAS_MCP_REQUIREMENT
         blob = (text or "").lower()
     if (
         "app image prompts" not in blob
@@ -321,9 +336,14 @@ You are helping produce a Stickman Automation lip-sync explainer through this MC
 Same tools as the Stickman Automation GUI at http://127.0.0.1:7878. FastMCP HTTP is POST /mcp
 (streamable HTTP, same tools as stdio `python -m studio.mcp_server`).
 HTTP /mcp auth (any one): ngrok HTTP Basic (Settings → Ngrok — Basic only, not Basic+Bearer),
-MCP PIN (header X-MCP-Pin, query ?mcp_pin=, or Bearer <pin>), or Studio JWT.
+owner MCP PIN (header X-MCP-Pin, query ?mcp_pin=, or Bearer <pin> — superuser/admin, unchanged),
+per-user API key Authorization: Bearer bp_live_… (create_api_key; scoped projects + per-key rate
+limit, default 60/min — owner agents use rate_limit=600+), or Studio JWT.
 Remote tip: https://…/mcp with Basic credentials from Settings → Ngrok while the tunnel is running.
 ChatGPT Desktop tip: https://…/mcp?mcp_pin=YOUR_PIN also works.
+SaaS tools: get_my_usage, list_api_keys / create_api_key / revoke_api_key, get_queue_status,
+admin_overview / list_failed_jobs / retry_failed_job / run_backup (admin/PIN only).
+Machine-readable errors: quota_exhausted, rate_limited, upload_too_large, unauthorized.
 ChatGPT Desktop, Claude Desktop, and Claude Code share this server.
 Codex: mcp_servers.lazykh in ~/.codex/config.toml. Claude Desktop: mcpServers.lazykh
 in claude_desktop_config.json (same command: python -m studio.mcp_server).
@@ -647,23 +667,26 @@ WORKFLOW
 
 COMPLETE MCP TOOL LIST (do not invent names outside this list; stdio and HTTP /mcp match):
 search, fetch, get_file,
-get_script_rules, get_chatgpt_playbook, get_studio_settings, get_health, get_gpu_lock, restart_api,
+get_script_rules, get_chatgpt_playbook, get_studio_settings, get_health, check_dependencies, get_gpu_lock, restart_api,
 ngrok_status, start_ngrok, stop_ngrok,
 get_text_provider, set_text_provider,
 list_prompts, get_prompts, update_prompt, save_prompts, reset_prompt,
 request_spend_confirm, get_spend_status, get_audit_log,
+get_my_usage, list_api_keys, create_api_key, revoke_api_key, get_queue_status,
+admin_overview, list_failed_jobs, retry_failed_job, run_backup,
 generate_topics, create_topic, list_topics, update_topic, schedule_topic, unschedule_topic, start_topic_pipeline, hands_off, set_hands_off, delete_topic,
 create_video_project, set_video_aspect, list_video_projects, list_library,
 delete_project, rename_video, get_project,
 generate_script_via_api, save_script,
 list_illustration_jobs, get_image_provider, set_image_provider,
 get_comfyui_status, save_comfyui_workflow, delete_comfyui_workflow,
-get_video_layout, set_video_layout, set_character_size, set_include_bubblehead,
+get_video_layout, set_video_layout, set_art_style, list_art_styles, set_character_size, set_include_bubblehead,
 get_stickman_head_color, set_stickman_head_color, reset_stickman_head_color, set_project_voice,
 generate_illustrations_with_flux, generate_illustrations, generate_cover, regenerate_cover,
 list_cover_versions, set_active_cover, regenerate_illustration,
-save_illustration_image,
-list_tts_voices, generate_speech,
+save_illustration_image, save_illustration_images,
+get_cover_provider, set_cover_provider,
+list_tts_voices, generate_speech, upload_narration_audio,
 ensure_gentle, ensure_gentle_docker, start_gentle, stop_gentle, get_gentle_status, align_phonemes,
 render_final_video, get_render_status,
 start_job, pause_job, stop_job, resume_job,

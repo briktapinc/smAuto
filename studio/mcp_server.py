@@ -93,7 +93,7 @@ from studio.tts import list_voices
 from studio.utils_script import parse_tagged_script, raw_from_tagged, script_structure_warnings, validate_tagged_script
 from studio import youtube as yt
 
-MCP_BUILD = "2026-09-23-external-tts"
+MCP_BUILD = "2026-09-23-saas-phase5"
 
 # Keep in sync with every @mcp.tool in build_mcp (stdio and FastMCP HTTP /mcp).
 MCP_TOOL_NAMES = (
@@ -120,6 +120,15 @@ MCP_TOOL_NAMES = (
     "request_spend_confirm",
     "get_spend_status",
     "get_audit_log",
+    "get_my_usage",
+    "list_api_keys",
+    "create_api_key",
+    "revoke_api_key",
+    "get_queue_status",
+    "admin_overview",
+    "list_failed_jobs",
+    "retry_failed_job",
+    "run_backup",
     "generate_topics",
     "create_topic",
     "list_topics",
@@ -216,9 +225,15 @@ def handshake_instructions() -> str:
         "HTTP: FastMCP streamable POST /mcp on Studio — same tools. "
         "HTTP /mcp AUTH (any one): (1) ngrok HTTP Basic — Settings → Ngrok username/password; "
         "send Basic only (not Basic+Bearer together). Preferred for remote agents over the tunnel. "
-        "(2) MCP PIN via header X-MCP-Pin, query ?mcp_pin=, or Authorization: Bearer <pin>. "
-        "(3) Studio JWT (Bearer/cookie) for per-member access. "
+        "(2) Owner MCP PIN via header X-MCP-Pin, query ?mcp_pin=, or Authorization: Bearer <pin> "
+        "(superuser — unchanged; maps to primary admin). "
+        "(3) Per-user API key Authorization: Bearer bp_live_… (create_api_key; scoped to that user; "
+        "per-key rate limit, default 60/min — use rate_limit=600+ for agent polling). "
+        "(4) Studio JWT (Bearer/cookie) for per-member access. "
         "ChatGPT tip: public https://…/mcp with Basic, or …/mcp?mcp_pin=YOUR_PIN. "
+        "SaaS: get_my_usage (plan quotas), get_queue_status (leases/attempts/block_reason), "
+        "admin_overview / list_failed_jobs / retry_failed_job / run_backup (admin/PIN only). "
+        "Errors may include error_code=quota_exhausted|rate_limited|upload_too_large|unauthorized. "
         "ChatGPT Desktop caches schemas: full-quit the app, reopen, /mcp, NEW thread. "
         "Claude Desktop / Claude Code use this same stdio server (local; not HTTP-PIN-gated). "
         "EVERY tagged script MUST open with a topic HOOK (1-3 spoken lines on THIS topic, "
@@ -512,6 +527,61 @@ def _mcp_spend(
     )
 
 
+def _mcp_http_request():
+    try:
+        from fastmcp.server.dependencies import get_http_request
+
+        return get_http_request()
+    except Exception:
+        return None
+
+
+def _mcp_caller_user() -> dict | None:
+    """Resolve the authenticated MCP caller. stdio / owner PIN → primary admin."""
+    from studio.members import get_user_by_username, list_users
+
+    request = _mcp_http_request()
+    if request is None:
+        admins = [u for u in list_users(include_disabled=False) if (u.get("role") or "") == "admin"]
+        return admins[0] if admins else None
+    username = None
+    try:
+        username = getattr(request.state, "mcp_username", None)
+    except Exception:
+        username = None
+    if not username:
+        try:
+            from studio.auth import try_jwt_user
+
+            username = try_jwt_user(request)
+        except Exception:
+            username = None
+    if username:
+        return get_user_by_username(str(username))
+    # HTTP without bound user (should be rare after require_mcp_auth)
+    admins = [u for u in list_users(include_disabled=False) if (u.get("role") or "") == "admin"]
+    return admins[0] if admins else None
+
+
+def _require_mcp_user() -> dict:
+    user = _mcp_caller_user()
+    if not user or not user.get("id"):
+        raise PermissionError(
+            "Authenticated Studio user required. Use MCP PIN, Bearer bp_live_… API key, "
+            "or Studio JWT. error_code=unauthorized"
+        )
+    return user
+
+
+def _require_mcp_admin() -> dict:
+    user = _require_mcp_user()
+    if (user.get("role") or "") != "admin":
+        raise PermissionError(
+            "Admin only (owner MCP PIN, admin JWT, or owner API key). error_code=unauthorized"
+        )
+    return user
+
+
 def build_mcp() -> "FastMCP":
     if FastMCP is None:
         raise RuntimeError("Install fastmcp to expose the ChatGPT MCP server.")
@@ -779,6 +849,90 @@ def build_mcp() -> "FastMCP":
         from studio.audit import audit_public
 
         return audit_public(max(1, min(200, int(limit or 50))))
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def get_my_usage() -> dict:
+        """Current-period usage vs plan quotas for the authenticated caller (PIN/API key/JWT). Same as GET /api/me/usage. Includes plan_tier, used/allowed for render_minutes, images, TTS, FAL spend, etc. Admins are unlimited."""
+        from studio.usage import usage_snapshot
+
+        user = _require_mcp_user()
+        return usage_snapshot(user)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def list_api_keys() -> dict:
+        """List bp_live_ API keys for the caller (id, name, rate_limit, created_at). Plaintext key is never shown again after create_api_key."""
+        from studio.api_keys import list_keys_for_user
+
+        user = _require_mcp_user()
+        keys = list_keys_for_user(str(user.get("id") or ""))
+        return {"keys": keys, "count": len(keys)}
+
+    @mcp.tool
+    def create_api_key(name: str = "default", rate_limit: int = 60) -> dict:
+        """Mint a per-user API key (bp_live_…). Returns plaintext `key` once — store it. Use Authorization: Bearer bp_live_… on /mcp and REST. rate_limit is requests/minute for that key (default 60). Owner agents that poll heavily should pass rate_limit=600 or higher (MCP floor honors >=600). PIN callers create keys for the admin account."""
+        from studio.api_keys import create_api_key as _create
+
+        user = _require_mcp_user()
+        return _create(str(user.get("id") or ""), name=name or "default", rate_limit=int(rate_limit or 60))
+
+    @mcp.tool
+    def revoke_api_key(key_id: str) -> dict:
+        """Revoke one of the caller's bp_live_ API keys by id from list_api_keys."""
+        from studio.api_keys import revoke_api_key as _revoke
+
+        user = _require_mcp_user()
+        try:
+            return _revoke(str(user.get("id") or ""), key_id)
+        except KeyError as exc:
+            raise ValueError(str(exc)) from exc
+        except PermissionError as exc:
+            raise PermissionError(f"{exc} error_code=unauthorized") from exc
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def get_queue_status() -> dict:
+        """Fair job queue snapshot: running/queued, max_concurrent, per-user caps, owner_priority, and each job's status/step/attempts/lease_expires_at/block_reason/error — why a job is stuck without SSH."""
+        from studio.job_queue import list_queue
+
+        user = _mcp_caller_user()
+        is_admin = bool(user and (user.get("role") or "") == "admin")
+        owner_id = None if is_admin else (str(user.get("id") or "") if user else None)
+        return list_queue(owner_id=owner_id, is_admin=is_admin, include_history=True)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def admin_overview() -> dict:
+        """Admin only (MCP PIN / admin JWT / owner key): members, revenue, workers/leases, system load, FAL spend today, per-user usage vs quota, failed_jobs_count. Same as GET /api/admin/overview."""
+        from studio.admin_ops import admin_overview_payload
+
+        _require_mcp_admin()
+        return admin_overview_payload()
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def list_failed_jobs(limit: int = 50) -> dict:
+        """Admin only: dead-letter failed jobs with error, attempts, and project_id. Use retry_failed_job(id) to re-queue as resume."""
+        from studio.admin_ops import list_failed_jobs as _list
+
+        _require_mcp_admin()
+        rows = _list(limit=int(limit or 50))
+        return {"ok": True, "count": len(rows), "jobs": rows}
+
+    @mcp.tool
+    def retry_failed_job(job_id: str) -> dict:
+        """Admin only: re-queue a failed queue job as resume (clears terminal error; resets attempt budget once if exhausted)."""
+        from studio.admin_ops import retry_failed_job as _retry
+
+        admin = _require_mcp_admin()
+        try:
+            return _retry(job_id, admin_username=str(admin.get("username") or ""))
+        except FileNotFoundError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @mcp.tool
+    def run_backup() -> dict:
+        """Admin only: timestamped JSON dump of members/auth/queue/ledgers/settings under user_data/backups/ (secrets scrubbed in settings copy). Hostinger weekly snapshots remain primary restore; cron also runs daily 03:00 UTC."""
+        from studio.backup import run_backup as _run
+
+        _require_mcp_admin()
+        return _run()
 
     @mcp.tool
     def generate_topics(
@@ -1500,8 +1654,10 @@ def build_mcp() -> "FastMCP":
         Pass audio as base64 MP3 (optionally data: URI). Stores narration_external.mp3
         (or narration_external_9x16.mp3 when shorts=true) under the project folder via
         atomic temp+rename. Invalidates prior Gentle alignment. Returns ok, path, bytes,
-        duration_seconds (ffprobe). Rejects empty/undecodable audio. Does not run Chatterbox.
-        After upload, set_project_voice(provider='external') if needed, then start_job / resume_job."""
+        duration_seconds (ffprobe). Caps: max ~80MB and 45 minutes; min duration 0.5s.
+        Oversized uploads raise upload_too_large (HTTP 413 on REST multipart). Rejects
+        empty/undecodable audio. Does not run Chatterbox. After upload,
+        set_project_voice(provider='external') if needed, then start_job / resume_job."""
         from studio.tts_external import upload_narration_audio as _upload
 
         return _upload(project_id, audio=audio, format=format or "mp3", shorts=bool(shorts))
