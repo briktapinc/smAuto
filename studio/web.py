@@ -250,6 +250,9 @@ class SettingsBody(BaseModel):
     hands_off_interval_hours: float | None = None
     hands_off_min_queue: int | None = None
     max_concurrent_jobs: int | None = None
+    per_user_concurrency: int | None = None
+    admin_concurrency: int | None = None
+    owner_priority: bool | None = None
     port: int | None = None
     ngrok_url: str | None = None
     ngrok_local_port: int | None = None
@@ -1800,6 +1803,12 @@ def create_app() -> FastAPI:
             updates["hands_off_min_queue"] = body.hands_off_min_queue
         if body.max_concurrent_jobs is not None:
             updates["max_concurrent_jobs"] = body.max_concurrent_jobs
+        if body.per_user_concurrency is not None:
+            updates["per_user_concurrency"] = body.per_user_concurrency
+        if body.admin_concurrency is not None:
+            updates["admin_concurrency"] = body.admin_concurrency
+        if body.owner_priority is not None:
+            updates["owner_priority"] = body.owner_priority
         if body.ngrok_url is not None:
             updates["ngrok_url"] = body.ngrok_url
         if body.ngrok_local_port is not None:

@@ -3161,15 +3161,34 @@ function fillSettings(data) {
   if ($("#max-concurrent-jobs") && data.max_concurrent_jobs != null) {
     $("#max-concurrent-jobs").value = data.max_concurrent_jobs_effective ?? data.max_concurrent_jobs;
   }
+  if ($("#per-user-concurrency") && data.per_user_concurrency != null) {
+    $("#per-user-concurrency").value = data.per_user_concurrency_effective ?? data.per_user_concurrency;
+  }
+  if ($("#admin-concurrency") && data.admin_concurrency != null) {
+    $("#admin-concurrency").value = data.admin_concurrency_effective ?? data.admin_concurrency;
+  }
+  if ($("#owner-priority")) {
+    $("#owner-priority").checked = data.owner_priority_effective ?? data.owner_priority ?? true;
+  }
   const maxEff = $("#max-concurrent-effective");
   if (maxEff) {
-    if (data.max_concurrent_jobs_env_override) {
-      maxEff.textContent = `Effective now: ${data.max_concurrent_jobs_effective} (env override).`;
-    } else if (data.max_concurrent_jobs_effective != null) {
-      maxEff.textContent = `Effective now: ${data.max_concurrent_jobs_effective}.`;
-    } else {
-      maxEff.textContent = "";
+    const parts = [];
+    if (data.max_concurrent_jobs_effective != null) {
+      parts.push(`workers ${data.max_concurrent_jobs_effective}`);
     }
+    if (data.per_user_concurrency_effective != null) {
+      parts.push(`per-user ${data.per_user_concurrency_effective}`);
+    }
+    if (data.admin_concurrency_effective != null) {
+      parts.push(`admin ${data.admin_concurrency_effective}`);
+    }
+    if (data.owner_priority_effective != null) {
+      parts.push(data.owner_priority_effective ? "owner priority on" : "owner priority off");
+    }
+    if (data.max_concurrent_jobs_env_override) {
+      parts.push("env override");
+    }
+    maxEff.textContent = parts.length ? `Effective now: ${parts.join(", ")}.` : "";
   }
   const ngrokAuto = $("#ngrok-autostart");
   if (ngrokAuto) ngrokAuto.checked = !!data.ngrok_autostart;
@@ -4710,10 +4729,15 @@ async function saveHandsOff(enabled) {
   const interval = Number($("#hands-off-interval")?.value);
   const minQueue = Number($("#hands-off-min-queue")?.value);
   const maxJobs = Number($("#max-concurrent-jobs")?.value);
+  const perUser = Number($("#per-user-concurrency")?.value);
+  const adminConc = Number($("#admin-concurrency")?.value);
   const body = { hands_off: !!enabled };
   if (Number.isFinite(interval) && interval >= 0) body.hands_off_interval_hours = interval;
   if (Number.isFinite(minQueue) && minQueue >= 1) body.hands_off_min_queue = minQueue;
   if (Number.isFinite(maxJobs) && maxJobs >= 1) body.max_concurrent_jobs = maxJobs;
+  if (Number.isFinite(perUser) && perUser >= 1) body.per_user_concurrency = perUser;
+  if (Number.isFinite(adminConc) && adminConc >= 1) body.admin_concurrency = adminConc;
+  if ($("#owner-priority")) body.owner_priority = !!$("#owner-priority").checked;
   const saved = await api("/api/settings", { method: "PUT", body });
   fillSettings(saved);
   return saved;

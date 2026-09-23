@@ -1,13 +1,19 @@
 """Multi-user pipeline job queue with configurable concurrency.
 
 Persists to ``user_data/job_queue.json`` so restarts keep queued work.
-Ordering defaults to round-robin across ``owner_id`` (fair-ish); FIFO within
-each user. Capacity is ``BUBBLEPOD_MAX_CONCURRENT_JOBS`` /
-``STICKMAN_MAX_CONCURRENT_JOBS`` (default 1), optionally overridden by the
-admin setting ``max_concurrent_jobs`` in settings.json.
 
-Desktop / single-user mode keeps working: with one user and a free slot,
-start still runs immediately; when at capacity, the same queue waits.
+Scheduling (Phase 3):
+  - Global worker slots: ``max_concurrent_jobs`` / env ``BUBBLEPOD_MAX_CONCURRENT_JOBS``
+    / ``BUBBLEPOD_RENDER_WORKERS`` / ``RENDER_WORKERS`` (default **1** — correct for a
+    2 vCPU / 8 GB box; frame drawing oversubscribes, so do not set N = core count).
+  - Fairness: round-robin across ``owner_id``; FIFO within each user.
+  - Per-user concurrency cap (default 1); admins use ``admin_concurrency`` (default
+    same as global max, so the owner priority lane can use every free slot).
+  - Owner/admin priority lane: admin jobs are scheduled before member jobs each round.
+  - Quota gate hook (Phase 4 fills it): jobs may stay queued with ``quota_exhausted``.
+
+Desktop / single-user mode keeps working: with one user and a free slot, start still
+runs immediately; when at capacity, the same queue waits.
 """
 
 from __future__ import annotations
@@ -170,6 +176,8 @@ def _file_mutex(path: Path):
 
 def _env_max_concurrent() -> int | None:
     for key in (
+        "BUBBLEPOD_RENDER_WORKERS",
+        "RENDER_WORKERS",
         "STICKMAN_MAX_CONCURRENT_JOBS",
         "BUBBLEPOD_MAX_CONCURRENT_JOBS",
         "LAZYKH_MAX_CONCURRENT_JOBS",
@@ -206,6 +214,88 @@ def max_concurrent_jobs() -> int:
     except Exception:
         pass
     return 1
+
+
+def per_user_concurrency() -> int:
+    """Max simultaneous running jobs per non-admin user (default 1)."""
+    for key in ("BUBBLEPOD_PER_USER_CONCURRENCY", "STICKMAN_PER_USER_CONCURRENCY"):
+        raw = (os.environ.get(key) or "").strip()
+        if raw:
+            try:
+                return max(1, min(32, int(raw)))
+            except (TypeError, ValueError):
+                pass
+    try:
+        from studio.settings import load_settings, normalize_max_concurrent_jobs
+
+        return normalize_max_concurrent_jobs(load_settings().get("per_user_concurrency"), 1)
+    except Exception:
+        return 1
+
+
+def admin_concurrency() -> int:
+    """Max simultaneous jobs for admin/owner accounts (default = global max)."""
+    for key in ("BUBBLEPOD_ADMIN_CONCURRENCY", "STICKMAN_ADMIN_CONCURRENCY"):
+        raw = (os.environ.get(key) or "").strip()
+        if raw:
+            try:
+                return max(1, min(32, int(raw)))
+            except (TypeError, ValueError):
+                pass
+    try:
+        from studio.settings import load_settings, normalize_max_concurrent_jobs
+
+        settings = load_settings()
+        if settings.get("admin_concurrency") is not None:
+            return normalize_max_concurrent_jobs(settings.get("admin_concurrency"), max_concurrent_jobs())
+    except Exception:
+        pass
+    return max_concurrent_jobs()
+
+
+def owner_priority_enabled() -> bool:
+    for key in ("BUBBLEPOD_OWNER_PRIORITY", "STICKMAN_OWNER_PRIORITY"):
+        raw = (os.environ.get(key) or "").strip().lower()
+        if raw in ("0", "false", "no", "off"):
+            return False
+        if raw in ("1", "true", "yes", "on"):
+            return True
+    try:
+        from studio.settings import load_settings, normalize_bool
+
+        return normalize_bool(load_settings().get("owner_priority"), True)
+    except Exception:
+        return True
+
+
+def _is_priority_owner(owner_id: str | None) -> bool:
+    if not owner_priority_enabled():
+        return False
+    oid = (owner_id or "").strip()
+    if not oid:
+        return False
+    try:
+        from studio.members import get_user_by_id
+
+        user = get_user_by_id(oid)
+        return bool(user) and (user.get("role") or "") == "admin"
+    except Exception:
+        return False
+
+
+def _owner_cap(owner_id: str | None) -> int:
+    if _is_priority_owner(owner_id):
+        return admin_concurrency()
+    return per_user_concurrency()
+
+
+def user_quota_blocks_start(owner_id: str | None) -> str | None:
+    """Return a machine-readable reason if this user cannot start a job yet.
+
+    Phase 4 fills metering; until then always allows starts.
+    """
+    _ = owner_id
+    return None
 
 
 def _empty_store() -> dict[str, Any]:
@@ -333,8 +423,28 @@ def _owner_key(owner_id: str | None) -> str:
     return str(owner_id or "").strip() or "_local"
 
 
+def _round_robin_owners(
+    by_owner: dict[str, list[dict[str, Any]]],
+    owners: list[str],
+    *,
+    last_owner: str = "",
+) -> list[dict[str, Any]]:
+    owners = list(owners)
+    if last_owner and last_owner in owners:
+        i = owners.index(last_owner)
+        owners = owners[i + 1 :] + owners[: i + 1]
+    buckets = {o: list(by_owner.get(o) or []) for o in owners}
+    ordered: list[dict[str, Any]] = []
+    while any(buckets[o] for o in owners):
+        for owner in owners:
+            bucket = buckets[owner]
+            if bucket:
+                ordered.append(bucket.pop(0))
+    return ordered
+
+
 def _queue_order(jobs: list[dict[str, Any]], *, last_owner: str = "") -> list[dict[str, Any]]:
-    """Round-robin across owners; FIFO (enqueued_at) within each owner. Honor next_retry_at."""
+    """Fair schedule: admin priority lane, then round-robin members. Honor next_retry_at."""
     now = _utcnow()
     queued = []
     for j in jobs:
@@ -342,6 +452,8 @@ def _queue_order(jobs: list[dict[str, Any]], *, last_owner: str = "") -> list[di
             continue
         retry_at = _parse_iso(str(j.get("next_retry_at") or ""))
         if retry_at and retry_at > now:
+            continue
+        if str(j.get("block_reason") or "") == "quota_exhausted":
             continue
         queued.append(j)
     if not queued:
@@ -352,17 +464,75 @@ def _queue_order(jobs: list[dict[str, Any]], *, last_owner: str = "") -> list[di
         by_owner.setdefault(key, []).append(job)
     for group in by_owner.values():
         group.sort(key=lambda j: (str(j.get("enqueued_at") or ""), str(j.get("id") or "")))
-    owners = sorted(by_owner.keys())
-    if last_owner and last_owner in owners:
-        i = owners.index(last_owner)
-        owners = owners[i + 1 :] + owners[: i + 1]
+
+    priority_owners = sorted(
+        o for o in by_owner if o != "_local" and _is_priority_owner(o)
+    )
+    # Treat unknown/_local as member lane
+    member_owners = sorted(o for o in by_owner if o not in priority_owners)
+
     ordered: list[dict[str, Any]] = []
-    while any(by_owner[o] for o in owners):
-        for owner in owners:
-            bucket = by_owner[owner]
-            if bucket:
-                ordered.append(bucket.pop(0))
+    if priority_owners:
+        ordered.extend(_round_robin_owners(by_owner, priority_owners, last_owner=last_owner))
+    if member_owners:
+        member_last = last_owner if last_owner in member_owners else ""
+        ordered.extend(_round_robin_owners(by_owner, member_owners, last_owner=member_last))
     return ordered
+
+
+def _running_counts(jobs: list[dict[str, Any]], live: set[str] | None = None) -> dict[str, int]:
+    live = live if live is not None else _live_running_ids()
+    counts: dict[str, int] = {}
+    seen_pids: set[str] = set()
+    for job in jobs:
+        pid = str(job.get("project_id") or "")
+        status = str(job.get("status") or "")
+        active = status in (STATUS_RUNNING, STATUS_CLAIMED) or (pid and pid in live)
+        if not active or not pid or pid in seen_pids:
+            continue
+        seen_pids.add(pid)
+        key = _owner_key(job.get("owner_id"))
+        counts[key] = counts.get(key, 0) + 1
+    for pid in live:
+        if pid in seen_pids:
+            continue
+        key = "_local"
+        try:
+            from studio.projects import load_meta
+
+            oid = str((load_meta(pid) or {}).get("owner_id") or "").strip()
+            if oid:
+                key = _owner_key(oid)
+        except Exception:
+            pass
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def select_runnable(
+    jobs: list[dict[str, Any]],
+    *,
+    limit: int,
+    last_owner: str = "",
+) -> list[dict[str, Any]]:
+    """Pick up to ``limit`` queued jobs respecting global slots and per-user caps."""
+    if limit <= 0:
+        return []
+    ordered = _queue_order(jobs, last_owner=last_owner)
+    counts = _running_counts(jobs)
+    selected: list[dict[str, Any]] = []
+    for job in ordered:
+        oid = _owner_key(job.get("owner_id"))
+        cap = _owner_cap(job.get("owner_id"))
+        if counts.get(oid, 0) >= cap:
+            continue
+        if user_quota_blocks_start(job.get("owner_id")):
+            continue
+        selected.append(job)
+        counts[oid] = counts.get(oid, 0) + 1
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 def _position_map(jobs: list[dict[str, Any]], *, last_owner: str = "") -> dict[str, int]:
@@ -620,8 +790,14 @@ def peek_next(n: int | None = None) -> list[dict[str, Any]]:
     with _lock:
         with _file_mutex(QUEUE_MUTEX_PATH):
             data = _reconcile(_read_store())
-            ordered = _queue_order(data["jobs"], last_owner=_last_served_owner)
-            return [_public_job(j, position=i + 1) for i, j in enumerate(ordered[: max(0, limit)])]
+            selected = select_runnable(
+                data["jobs"], limit=max(0, limit), last_owner=_last_served_owner
+            )
+            positions = _position_map(data["jobs"], last_owner=_last_served_owner)
+            return [
+                _public_job(j, position=positions.get(str(j.get("id"))))
+                for j in selected
+            ]
 
 
 def list_queue(
@@ -651,6 +827,10 @@ def list_queue(
     return {
         "ok": True,
         "max_concurrent": max_n,
+        "render_workers": max_n,
+        "per_user_concurrency": per_user_concurrency(),
+        "admin_concurrency": admin_concurrency(),
+        "owner_priority": owner_priority_enabled(),
         "running_count": len(live),
         "queued_count": len(queued),
         "slots_free": max(0, max_n - len(live)),
@@ -659,7 +839,7 @@ def list_queue(
         "queued": queued,
         "running": running,
         "path": str(QUEUE_PATH),
-        "fairness": "round_robin",
+        "fairness": "owner_priority_round_robin" if owner_priority_enabled() else "round_robin",
     }
 
 
@@ -676,11 +856,15 @@ def public_status() -> dict[str, Any]:
     snap = list_queue(is_admin=True)
     return {
         "max_concurrent": snap["max_concurrent"],
+        "render_workers": snap.get("render_workers", snap["max_concurrent"]),
+        "per_user_concurrency": snap.get("per_user_concurrency"),
+        "admin_concurrency": snap.get("admin_concurrency"),
+        "owner_priority": snap.get("owner_priority"),
         "running_count": snap["running_count"],
         "queued_count": snap["queued_count"],
         "slots_free": snap["slots_free"],
         "running_project_ids": snap["running_project_ids"],
-        "fairness": "round_robin",
+        "fairness": snap.get("fairness") or "round_robin",
     }
 
 

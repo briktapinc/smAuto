@@ -834,9 +834,19 @@
                   <label>Max concurrent jobs
                     <input name="max_concurrent_jobs" id="max-concurrent-jobs" type="number" min="1" max="32" step="1" value="1" />
                   </label>
+                  <label>Per-user cap
+                    <input name="per_user_concurrency" id="per-user-concurrency" type="number" min="1" max="32" step="1" value="1" />
+                  </label>
+                  <label>Admin concurrency
+                    <input name="admin_concurrency" id="admin-concurrency" type="number" min="1" max="32" step="1" value="1" />
+                  </label>
                 </div>
+                <label class="check">
+                  <input type="checkbox" id="owner-priority" name="owner_priority" checked />
+                  Owner/admin priority lane
+                </label>
                 <p class="hint">Hands-off generates topics when the queue is low (openai / LM Studio only), auto-schedules drafts, runs the pipeline, and uploads each job to YouTube as <strong>private</strong> without changing your default privacy. 0 hours = due now (FIFO).</p>
-                <p class="hint">Max concurrent jobs controls how many pipelines run at once (default 1). Raise when the server has more CPU/RAM (2, 4, 8…). Env <code>BUBBLEPOD_MAX_CONCURRENT_JOBS</code> / <code>STICKMAN_MAX_CONCURRENT_JOBS</code> overrides this field when set. <span id="max-concurrent-effective"></span></p>
+                <p class="hint">Max concurrent jobs = global render worker slots (alias env <code>BUBBLEPOD_RENDER_WORKERS</code> / <code>BUBBLEPOD_MAX_CONCURRENT_JOBS</code>). Default <strong>1</strong> on a 2 vCPU / 8 GB box — frame drawing oversubscribes; do not set workers = CPU count. Per-user cap stops one member from filling every slot (default 1). Admin concurrency + owner priority keep the owner’s production ahead of free-tier queues. <span id="max-concurrent-effective"></span></p>
                 <p class="hint bad" id="hands-off-warn" hidden></p>
               </div>
             </div>

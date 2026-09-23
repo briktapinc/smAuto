@@ -140,6 +140,9 @@ DEFAULTS = {
     "hands_off_interval_hours": 0.0,
     "hands_off_min_queue": 5,
     "max_concurrent_jobs": 1,
+    "per_user_concurrency": 1,
+    "admin_concurrency": 1,
+    "owner_priority": True,
     "ngrok_url": "",
     "ngrok_local_port": DEFAULT_LISTEN_PORT,
     "ngrok_autostart": False,
@@ -774,6 +777,13 @@ def load_settings() -> dict[str, Any]:
     data["hands_off_interval_hours"] = normalize_hands_off_interval_hours(data.get("hands_off_interval_hours"))
     data["hands_off_min_queue"] = normalize_hands_off_min_queue(data.get("hands_off_min_queue"))
     data["max_concurrent_jobs"] = normalize_max_concurrent_jobs(data.get("max_concurrent_jobs"))
+    data["per_user_concurrency"] = normalize_max_concurrent_jobs(
+        data.get("per_user_concurrency"), 1
+    )
+    data["admin_concurrency"] = normalize_max_concurrent_jobs(
+        data.get("admin_concurrency"), data["max_concurrent_jobs"]
+    )
+    data["owner_priority"] = normalize_bool(data.get("owner_priority"), True)
     try:
         data["youtube_privacy"] = normalize_youtube_privacy(data.get("youtube_privacy"))
     except RuntimeError:
@@ -881,6 +891,12 @@ def save_settings(updates: dict[str, Any]) -> dict[str, Any]:
                 data[key] = normalize_hands_off_min_queue(value)
             elif key == "max_concurrent_jobs":
                 data[key] = normalize_max_concurrent_jobs(value)
+            elif key == "per_user_concurrency":
+                data[key] = normalize_max_concurrent_jobs(value, 1)
+            elif key == "admin_concurrency":
+                data[key] = normalize_max_concurrent_jobs(value, 1)
+            elif key == "owner_priority":
+                data[key] = normalize_bool(value, True)
             elif key == "ngrok_url":
                 from studio.ngrok_tunnel import normalize_public_url
 
@@ -1030,15 +1046,31 @@ def public_settings() -> dict[str, Any]:
     data["hands_off_interval_hours"] = normalize_hands_off_interval_hours(data.get("hands_off_interval_hours"))
     data["hands_off_min_queue"] = normalize_hands_off_min_queue(data.get("hands_off_min_queue"))
     data["max_concurrent_jobs"] = normalize_max_concurrent_jobs(data.get("max_concurrent_jobs"))
+    data["per_user_concurrency"] = normalize_max_concurrent_jobs(
+        data.get("per_user_concurrency"), 1
+    )
+    data["admin_concurrency"] = normalize_max_concurrent_jobs(
+        data.get("admin_concurrency"), data["max_concurrent_jobs"]
+    )
+    data["owner_priority"] = normalize_bool(data.get("owner_priority"), True)
     try:
         from studio.job_queue import max_concurrent_jobs as effective_max_concurrent
         from studio.job_queue import _env_max_concurrent
+        from studio.job_queue import admin_concurrency as effective_admin_concurrency
+        from studio.job_queue import per_user_concurrency as effective_per_user
+        from studio.job_queue import owner_priority_enabled
 
         data["max_concurrent_jobs_effective"] = effective_max_concurrent()
         data["max_concurrent_jobs_env_override"] = _env_max_concurrent() is not None
+        data["per_user_concurrency_effective"] = effective_per_user()
+        data["admin_concurrency_effective"] = effective_admin_concurrency()
+        data["owner_priority_effective"] = owner_priority_enabled()
     except Exception:
         data["max_concurrent_jobs_effective"] = data["max_concurrent_jobs"]
         data["max_concurrent_jobs_env_override"] = False
+        data["per_user_concurrency_effective"] = data["per_user_concurrency"]
+        data["admin_concurrency_effective"] = data["admin_concurrency"]
+        data["owner_priority_effective"] = data["owner_priority"]
     data["scheduler_interval_sec"] = 30
     data["flux_model"] = FLUX_MODEL
     data["image_providers"] = list(IMAGE_PROVIDERS)
