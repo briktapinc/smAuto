@@ -21,5 +21,9 @@
 # (e.g. en_US-lessac-medium.onnx from rhasspy/piper-voices).
 #
 # Do not add these packages to the main requirements.txt — they pull torch.
-
+#
+# setuptools 82+ removed pkg_resources; resemble-perth (chatterbox watermarker)
+# imports it and otherwise sets PerthImplicitWatermarker=None →
+# TypeError: 'NoneType' object is not callable on from_pretrained().
+setuptools>=70,<82
 chatterbox-tts
