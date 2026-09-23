@@ -1830,9 +1830,14 @@ async function loadVoices() {
 
 function updateVoiceHint() {
   const hint = $("#voice-local-hint");
-  if (!hint) return;
-  const local = ($("#voice-provider")?.value || "") === "local";
-  hint.hidden = !local;
+  const ext = $("#voice-external-block");
+  const provider = ($("#voice-provider")?.value || "");
+  if (hint) hint.hidden = provider !== "local";
+  if (ext) ext.hidden = provider !== "external";
+  const gen = $("#gen-audio");
+  if (gen) {
+    gen.textContent = provider === "external" ? "Align uploaded audio" : "Generate audio";
+  }
 }
 
 function anyJobBusy() {
@@ -2432,6 +2437,7 @@ $("#gen-flux")?.addEventListener("click", async () => {
 
 $("#voice-provider").addEventListener("change", async () => {
   await loadVoices();
+  updateVoiceHint();
   if (!current) return;
   try {
     current = await api(`/api/projects/${current.id}`, {
@@ -2442,12 +2448,50 @@ $("#voice-provider").addEventListener("change", async () => {
         voice_id: $("#voice-id").value || "",
       },
     });
-    toast($("#voice-provider").value === "local"
-      ? "This job will use local Resemble Chatterbox (no OpenAI TTS bill)."
-      : $("#voice-provider").value === "elevenlabs"
-        ? "This job will use ElevenLabs."
-        : "This job will use OpenAI TTS.");
+    const p = $("#voice-provider").value;
+    toast(
+      p === "local"
+        ? "This job will use local Resemble Chatterbox (no OpenAI TTS bill)."
+        : p === "elevenlabs"
+          ? "This job will use ElevenLabs."
+          : p === "external"
+            ? "This job will use uploaded external MP3 (no Chatterbox)."
+            : "This job will use OpenAI TTS."
+    );
+    if (p === "external" && current.has_external_audio) {
+      const st = $("#voice-external-status");
+      if (st) st.textContent = "narration_external.mp3 is present on this job.";
+    }
   } catch (err) { toast(err.message, true); }
+});
+
+$("#upload-narration")?.addEventListener("click", async () => {
+  if (!current?.id) {
+    toast("Open a job first.", true);
+    return;
+  }
+  const input = $("#narration-mp3");
+  const file = input?.files?.[0];
+  if (!file) {
+    toast("Choose an MP3 file first.", true);
+    return;
+  }
+  try {
+    const fd = new FormData();
+    fd.append("file", file);
+    const data = await api(`/api/projects/${current.id}/narration`, {
+      method: "POST",
+      body: fd,
+    });
+    const st = $("#voice-external-status");
+    if (st) {
+      st.textContent = `Uploaded ${data.filename || "MP3"} — ${data.duration_seconds || "?"}s, ${data.bytes || 0} bytes.`;
+    }
+    toast("External narration uploaded. Alignment will run on Generate / Start.");
+    current = await api(`/api/projects/${current.id}`);
+  } catch (err) {
+    toast(err.message, true);
+  }
 });
 
 $("#voice-id")?.addEventListener("change", async () => {

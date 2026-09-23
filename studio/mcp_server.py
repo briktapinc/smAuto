@@ -14,6 +14,7 @@ from studio.illustrations import (
     regenerate_cover as regenerate_cover_impl,
     resolve_project_image_aspect,
     save_illustration,
+    save_illustration_images as save_illustration_images_impl,
     set_active_cover as set_active_cover_impl,
 )
 from studio.music import clear_project_music, library_payload, set_project_music, shuffle_project_music
@@ -92,7 +93,7 @@ from studio.tts import list_voices
 from studio.utils_script import parse_tagged_script, raw_from_tagged, script_structure_warnings, validate_tagged_script
 from studio import youtube as yt
 
-MCP_BUILD = "2026-09-18-agent-automation"
+MCP_BUILD = "2026-09-23-external-tts"
 
 # Keep in sync with every @mcp.tool in build_mcp (stdio and FastMCP HTTP /mcp).
 MCP_TOOL_NAMES = (
@@ -103,6 +104,7 @@ MCP_TOOL_NAMES = (
     "get_chatgpt_playbook",
     "get_studio_settings",
     "get_health",
+    "check_dependencies",
     "get_gpu_lock",
     "restart_api",
     "ngrok_status",
@@ -162,10 +164,12 @@ MCP_TOOL_NAMES = (
     "set_active_cover",
     "regenerate_illustration",
     "save_illustration_image",
+    "save_illustration_images",
     "get_cover_provider",
     "set_cover_provider",
     "list_tts_voices",
     "generate_speech",
+    "upload_narration_audio",
     "ensure_gentle",
     "ensure_gentle_docker",
     "start_gentle",
@@ -372,6 +376,7 @@ def studio_settings_payload() -> dict:
 
 def studio_health_payload() -> dict:
     """Same shape as GET /api/health (no HTTP round-trip)."""
+    from studio.deps_health import check_dependencies
     from studio.gpu_lock import gpu_lock_public
     from studio.paths import asset_warnings
     from studio.settings import resolve_public_base_url
@@ -381,8 +386,9 @@ def studio_health_payload() -> dict:
     public = resolve_public_base_url().rstrip("/")
     mcp_path = "/mcp"
     mcp_url = f"{public}{mcp_path}" if public else mcp_path
+    deps = check_dependencies()
     return {
-        "ok": True,
+        "ok": bool(deps.get("ok", True)),
         "gentle": gentle_status(),
         "mcp": mcp_path,
         "mcp_url": mcp_url,
@@ -394,6 +400,14 @@ def studio_health_payload() -> dict:
         "scheduler_interval_sec": SCHEDULER_INTERVAL_SEC,
         "gpu_lock": gpu_lock_public(),
         "warnings": asset_warnings(),
+        "tts": deps.get("tts"),
+        "image_provider": deps.get("image_provider"),
+        "model_cache": deps.get("model_cache"),
+        "disk": deps.get("disk"),
+        "gpu": deps.get("gpu"),
+        "dependencies": deps,
+        "can_start_jobs": deps.get("can_start_jobs"),
+        "blockers": deps.get("blockers") or [],
     }
 
 
@@ -649,8 +663,15 @@ def build_mcp() -> "FastMCP":
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def get_health() -> dict:
-        """Same payload as GET /api/health: ok, gentle, mcp=/mcp, mcp_build, auto_scheduler, hands_off, scheduler_interval_sec, gpu_lock, warnings. Use this to confirm the live API and MCP share the same mcp_build."""
+        """Studio health + dependency self-check: Gentle, GPU lock, TTS engine, image provider readiness, model-cache presence, disk space, video encoder. ok=false when Local TTS is selected but broken (jobs refuse to start). Same blockers as check_dependencies."""
         return studio_health_payload()
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def check_dependencies() -> dict:
+        """Fail-fast dependency probe (TTS, image provider, model cache, GPU, disk). Includes fix_command when Local TTS is broken."""
+        from studio.deps_health import check_dependencies as _check
+
+        return _check()
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def get_gpu_lock() -> dict:
@@ -1188,7 +1209,7 @@ def build_mcp() -> "FastMCP":
 
     @mcp.tool
     def set_project_voice(project_id: str, provider: str = "", voice_id: str = "") -> dict:
-        """Per-job TTS override (same as PATCH /api/projects/{id} tts_provider / voice_id). provider openai|elevenlabs|local (or empty to leave). voice_id is the OpenAI/ElevenLabs/local voice name. Empty strings leave that field unchanged."""
+        """Per-job TTS override (same as PATCH /api/projects/{id} tts_provider / voice_id). provider openai|elevenlabs|local|external (or empty to leave). voice_id is the OpenAI/ElevenLabs/local voice name (ignored for external). Empty strings leave that field unchanged."""
         return write_project_voice(
             project_id,
             provider=provider or None,
@@ -1443,7 +1464,7 @@ def build_mcp() -> "FastMCP":
     ) -> dict:
         """Save a ChatGPT-native illustration into the correct project slot (cover / line / 9:16 shorts) so Pictures and list_illustration_jobs see it immediately — no manual copy.
 
-        First read list_illustration_jobs for this project's aspect (16:9 / 9:16 / both) — do not assume 16:9. Generate using jobs[].prompt VERBATIM (live Studio art style). Prefer the job's width/height; wrong-size same-orientation images are auto-resized (Lanczos) and JPEG-compressed ≤1MB server-side — never rejected for size alone. Opposite orientation (portrait into landscape slot or reverse) is still rejected. Cover: filename='script_cover_16x9.png' or 'script_cover_9x16.png', kind='cover'. Lines: filename='b001.png' / … from jobs[].filename. For multi-cover refresh + re-render prefer refresh_covers. NEVER use ChatGPT's long generated image title as the disk filename."""
+        First read list_illustration_jobs for this project's aspect (16:9 / 9:16 / both) — do not assume 16:9. Generate using jobs[].prompt VERBATIM (live Studio art style). Prefer the job's width/height; wrong-size same-orientation images are auto-resized (Lanczos) and JPEG-compressed ≤1MB server-side — never rejected for size alone. Opposite orientation (portrait into landscape slot or reverse) is still rejected. Cover: filename='script_cover_16x9.png' or 'script_cover_9x16.png', kind='cover'. Lines: filename='b001.png' / … from jobs[].filename. For multi-cover refresh + re-render prefer refresh_covers. NEVER use ChatGPT's long generated image title as the disk filename. Returns content_hash (SHA-256) for verification; identical re-uploads are no-ops. For many slots prefer save_illustration_images."""
         return save_illustration(
             project_id,
             filename=filename or None,
@@ -1454,10 +1475,36 @@ def build_mcp() -> "FastMCP":
             prompt_used=prompt_used or None,
         )
 
+    @mcp.tool
+    def save_illustration_images(project_id: str, images: list | str = "") -> dict:
+        """Bulk-save many illustration slots in one MCP call (preferred for 33-slot flows; target under 3 minutes).
+
+        images: list of {filename|line_index, image|image_url, kind?, prompt_used?} or a JSON string of that list.
+        Atomic per-slot writes; returns slot_hashes map and per-item results/errors. Prefer this over dozens of save_illustration_image calls."""
+        return save_illustration_images_impl(project_id, images=images or [])
+
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def list_tts_voices(provider: str = "") -> dict:
-        """List voices for openai, elevenlabs, or local (Resemble Chatterbox / Piper fallback). Empty provider uses Settings tts_provider."""
+        """List voices for openai, elevenlabs, local (Resemble Chatterbox / Piper), or external (uploaded MP3). Empty provider uses Settings tts_provider."""
         return list_voices(provider or None)
+
+    @mcp.tool
+    def upload_narration_audio(
+        project_id: str,
+        audio: str = "",
+        format: str = "mp3",
+        shorts: bool = False,
+    ) -> dict:
+        """Upload operator narration as MP3 for tts_provider=external.
+
+        Pass audio as base64 MP3 (optionally data: URI). Stores narration_external.mp3
+        (or narration_external_9x16.mp3 when shorts=true) under the project folder via
+        atomic temp+rename. Invalidates prior Gentle alignment. Returns ok, path, bytes,
+        duration_seconds (ffprobe). Rejects empty/undecodable audio. Does not run Chatterbox.
+        After upload, set_project_voice(provider='external') if needed, then start_job / resume_job."""
+        from studio.tts_external import upload_narration_audio as _upload
+
+        return _upload(project_id, audio=audio, format=format or "mp3", shorts=bool(shorts))
 
     @mcp.tool
     def generate_speech(
@@ -1467,11 +1514,22 @@ def build_mcp() -> "FastMCP":
         confirm_spend: bool = False,
         spend_confirm_id: str = "",
     ) -> dict:
-        """Create narration WAV using Settings tts_provider (openai, elevenlabs, or local Resemble Chatterbox) unless provider is set, then immediately align phonemes with Gentle (fresh script.json) before scheduler/render. OpenAI TTS requires confirm_spend=true or spend_confirm_id. Local never falls back to paid OpenAI TTS and needs no spend confirm. Local Chatterbox waits for the GPU lock (exclusive with ComfyUI)."""
+        """Create narration WAV using Settings / per-job tts_provider (openai, elevenlabs, local Resemble Chatterbox, or external uploaded MP3), then immediately align phonemes with Gentle (fresh script.json) before scheduler/render. OpenAI TTS requires confirm_spend=true or spend_confirm_id. Local never falls back to paid OpenAI TTS. External requires prior upload_narration_audio and never falls back to Chatterbox. Local Chatterbox waits for the GPU lock (exclusive with ComfyUI)."""
         from studio.settings import load_settings, normalize_tts_provider
 
         settings = load_settings()
-        tts = normalize_tts_provider(provider or settings.get("tts_provider") or "openai")
+        meta = load_meta(project_id)
+        tts = normalize_tts_provider(
+            provider or meta.get("tts_provider") or settings.get("tts_provider") or "local",
+            default="local",
+        )
+        if tts == "external":
+            return generate_audio_then_align(
+                project_id,
+                provider="external",
+                voice_id=voice_id or None,
+                progress=False,
+            )
         _mcp_spend(
             "openai_tts",
             confirm_spend=confirm_spend,

@@ -1303,7 +1303,13 @@ def hands_off_status() -> dict[str, Any]:
             if fal_key
             else "chatgpt cannot run unsupervised (no fal_key for flux fallback). Use flux or comfyui."
         )
-    tts_ok = tts in ("openai", "elevenlabs", "local")
+    tts_ok = tts in ("openai", "elevenlabs", "local", "external")
+    if tts == "external":
+        tts_note = (
+            "external (each job needs upload_narration_audio / narration_external.mp3)"
+        )
+    else:
+        tts_note = tts
     walk_away = bool(text_ok and image_ok and tts_ok)
     catalog = list_topics(kick=False)
     from studio.gpu_lock import gpu_lock_public
@@ -1354,6 +1360,7 @@ def hands_off_status() -> dict[str, Any]:
         "image_unsupervised": image_ok,
         "image_note": image_note,
         "tts_provider": tts,
+        "tts_note": tts_note,
         "tts_unsupervised": tts_ok,
         "youtube_connected": connected,
         "youtube_auto_upload": bool(settings.get("youtube_auto_upload")),

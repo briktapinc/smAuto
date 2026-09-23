@@ -17,6 +17,8 @@ DEFAULT_SIGNUP_LIMIT = 5
 DEFAULT_SIGNUP_WINDOW_SEC = 15 * 60
 DEFAULT_API_LIMIT = 180
 DEFAULT_API_WINDOW_SEC = 60
+DEFAULT_MCP_LIMIT = 600
+DEFAULT_MCP_WINDOW_SEC = 60
 DEFAULT_STATIC_LIMIT = 600
 DEFAULT_STATIC_WINDOW_SEC = 60
 
@@ -60,6 +62,8 @@ def _cfg() -> dict[str, Any]:
         "signup_window": _pos_int(data.get("rate_limit_signup_window_sec"), DEFAULT_SIGNUP_WINDOW_SEC),
         "api_limit": _pos_int(data.get("rate_limit_api"), DEFAULT_API_LIMIT),
         "api_window": _pos_int(data.get("rate_limit_api_window_sec"), DEFAULT_API_WINDOW_SEC),
+        "mcp_limit": _pos_int(data.get("rate_limit_mcp"), DEFAULT_MCP_LIMIT),
+        "mcp_window": _pos_int(data.get("rate_limit_mcp_window_sec"), DEFAULT_MCP_WINDOW_SEC),
         "static_limit": _pos_int(data.get("rate_limit_static"), DEFAULT_STATIC_LIMIT),
         "static_window": _pos_int(data.get("rate_limit_static_window_sec"), DEFAULT_STATIC_WINDOW_SEC),
         "enabled": _truthy(data.get("rate_limit_enabled"), True),
@@ -169,7 +173,7 @@ def classify_path(path: str, method: str) -> str | None:
     if path.startswith("/api/"):
         return "api"
     if path == "/mcp" or path.startswith("/mcp/"):
-        return "api"
+        return "mcp"
     return None
 
 
@@ -200,6 +204,10 @@ def enforce(request: Request) -> JSONResponse | None:
     elif kind == "static":
         limit, window = cfg["static_limit"], cfg["static_window"]
         detail = f"Too many requests. Limit is {limit} per {window}s from this IP."
+        record = True
+    elif kind == "mcp":
+        limit, window = cfg["mcp_limit"], cfg["mcp_window"]
+        detail = f"Too many MCP requests. Limit is {limit} per {window}s from this IP."
         record = True
     else:
         limit, window = cfg["api_limit"], cfg["api_window"]

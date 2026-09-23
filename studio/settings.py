@@ -94,7 +94,7 @@ CHARACTER_SIZE_SCALES = {
     "small": 1.0 / 3.0,
 }
 YOUTUBE_PRIVACY = ("private", "unlisted", "public")
-TTS_PROVIDERS = ("openai", "elevenlabs", "local")
+TTS_PROVIDERS = ("openai", "elevenlabs", "local", "external")
 # Official fal FLUX.2 [dev] endpoint (not Pro). Verified via fal catalog / OpenAPI about.
 FLUX_MODEL = "fal-ai/flux-2"
 BILLBOARD_SIZE = (1920, 1080)
@@ -107,8 +107,8 @@ DEFAULTS = {
     "elevenlabs_model": "eleven_multilingual_v2",
     "fal_key": "",
     "gentle_url": "http://127.0.0.1:8766",
-    "tts_provider": "openai",
-    "voice_provider": "openai",
+    "tts_provider": "local",
+    "voice_provider": "local",
     "openai_voice": "coral",
     "elevenlabs_voice_id": "",
     "local_voice": "default",
@@ -183,7 +183,7 @@ DEFAULTS = {
 }
 
 
-def normalize_tts_provider(value: str | None, default: str = "openai") -> str:
+def normalize_tts_provider(value: str | None, default: str = "local") -> str:
     raw = (value or "").strip().lower().replace("-", "_").replace(" ", "")
     if raw in ("chatgpt", "openai", "openai_tts", "gpt", "gpt4o", "gpt-4o-mini-tts"):
         return "openai"
@@ -191,11 +191,13 @@ def normalize_tts_provider(value: str | None, default: str = "openai") -> str:
         return "elevenlabs"
     if raw in ("local", "resemble", "chatterbox", "piper", "resemble_chatterbox", "resembleai"):
         return "local"
+    if raw in ("external", "upload", "uploaded", "mp3", "narration", "external_audio", "external_mp3"):
+        return "external"
     if not raw:
-        return default if default in TTS_PROVIDERS else "openai"
+        return default if default in TTS_PROVIDERS else "local"
     raise RuntimeError(
-        f"Unknown TTS provider: {value}. Use openai, elevenlabs, or local "
-        "(aliases: resemble, chatterbox)."
+        f"Unknown TTS provider: {value}. Use openai, elevenlabs, local "
+        "(aliases: resemble, chatterbox), or external (operator-uploaded MP3)."
     )
 
 
@@ -205,6 +207,8 @@ def default_voice_for_provider(provider: str, settings: dict | None = None) -> s
         return (data.get("elevenlabs_voice_id") or "").strip()
     if provider == "local":
         return (data.get("local_voice") or "default").strip() or "default"
+    if provider == "external":
+        return "external"
     return (data.get("openai_voice") or "coral").strip() or "coral"
 
 
@@ -912,6 +916,12 @@ def save_settings(updates: dict[str, Any]) -> dict[str, Any]:
     data.pop("app_env", None)
     data.pop("local_base_url", None)
     SETTINGS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    try:
+        from studio.deps_health import invalidate_cached_errors_for_settings
+
+        invalidate_cached_errors_for_settings(changed_keys=list(incoming.keys()))
+    except Exception:
+        pass
     return load_settings()
 
 

@@ -944,11 +944,24 @@ def _stat_image(path: Path, min_bytes: int = MIN_IMAGE_BYTES) -> tuple[bool, int
     return True, int(st.st_mtime * 1000)
 
 
+def _slot_content_hash(path: Path) -> str:
+    """Full SHA-256 hex of slot bytes (empty string if missing)."""
+    try:
+        if not path.is_file() or path.stat().st_size < MIN_IMAGE_BYTES:
+            return ""
+        from studio.content_cache import sha256_file
+
+        return sha256_file(path)
+    except OSError:
+        return ""
+
+
 def attach_illustration_file_meta(project_id: str, job: dict) -> dict:
     dest = Path(job.get("save_path") or "")
     filename = job.get("filename") or dest.name
     is_cover = job.get("role") == "cover" or is_cover_filename(filename)
     ready, mtime = _stat_image(dest)
+    content_hash = _slot_content_hash(dest) if ready else ""
     if is_cover:
         cover_aspect = normalize_aspect(
             job.get("video_aspect") or job.get("aspect") or load_meta(project_id).get("aspect")
@@ -956,6 +969,7 @@ def attach_illustration_file_meta(project_id: str, job: dict) -> dict:
         if ready and not cover_matches_canvas(dest, cover_aspect):
             ready = False
             job["needs_size_regen"] = True
+            content_hash = ""
         rel = f"/api/projects/{project_id}/cover?aspect={cover_aspect}"
         url = f"{rel}&t={mtime}" if ready else rel
     else:
@@ -972,6 +986,8 @@ def attach_illustration_file_meta(project_id: str, job: dict) -> dict:
     job["has_image"] = ready
     job["mtime"] = mtime
     job["url"] = url
+    job["content_hash"] = content_hash
+    job["sha256"] = content_hash
     return job
 
 
@@ -1391,21 +1407,50 @@ def unsupervised_image_provider_gate_skip_message(project_id: str) -> str | None
 
 
 def _decode_image_bytes(image: str, image_url: str | None = None) -> bytes:
+    from studio.content_cache import MAX_BASE64_CHARS, MAX_IMAGE_UPLOAD_BYTES
+
     if image_url:
         response = httpx.get(image_url, timeout=120, follow_redirects=True)
         response.raise_for_status()
-        return response.content
+        data = response.content
+        if len(data) > MAX_IMAGE_UPLOAD_BYTES:
+            raise RuntimeError(
+                f"Downloaded image is {len(data)} bytes (max {MAX_IMAGE_UPLOAD_BYTES})."
+            )
+        return data
     blob = (image or "").strip()
     if not blob:
         raise RuntimeError("No image data provided.")
     if blob.startswith("http://") or blob.startswith("https://"):
         response = httpx.get(blob, timeout=120, follow_redirects=True)
         response.raise_for_status()
-        return response.content
+        data = response.content
+        if len(data) > MAX_IMAGE_UPLOAD_BYTES:
+            raise RuntimeError(
+                f"Downloaded image is {len(data)} bytes (max {MAX_IMAGE_UPLOAD_BYTES})."
+            )
+        return data
     if blob.startswith("data:"):
         blob = blob.split(",", 1)[1]
     blob = re.sub(r"\s+", "", blob)
-    return base64.b64decode(blob)
+    if len(blob) > MAX_BASE64_CHARS:
+        raise RuntimeError(
+            f"Base64 image payload is too large ({len(blob)} chars; max {MAX_BASE64_CHARS}). "
+            "Use save_illustration_images (bulk), binary multipart POST "
+            "/api/projects/{id}/illustrations, or image_url instead of giant JSON base64."
+        )
+    try:
+        data = base64.b64decode(blob, validate=False)
+    except Exception as exc:
+        raise RuntimeError(f"Invalid base64 image data: {exc}") from exc
+    if len(data) > MAX_IMAGE_UPLOAD_BYTES:
+        raise RuntimeError(
+            f"Decoded image is {len(data)} bytes (max {MAX_IMAGE_UPLOAD_BYTES}). "
+            "Use bulk or binary upload for large files."
+        )
+    if len(data) < MIN_IMAGE_BYTES:
+        raise RuntimeError("Decoded image is empty or too small.")
+    return data
 
 
 def save_illustration(
@@ -1541,12 +1586,48 @@ def save_illustration(
         )
 
     dest.parent.mkdir(parents=True, exist_ok=True)
+    meta = load_meta(project_id)
+    job_aspect = normalize_aspect(meta.get("aspect") or DEFAULT_ASPECT)
     data = _decode_image_bytes(image, image_url)
+    from studio.content_cache import sha256_bytes
+
+    inbound_hash = sha256_bytes(data)
+    # Idempotent: same bytes already on slot → no rewrite (avoids upload_reset churn).
+    if dest.is_file() and dest.stat().st_size >= MIN_IMAGE_BYTES:
+        existing = _slot_content_hash(dest)
+        if existing and existing == inbound_hash:
+            job_meta = {
+                "filename": dest.name,
+                "role": "cover" if kind == "cover" else ("shorts_line" if kind == "shorts_line" else "line"),
+                "save_path": str(dest),
+                "aspect": aspect or (ASPECT_9_16 if kind == "shorts_line" else job_aspect),
+                "video_aspect": aspect or (ASPECT_9_16 if kind == "shorts_line" else job_aspect),
+            }
+            if slot:
+                for key in ("index", "width", "height", "image_size", "chatgpt_preset", "video_aspect", "aspect"):
+                    if slot.get(key) is not None:
+                        job_meta[key] = slot.get(key)
+            attach_illustration_file_meta(project_id, job_meta)
+            return {
+                "ok": True,
+                "path": str(dest),
+                "filename": dest.name,
+                "kind": kind,
+                "project_id": project_id,
+                "content_hash": existing,
+                "sha256": existing,
+                "unchanged": True,
+                "ready": bool(job_meta.get("ready")),
+                "has_image": bool(job_meta.get("has_image")),
+                "url": job_meta.get("url") or "",
+                "mtime": job_meta.get("mtime") or 0,
+                "index": job_meta.get("index"),
+                "gui_visible": True,
+                "note": "Slot already had identical content; skipped rewrite.",
+            }
     # Stage + validate/fit BEFORE touching the canonical slot so a wrong-size
     # reject never overwrites good art (or leaves a bad PNG on disk).
     staging = dest.with_suffix(".staging.png")
-    meta = load_meta(project_id)
-    job_aspect = normalize_aspect(meta.get("aspect") or DEFAULT_ASPECT)
     named_cover = None
     # Archive the current active cover before replace (legacy projects / first history seed).
     if (is_cover_filename(filename, kind) or normalize_slot_kind(kind) == "cover") and dest.is_file():
@@ -1572,8 +1653,14 @@ def save_illustration(
             # Cover-layout line art must match the job canvas (ChatGPT often defaults to square).
             fit_illustration_to_canvas(staging, job_aspect, layout="cover")
         _replace_path_aware(staging, dest)
-    except Exception:
+    except Exception as exc:
         staging.unlink(missing_ok=True)
+        # Map connection-ish failures for structured clients.
+        msg = str(exc)
+        if "reset" in msg.lower() or "broken pipe" in msg.lower():
+            from studio.job_errors import UPLOAD_RESET
+
+            raise RuntimeError(f"[{UPLOAD_RESET}] {msg}") from exc
         raise
     finally:
         staging.unlink(missing_ok=True)
@@ -1609,6 +1696,7 @@ def save_illustration(
             "prompt_match": prompt_match,
             "path": str(dest),
             "client_filename": client_filename,
+            "content_hash": _slot_content_hash(dest),
         }
         meta["illustration_saves"] = stamps
         meta["last_illustration_save"] = {
@@ -1643,6 +1731,9 @@ def save_illustration(
         "prompt_source": "app",
         "ready": bool(job_meta.get("ready")),
         "has_image": bool(job_meta.get("has_image")),
+        "content_hash": job_meta.get("content_hash") or _slot_content_hash(dest),
+        "sha256": job_meta.get("content_hash") or _slot_content_hash(dest),
+        "inbound_hash": inbound_hash,
         "url": job_meta.get("url") or "",
         "mtime": job_meta.get("mtime") or 0,
         "index": job_meta.get("index"),
@@ -1694,10 +1785,83 @@ def save_upload(
     kind: str = "billboard",
     aspect: str | None = None,
 ) -> dict:
+    from studio.content_cache import MAX_IMAGE_UPLOAD_BYTES
+
+    if len(data) > MAX_IMAGE_UPLOAD_BYTES:
+        raise RuntimeError(
+            f"Upload is {len(data)} bytes (max {MAX_IMAGE_UPLOAD_BYTES})."
+        )
     encoded = base64.b64encode(data).decode("ascii")
     return save_illustration(
         project_id, filename=filename, image=encoded, kind=kind, aspect=aspect
     )
+
+
+def save_illustration_images(
+    project_id: str,
+    images: list[dict] | str | None = None,
+) -> dict:
+    """Bulk-save many illustration slots in one call (target: 33 slots under 3 minutes).
+
+    Each item: {filename|line_index, image|image_url, kind?, prompt_used?}.
+    ``images`` may also be a JSON string. Saves are sequential with atomic writes;
+    failures on one slot do not roll back prior successes.
+    """
+    import json as _json
+    import time as _time
+
+    if isinstance(images, str):
+        images = _json.loads(images)
+    items = list(images or [])
+    if not items:
+        raise RuntimeError("Pass images=[{filename, image|image_url, kind?}, ...].")
+    started = _time.monotonic()
+    results: list[dict] = []
+    errors: list[dict] = []
+    for i, raw in enumerate(items):
+        if not isinstance(raw, dict):
+            errors.append({"index": i, "error": "Each image entry must be an object.", "error_code": "upload_reset"})
+            continue
+        try:
+            out = save_illustration(
+                project_id,
+                filename=raw.get("filename") or None,
+                line_index=raw.get("line_index") if raw.get("line_index") is not None else raw.get("index"),
+                image=raw.get("image") or "",
+                image_url=raw.get("image_url") or None,
+                kind=raw.get("kind") or "billboard",
+                aspect=raw.get("aspect") or None,
+                save_path=raw.get("save_path") or None,
+                prompt_used=raw.get("prompt_used") or None,
+            )
+            results.append(out)
+        except Exception as exc:
+            from studio.job_errors import classify_error
+
+            errors.append(
+                {
+                    "index": i,
+                    "filename": raw.get("filename"),
+                    "error": str(exc),
+                    "error_code": classify_error(exc),
+                }
+            )
+    elapsed_ms = int((_time.monotonic() - started) * 1000)
+    return {
+        "ok": not errors,
+        "project_id": project_id,
+        "saved": len(results),
+        "failed": len(errors),
+        "total": len(items),
+        "elapsed_ms": elapsed_ms,
+        "results": results,
+        "errors": errors,
+        "slot_hashes": {
+            r.get("filename"): r.get("content_hash") or r.get("sha256")
+            for r in results
+            if r.get("filename")
+        },
+    }
 
 
 def _snap16(value: int) -> int:

@@ -542,9 +542,30 @@ def request_run(
         st = job_status(pid)
         st["attached"] = True
         st["queued"] = False
+        st["idempotent"] = True
+        st["noop"] = True
+        st["error_code"] = "already_running"
+        st["detail"] = st.get("detail") or "Job already running; attached (no duplicate)."
         info = queue_info_for_project(pid)
         if info:
             st["queue"] = info
+        return st
+
+    # Already queued (not running) — refresh row, do not double-enqueue.
+    existing_q = queue_info_for_project(pid)
+    if existing_q and existing_q.get("status") == "queued":
+        st = job_status(pid)
+        st["started"] = False
+        st["queued"] = True
+        st["idempotent"] = True
+        st["noop"] = True
+        st["error_code"] = "already_queued"
+        st["queue"] = existing_q
+        st["queue_position"] = existing_q.get("queue_position")
+        st["detail"] = (
+            f"Already queued (position {existing_q.get('queue_position')}); "
+            "not creating a duplicate queue entry."
+        )
         return st
 
     oid, title = _resolve_owner(pid, owner_id)

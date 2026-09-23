@@ -274,9 +274,10 @@ def spawn_studio(*, wait_for_port: bool = True) -> dict[str, Any]:
     }
 
 
-def _exit_soon(delay: float = 0.45) -> None:
+def _exit_soon(delay: float = 1.25) -> None:
+    """Give in-flight MCP/HTTP responses time to flush before hard exit."""
     def _go() -> None:
-        time.sleep(max(0.05, delay))
+        time.sleep(max(0.25, delay))
         os._exit(0)
 
     threading.Thread(target=_go, name="studio-restart-exit", daemon=True).start()

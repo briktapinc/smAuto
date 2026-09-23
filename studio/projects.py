@@ -50,6 +50,21 @@ from studio.utils_script import (
 INPUT_STEM = "script"
 
 
+def _project_audio_source_label(meta: dict[str, Any]) -> str:
+    provider = normalize_tts_provider(
+        meta.get("tts_provider")
+        or meta.get("voice_provider")
+        or load_settings().get("tts_provider")
+        or "local",
+        default="local",
+    )
+    if provider == "external":
+        return "external"
+    if provider == "local":
+        return "chatterbox"
+    return provider
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -500,7 +515,8 @@ def create_project(
     (folder / f"{INPUT_STEM}_billboards").mkdir(exist_ok=True)
     (folder / f"{INPUT_STEM}_backgrounds").mkdir(exist_ok=True)
     tts_provider = normalize_tts_provider(
-        settings.get("tts_provider") or settings.get("voice_provider")
+        settings.get("tts_provider") or settings.get("voice_provider") or "local",
+        default="local",
     )
     meta = {
         "id": project_id,
@@ -630,6 +646,12 @@ def set_image_provider(project_id: str, provider: str) -> dict[str, Any]:
             switched = request_image_provider_switch(project_id, new)
         except Exception:
             switched = None
+        try:
+            from studio.deps_health import invalidate_cached_errors_for_settings
+
+            invalidate_cached_errors_for_settings(changed_keys=["image_provider"], image_provider=new)
+        except Exception:
+            pass
     payload = project_payload(project_id)
     if switched and switched.get("switching"):
         payload["provider_switch"] = switched
@@ -1145,6 +1167,8 @@ def project_payload(project_id: str) -> dict[str, Any]:
         "character_size": project_character_size(project_id),
         "include_bubblehead": project_include_bubblehead(meta),
         "background_file": project_background_file(project_id),
+        "audio_source": _project_audio_source_label(meta),
+        "has_external_audio": (project_dir(project_id) / "narration_external.mp3").is_file(),
         "youtube_auto_upload": project_youtube_auto_upload(project_id),
         "youtube_privacy": project_youtube_privacy(project_id),
         "youtube": meta.get("youtube"),

@@ -79,10 +79,16 @@ _PERSIST = (
     "running",
     "paused",
     "error",
+    "error_code",
     "youtube_error",
     "resumed_from",
     "started_at",
     "finished_at",
+    "step_timings",
+    "active_step",
+    "waiting_on",
+    "encoder",
+    "encoder_preset",
 )
 _EPHEMERAL = ("_token", "_stop", "_alive", "_provider_switch", "_generating_file")
 
@@ -132,6 +138,66 @@ _ARTIFACT_KEYS = (
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _job_audio_source(meta: dict) -> str:
+    from studio.settings import normalize_tts_provider, load_settings
+
+    provider = normalize_tts_provider(
+        meta.get("tts_provider")
+        or meta.get("voice_provider")
+        or load_settings().get("tts_provider")
+        or "local",
+        default="local",
+    )
+    if provider == "external":
+        return "external"
+    if provider == "local":
+        return "chatterbox"
+    return provider
+
+
+def _close_step_timing(job: dict, *, end: str | None = None) -> None:
+    """Finalize the open active_step entry in step_timings."""
+    timings = list(job.get("step_timings") or [])
+    active = (job.get("active_step") or "").strip()
+    if not active or not timings:
+        return
+    end_ts = end or _now()
+    for entry in reversed(timings):
+        if entry.get("step") == active and not entry.get("ended_at"):
+            entry["ended_at"] = end_ts
+            try:
+                from datetime import datetime as _dt
+
+                start = _dt.fromisoformat(str(entry.get("started_at")))
+                finish = _dt.fromisoformat(end_ts)
+                entry["duration_ms"] = int((finish - start).total_seconds() * 1000)
+            except Exception:
+                entry["duration_ms"] = None
+            break
+    job["step_timings"] = timings
+
+
+def _open_step_timing(job: dict, step: str, *, detail: str = "") -> None:
+    step = (step or "").strip()
+    if not step:
+        return
+    now = _now()
+    _close_step_timing(job, end=now)
+    timings = list(job.get("step_timings") or [])
+    timings.append(
+        {
+            "step": step,
+            "started_at": now,
+            "ended_at": None,
+            "duration_ms": None,
+            "detail": (detail or "")[:240],
+        }
+    )
+    # Keep last ~40 steps to bound meta.json size
+    job["step_timings"] = timings[-40:]
+    job["active_step"] = step
 
 
 def estimate_progress_pct(step: str | None, detail: str | None = None, *, running: bool | None = None) -> int | None:
@@ -363,6 +429,13 @@ def job_status(project_id: str) -> dict:
         "detail": job.get("detail"),
         "progress_pct": job.get("progress_pct"),
         "error": job.get("error"),
+        "error_code": job.get("error_code"),
+        "active_step": job.get("active_step") or job.get("step"),
+        "waiting_on": job.get("waiting_on"),
+        "step_timings": job.get("step_timings") or [],
+        "encoder": job.get("encoder"),
+        "encoder_preset": job.get("encoder_preset"),
+        "audio_source": meta.get("audio_source") or _job_audio_source(meta),
         "resume_from": nxt,
         "resumed_from": job.get("resumed_from") or nxt,
         "can_start": not busy and not queued,
@@ -731,7 +804,7 @@ def _run_resume(project_id: str) -> None:
     if provider == "chatgpt":
         skip_msg = unsupervised_image_provider_gate_skip_message(project_id)
         if skip_msg:
-            _log.info(skip_msg)
+            _log.info("skip_decision=provider_gate_skip project_id=%s detail=%s", project_id, skip_msg)
             print(skip_msg)
         else:
             from studio.projects import set_image_provider
@@ -752,33 +825,53 @@ def _run_resume(project_id: str) -> None:
 
     def _gpu_media_steps() -> bool:
         nonlocal arts, provider
-        if need_images:
-            _progress(project_id, step="illustrations", detail="Generating title-card cover and backgrounds...")
-            if is_studio_image_provider(provider):
-                illustration_jobs(project_id)
-                if provider == "comfyui":
-                    from studio.comfyui import ensure_comfyui_ready
+        from studio.content_cache import content_fingerprint, remember_step, should_skip_step
 
-                    ensure_comfyui_ready()
-                else:
-                    ensure_fal_ready()
-                generate_illustrations(
+        fp = content_fingerprint(project_id).get("fingerprint") or ""
+        if need_images:
+            skip = should_skip_step(project_id, "illustrations", fingerprint=fp)
+            if skip.get("skip") and arts.get("cover") and arts.get("illustrations"):
+                _log.info(
+                    "skip_decision=cache_reuse project_id=%s step=illustrations detail=%s",
                     project_id,
-                    progress=lambda detail: _progress(project_id, step="illustrations", detail=detail),
-                    cancel_check=lambda: _check_stop(project_id),
+                    skip.get("detail"),
+                )
+                _progress(
+                    project_id,
+                    step="illustrations",
+                    detail=skip.get("detail") or "Reusing cached illustrations.",
+                    waiting_on=None,
                 )
             else:
-                for canvas in aspects_to_render(load_meta(project_id).get("aspect")):
-                    generate_cover_image(
+                _progress(project_id, step="illustrations", detail="Generating title-card cover and backgrounds...", waiting_on="image_provider")
+                if is_studio_image_provider(provider):
+                    illustration_jobs(project_id)
+                    if provider == "comfyui":
+                        from studio.comfyui import ensure_comfyui_ready
+
+                        ensure_comfyui_ready()
+                    else:
+                        ensure_fal_ready()
+                    generate_illustrations(
                         project_id,
-                        aspect=canvas,
-                        progress=lambda detail: _progress(project_id, step="cover", detail=detail),
+                        progress=lambda detail: _progress(project_id, step="illustrations", detail=detail),
+                        cancel_check=lambda: _check_stop(project_id),
                     )
+                else:
+                    for canvas in aspects_to_render(load_meta(project_id).get("aspect")):
+                        generate_cover_image(
+                            project_id,
+                            aspect=canvas,
+                            progress=lambda detail: _progress(project_id, step="cover", detail=detail),
+                        )
+                remember_step(project_id, "illustrations", fingerprint=fp, detail="illustrations ready")
 
         _check_stop(project_id)
         arts = inspect_artifacts(project_id)
         if not arts["audio"]:
+            _progress(project_id, step="audio", detail="Generating narration…", waiting_on="tts")
             generate_audio_then_align(project_id)
+            remember_step(project_id, "audio", fingerprint=fp, detail="audio+align ready")
         elif not arts["alignment"]:
             _ensure_fresh_alignment(project_id)
 
@@ -786,7 +879,9 @@ def _run_resume(project_id: str) -> None:
         arts = inspect_artifacts(project_id)
         if not arts["video"]:
             render_video(project_id, skip_completed=True, generate_missing_audio=True)
+            remember_step(project_id, "video", fingerprint=fp, detail="video ready")
             return True
+        remember_step(project_id, "video", fingerprint=fp, detail="video already present")
         return False
 
     if gpu_section:
@@ -842,8 +937,30 @@ def _attach_live_worker(project_id: str, unpause: bool = False) -> dict | None:
 
 def _launch_pipeline(project_id: str, kind: str, *, wait_gpu: bool = True) -> dict:
     load_meta(project_id)
+    from studio.deps_health import refuse_job_if_deps_broken
+
+    blocked = refuse_job_if_deps_broken()
+    if blocked:
+        _set_job(
+            project_id,
+            running=False,
+            paused=False,
+            step="error",
+            error=blocked.get("error"),
+            error_code=blocked.get("error_code"),
+            detail=blocked.get("detail") or blocked.get("error"),
+            finished_at=_now(),
+        )
+        st = job_status(project_id)
+        st.update({k: blocked[k] for k in ("ok", "started", "queued", "attached", "error", "error_code", "fix_command", "dependencies") if k in blocked})
+        return st
+
     attached = _attach_live_worker(project_id, unpause=True)
     if attached:
+        attached["idempotent"] = True
+        attached["noop"] = True
+        attached["error_code"] = "already_running"
+        attached["detail"] = attached.get("detail") or "Job already running; attached (no duplicate)."
         return attached
 
     artifacts = inspect_artifacts(project_id)
@@ -857,6 +974,7 @@ def _launch_pipeline(project_id: str, kind: str, *, wait_gpu: bool = True) -> di
             st = job_status(project_id)
             st["started"] = False
             st["gpu_lock"] = True
+            st["error_code"] = "gpu_busy"
             st["detail"] = "GPU is busy; not starting a second image/TTS/render job."
             return st
     if nxt == "done":
@@ -873,6 +991,8 @@ def _launch_pipeline(project_id: str, kind: str, *, wait_gpu: bool = True) -> di
         st = job_status(project_id)
         st["resumed_from"] = "done"
         st["attached"] = False
+        st["idempotent"] = True
+        st["noop"] = True
         st["artifacts"] = _slim_artifacts(artifacts)
         return st
 
@@ -1008,6 +1128,17 @@ def _set_job(project_id: str, **fields) -> None:
         incoming_stop = fields["_stop"] if "_stop" in fields else job.get("_stop")
         if incoming_stop and fields.get("running") is True and "_stop" not in fields:
             raise JobHalted(incoming_stop)
+        new_step = fields.get("step")
+        if new_step is not None and str(new_step) != str(job.get("step") or ""):
+            _open_step_timing(job, str(new_step), detail=str(fields.get("detail") or job.get("detail") or ""))
+        if fields.get("running") is False and job.get("active_step"):
+            _close_step_timing(job)
+            if "active_step" not in fields:
+                fields = {**fields, "active_step": None}
+        if fields.get("error") and "error_code" not in fields:
+            from studio.job_errors import classify_error
+
+            fields = {**fields, "error_code": classify_error(fields.get("error"))}
         job.update(fields)
         step = job.get("step")
         detail = job.get("detail")
@@ -1196,8 +1327,91 @@ def generate_audio_then_align(
         or meta.get("voice_provider")
         or settings.get("tts_provider")
         or settings.get("voice_provider")
-        or "openai"
+        or "local",
+        default="local",
     )
+
+    # External: reuse cached Gentle alignment when MP3 + transcript hashes match.
+    if tts == "external":
+        from studio.aspect import needs_explainer_assets
+        from studio.tts_external import (
+            EXTERNAL_AUDIO_MISSING,
+            can_reuse_external_alignment,
+            ensure_spoken_transcript,
+            remember_external_alignment,
+            require_external_mp3,
+        )
+
+        want_full = needs_explainer_assets(meta.get("aspect"))
+        want_shorts = project_generate_9x16(meta)
+        # Fail fast if required MP3(s) missing — never fall back to Chatterbox.
+        if want_full or (not want_full and not want_shorts):
+            require_external_mp3(project_id, shorts=False)
+        if want_shorts:
+            try:
+                require_external_mp3(project_id, shorts=True)
+            except RuntimeError as exc:
+                # Allow shorts to reuse main MP3 only when shorts file missing? Spec: no fallback.
+                raise RuntimeError(
+                    f"[{EXTERNAL_AUDIO_MISSING}] tts_provider=external and generate_9x16 is on, "
+                    "but narration_external_9x16.mp3 is missing. "
+                    "Call upload_narration_audio(..., shorts path) or disable generate_9x16."
+                ) from exc
+
+        reuse_full = (not want_full) or can_reuse_external_alignment(project_id, shorts=False)
+        reuse_shorts = (not want_shorts) or can_reuse_external_alignment(project_id, shorts=True)
+        if reuse_full and reuse_shorts and project_alignment_is_fresh(project_id):
+            if progress:
+                _progress(
+                    project_id,
+                    step="align",
+                    detail="Reusing cached Gentle alignment (external audio unchanged).",
+                    waiting_on=None,
+                )
+            _log.info(
+                "skip_decision=cache_reuse project_id=%s step=align source=external",
+                project_id,
+            )
+            return {
+                "ok": True,
+                "reused": True,
+                "audio_source": "external",
+                "detail": "Cached Gentle alignment reused.",
+            }
+
+        if progress:
+            _progress(
+                project_id,
+                step="audio",
+                detail="Materializing uploaded external narration MP3…",
+                waiting_on="external_audio",
+            )
+        ensure_spoken_transcript(project_id, shorts=False)
+        if want_shorts:
+            ensure_spoken_transcript(project_id, shorts=True)
+        generate_project_audio(project_id, provider="external", voice_id=voice_id)
+        invalidate_render_artifacts(project_id, alignment=True)
+        if progress:
+            _progress(project_id, step="gentle", detail="Starting Gentle (Docker if available, else local)...")
+        ensure_gentle()
+        if progress:
+            _progress(project_id, step="align", detail="Aligning phonemes with Gentle (external audio)…", waiting_on="gentle")
+        result = align_project_audio(project_id)
+        if want_full or (not want_full and not want_shorts):
+            remember_external_alignment(project_id, shorts=False)
+        if want_shorts:
+            remember_external_alignment(project_id, shorts=True)
+        if not project_alignment_is_fresh(project_id):
+            raise RuntimeError(
+                "External audio was prepared but Gentle json still does not match the current script. "
+                "Check the transcript and re-align."
+            )
+        result["audio_source"] = "external"
+        result["reused"] = False
+        if progress:
+            _progress(project_id, waiting_on=None)
+        return result
+
     if progress:
         _progress(project_id, step="audio", detail="Generating speech...")
     if tts == "local":
@@ -1727,7 +1941,17 @@ def _render_one_canvas(
         else:
             _progress(project_id, step="ffmpeg", detail=f"{canvas} frames already exist; muxing video...")
         _check_stop(project_id)
-        _progress(project_id, step="ffmpeg", detail=f"Muxing 5s {canvas} cover still, then video and audio...")
+        from studio.deps_health import detect_video_encoder
+
+        enc = detect_video_encoder()
+        _progress(
+            project_id,
+            step="ffmpeg",
+            detail=f"Muxing 5s {canvas} cover still, then video and audio ({enc.get('encoder')}/{enc.get('preset')})...",
+            encoder=enc.get("encoder"),
+            encoder_preset=enc.get("preset"),
+            waiting_on="ffmpeg",
+        )
         _run_code(
             "videoFinisher.py",
             [
@@ -1739,6 +1963,12 @@ def _render_one_canvas(
                 "--frames_dir", str(frames_path),
                 "--output", str(video_path),
             ],
+        )
+        _set_job(
+            project_id,
+            encoder=enc.get("encoder"),
+            encoder_preset=enc.get("preset"),
+            waiting_on=None,
         )
         _check_stop(project_id)
         _progress(project_id, step="music", detail=f"Mixing looped background music under the {canvas} video...")

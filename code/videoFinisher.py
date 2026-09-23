@@ -65,6 +65,21 @@ def _resolve_ffmpeg() -> str:
     return resolve_ffmpeg()
 
 def _mux(audio_filter):
+    # Ensure repo root is importable before studio.* imports.
+    _resolve_ffmpeg()
+    from studio.deps_health import detect_video_encoder
+
+    enc = detect_video_encoder()
+    encoder = enc.get("encoder") or "libx264"
+    preset = enc.get("preset") or "veryfast"
+    # Expose for parent pipeline job status
+    try:
+        import os as _os
+
+        _os.environ["BUBBLEPOD_LAST_VIDEO_ENCODER"] = str(encoder)
+        _os.environ["BUBBLEPOD_LAST_VIDEO_PRESET"] = str(preset)
+    except Exception:
+        pass
     vf = (
         f"[0:v]scale={COVER_W}:{COVER_H}:force_original_aspect_ratio=increase,"
         f"crop={COVER_W}:{COVER_H},fps=30,format=yuv420p,setsar=1,setpts=PTS-STARTPTS[cover];"
@@ -80,14 +95,51 @@ def _mux(audio_filter):
         "-i", wav_path,
         "-filter_complex", vf,
         "-map", "[v]", "-map", "[a]",
-        "-vcodec", "libx264",
-        "-pix_fmt", "yuv420p",
-        "-b:v", "4M",
-        "-c:a", "aac",
-        "-shortest",
-        OUTPUT_FILE,
+        "-c:v", encoder,
     ]
-    subprocess.check_call(command)
+    if encoder == "h264_nvenc":
+        command.extend(["-preset", preset, "-b:v", "4M", "-pix_fmt", "yuv420p"])
+    else:
+        command.extend(["-preset", preset, "-pix_fmt", "yuv420p", "-b:v", "4M"])
+    command.extend(
+        [
+            "-c:a", "aac",
+            "-shortest",
+            OUTPUT_FILE,
+        ]
+    )
+    try:
+        subprocess.check_call(command)
+    except subprocess.CalledProcessError:
+        if encoder != "libx264":
+            # Fall back to CPU encode if NVENC fails at runtime.
+            print(f"{encoder} failed; falling back to libx264", file=sys.stderr)
+            command = [
+                _resolve_ffmpeg(), "-y",
+                "-loop", "1", "-framerate", "30", "-t", str(COVER_SECONDS), "-i", cover_path,
+                "-framerate", "30",
+                "-i", os.path.join(FRAMES_DIR, "f%06d.png"),
+                "-i", wav_path,
+                "-filter_complex", vf,
+                "-map", "[v]", "-map", "[a]",
+                "-vcodec", "libx264",
+                "-preset", "veryfast",
+                "-pix_fmt", "yuv420p",
+                "-b:v", "4M",
+                "-c:a", "aac",
+                "-shortest",
+                OUTPUT_FILE,
+            ]
+            try:
+                import os as _os
+
+                _os.environ["BUBBLEPOD_LAST_VIDEO_ENCODER"] = "libx264"
+                _os.environ["BUBBLEPOD_LAST_VIDEO_PRESET"] = "veryfast"
+            except Exception:
+                pass
+            subprocess.check_call(command)
+        else:
+            raise
 
 try:
     _mux(f"[2:a]adelay={COVER_MS}:all=1,asetpts=PTS-STARTPTS[a]")

@@ -432,6 +432,7 @@
                 <option value="openai">OpenAI / ChatGPT TTS</option>
                 <option value="elevenlabs">ElevenLabs</option>
                 <option value="local">Local (Resemble Chatterbox)</option>
+                <option value="external">External audio (upload MP3)</option>
               </select>
             </label>
             <label class="grow">Voice
@@ -440,6 +441,16 @@
             <button id="gen-audio" class="primary">Generate audio</button>
           </div>
           <p id="voice-local-hint" class="hint" hidden>Local uses Resemble Chatterbox on this PC (no OpenAI TTS bill). Optional clone: drop a short .wav into <code>user_data/voices/</code>. After the wav is written, Gentle still aligns phonemes.</p>
+          <div id="voice-external-block" hidden>
+            <p class="hint">External skips Chatterbox. Upload an MP3 narration that matches the script (emotion tags are stripped before Gentle align). MCP: <code>upload_narration_audio</code>.</p>
+            <div class="row">
+              <label class="grow">Narration MP3
+                <input id="narration-mp3" type="file" accept="audio/mpeg,audio/mp3,.mp3" />
+              </label>
+              <button id="upload-narration" type="button">Upload MP3</button>
+            </div>
+            <p id="voice-external-status" class="meta"></p>
+          </div>
           <audio id="audio-player" controls hidden></audio>
         </div>
       </section>
@@ -730,13 +741,14 @@
                 </label>
                 <label>Voice / TTS provider
                   <select name="tts_provider">
-                    <option value="openai" selected>OpenAI / ChatGPT TTS (paid)</option>
+                    <option value="openai">OpenAI / ChatGPT TTS (paid)</option>
                     <option value="elevenlabs">ElevenLabs (paid)</option>
-                    <option value="local">Local (Resemble Chatterbox)</option>
+                    <option value="local" selected>Local (Resemble Chatterbox)</option>
+                    <option value="external">External audio (upload MP3 per job)</option>
                   </select>
                 </label>
                 <p id="local-tts-status" class="meta"></p>
-                <p class="hint">Local is Resemble’s open-source Chatterbox on this machine — no OpenAI TTS charges. Install with <code>pip install chatterbox-tts</code> (or <code>pip install -r requirements-tts-local.txt</code>) and restart Studio.</p>
+                <p class="hint">Local is Resemble’s open-source Chatterbox on this machine — no OpenAI TTS charges. Install with <code>pip install chatterbox-tts</code> (or <code>pip install -r requirements-tts-local.txt</code>) and restart Studio. External uses an operator-uploaded MP3 per job (no Chatterbox); each job must call upload_narration_audio first.</p>
               </div>
               <div class="field-group">
                 <label>OpenAI TTS model

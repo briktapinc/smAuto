@@ -912,6 +912,22 @@ def create_app() -> FastAPI:
         except Exception:
             pass
         try:
+            def _warm_models() -> None:
+                from studio.deps_health import model_cache_status, warm_local_tts_models
+                from studio.settings import load_settings, normalize_tts_provider
+
+                settings = load_settings()
+                if normalize_tts_provider(settings.get("tts_provider")) != "local":
+                    return
+                cache = model_cache_status()
+                if cache.get("chatterbox_cached"):
+                    return
+                warm_local_tts_models(timeout_sec=900)
+
+            threading.Thread(target=_warm_models, daemon=True, name="tts-model-warm").start()
+        except Exception:
+            pass
+        try:
             yield
         finally:
             try:
@@ -1445,6 +1461,21 @@ def create_app() -> FastAPI:
                 ngrok = None
             out["ngrok"] = ngrok
             out["warnings"] = asset_warnings()
+            try:
+                from studio.deps_health import check_dependencies
+
+                deps = check_dependencies(settings=settings)
+                out["ok"] = bool(deps.get("ok", True))
+                out["tts"] = deps.get("tts")
+                out["image_provider"] = deps.get("image_provider")
+                out["model_cache"] = deps.get("model_cache")
+                out["disk"] = deps.get("disk")
+                out["gpu"] = deps.get("gpu")
+                out["dependencies"] = deps
+                out["can_start_jobs"] = deps.get("can_start_jobs")
+                out["blockers"] = deps.get("blockers") or []
+            except Exception as exc:
+                out["dependencies_error"] = str(exc)
         return out
 
     @app.get("/api/gpu-lock")
@@ -2573,6 +2604,38 @@ def create_app() -> FastAPI:
         except Exception as exc:
             raise _err(exc)
 
+    @app.post("/api/projects/{project_id}/illustrations/bulk")
+    async def upload_illustrations_bulk(project_id: str, request: Request):
+        """JSON bulk upload: {images:[{filename, image|image_url, kind?}]} — same as MCP save_illustration_images."""
+        from studio.illustrations import save_illustration_images as bulk_save
+
+        try:
+            body = await request.json()
+            images = body.get("images") if isinstance(body, dict) else body
+            return bulk_save(project_id, images=images)
+        except Exception as exc:
+            raise _err(exc)
+
+    @app.post("/api/projects/{project_id}/narration")
+    async def upload_narration(
+        project_id: str,
+        file: UploadFile = File(...),
+        shorts: bool = Form(False),
+    ):
+        """Binary MP3 upload for tts_provider=external (same as MCP upload_narration_audio)."""
+        from studio.tts_external import upload_narration_audio
+
+        try:
+            data = await file.read()
+            return upload_narration_audio(
+                project_id,
+                data=data,
+                format="mp3",
+                shorts=bool(shorts),
+            )
+        except Exception as exc:
+            raise _err(exc)
+
     @app.get("/api/gentle")
     def get_gentle():
         return gentle_status()
@@ -2902,4 +2965,15 @@ def run() -> None:
         clear_stale_gpu_lock()
     except Exception:
         pass
-    uvicorn.run("studio.web:create_app", factory=True, host=host, port=port, reload=False)
+    uvicorn.run(
+        "studio.web:create_app",
+        factory=True,
+        host=host,
+        port=port,
+        reload=False,
+        # Keep MCP streamable-HTTP sessions alive through nginx (proxy_read 600s).
+        timeout_keep_alive=75,
+        timeout_graceful_shutdown=30,
+        limit_concurrency=100,
+        h11_max_incomplete_event_size=64 * 1024 * 1024,
+    )

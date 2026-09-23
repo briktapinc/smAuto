@@ -35,7 +35,8 @@ OPENAI_VOICES = [
 def list_voices(provider: str | None = None) -> dict:
     settings = load_settings()
     provider = normalize_tts_provider(
-        provider or settings.get("tts_provider") or settings.get("voice_provider") or "openai"
+        provider or settings.get("tts_provider") or settings.get("voice_provider") or "local",
+        default="local",
     )
     if provider == "openai":
         return {"provider": "openai", "voices": OPENAI_VOICES}
@@ -43,6 +44,13 @@ def list_voices(provider: str | None = None) -> dict:
         return {"provider": "elevenlabs", "voices": _eleven_voices(settings)}
     if provider == "local":
         return list_local_voices()
+    if provider == "external":
+        return {
+            "provider": "external",
+            "voices": [{"id": "external", "name": "Uploaded MP3", "style": "operator narration"}],
+            "ready": True,
+            "note": "Upload narration with upload_narration_audio (MCP) or Voice → Upload MP3. No TTS engine runs.",
+        }
     raise RuntimeError(f"Unknown voice provider: {provider}")
 
 
@@ -202,7 +210,8 @@ def generate_audio(
         or meta.get("voice_provider")
         or settings.get("tts_provider")
         or settings.get("voice_provider")
-        or "openai"
+        or "local",
+        default="local",
     )
     if shorts:
         write_shorts_scripts(project_id)
@@ -215,6 +224,7 @@ def generate_audio(
     text = raw_path.read_text(encoding="utf-8")
     dest = prefix.with_suffix(".wav")
     extra = {}
+    voice = voice_id or meta.get("voice_id") or default_voice_for_provider(provider, settings)
     if provider == "openai":
         voice = voice_id or meta.get("voice_id") or default_voice_for_provider("openai", settings)
         _write_openai_wav(text, dest, settings, voice)
@@ -225,15 +235,28 @@ def generate_audio(
         voice = voice_id or meta.get("voice_id") or default_voice_for_provider("local", settings)
         extra = write_local_wav(text, dest, voice)
         voice = extra.get("voice_id") or voice or "default"
+    elif provider == "external":
+        from studio.tts_external import ensure_spoken_transcript, materialize_external_wav
+
+        ensure_spoken_transcript(project_id, shorts=shorts)
+        extra = materialize_external_wav(project_id, dest, shorts=shorts)
+        voice = "external"
     else:
-        raise RuntimeError("Voice provider must be openai, elevenlabs, or local (Resemble Chatterbox).")
+        raise RuntimeError(
+            "Voice provider must be openai, elevenlabs, local (Resemble Chatterbox), or external (uploaded MP3)."
+        )
     meta["tts_provider"] = provider
     meta["voice_provider"] = provider
     meta["voice_id"] = voice
+    meta["audio_source"] = "external" if provider == "external" else ("chatterbox" if provider == "local" else provider)
     meta["status"] = "audio"
     if extra:
-        meta["tts_engine"] = extra.get("engine")
+        meta["tts_engine"] = extra.get("engine") or ("external" if provider == "external" else None)
         meta["tts_device"] = extra.get("device")
+        if extra.get("duration_seconds") is not None:
+            meta["audio_duration_seconds"] = extra.get("duration_seconds")
+        if extra.get("warning"):
+            meta["audio_duration_warning"] = extra.get("warning")
     save_meta(project_id, meta)
     payload = {
         "ok": True,
@@ -241,10 +264,14 @@ def generate_audio(
         "voice_id": voice,
         "path": str(dest),
         "shorts": bool(shorts),
+        "audio_source": meta["audio_source"],
     }
     if extra:
         payload["engine"] = extra.get("engine")
         payload["device"] = extra.get("device")
+        payload["duration_seconds"] = extra.get("duration_seconds")
+        payload["warning"] = extra.get("warning")
+        payload["sha256"] = extra.get("sha256")
     return payload
 
 
