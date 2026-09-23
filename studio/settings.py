@@ -22,6 +22,7 @@ SECRET_KEYS = frozenset({
     "stripe_secret_key",
     "stripe_webhook_secret",
     "smtp_password",
+    "registration_invite_code",
 })
 REDACTION_PLACEHOLDER = "********"
 REDACTION_TOKENS = frozenset({
@@ -168,6 +169,9 @@ DEFAULTS = {
     "stripe_price_interval": "month",
     "public_base_url": "",
     "membership_required": True,
+    # Registration: open | invite_only | disabled (default invite-only for SaaS)
+    "registration_mode": "invite_only",
+    "registration_invite_code": "",
     # Email / SMTP (Admin → Email)
     "email_enabled": False,
     "smtp_host": "",
@@ -475,6 +479,17 @@ def normalize_max_concurrent_jobs(value: Any, default: int = 1) -> int:
     except (TypeError, ValueError):
         return int(default)
     return max(1, min(32, n))
+
+
+def normalize_registration_mode(value: str | None, default: str = "invite_only") -> str:
+    raw = (value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if raw in ("open", "public", "enabled"):
+        return "open"
+    if raw in ("invite_only", "invite", "invites"):
+        return "invite_only"
+    if raw in ("disabled", "closed", "off", "none"):
+        return "disabled"
+    return default if default in ("open", "invite_only", "disabled") else "invite_only"
 
 
 def normalize_bool(value: Any, default: bool = False) -> bool:
@@ -948,6 +963,14 @@ def public_settings() -> dict[str, Any]:
     data["app_env"] = app_env()
     data["membership_required"] = normalize_bool(data.get("membership_required"), True)
     data["membership_equal"] = True
+    data["registration_mode"] = normalize_registration_mode(
+        data.get("registration_mode"), "invite_only"
+    )
+    data["registration_invite_code_set"] = bool(
+        str(data.get("registration_invite_code") or "").strip()
+    )
+    # Never expose the raw invite code in public settings payloads
+    data["registration_invite_code"] = ""
     data["email_enabled"] = normalize_bool(data.get("email_enabled"), False)
     data["smtp_host"] = str(data.get("smtp_host") or "")
     data["smtp_port"] = int(data.get("smtp_port") or 587)

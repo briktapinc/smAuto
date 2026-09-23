@@ -277,6 +277,8 @@ class SettingsBody(BaseModel):
     stripe_price_interval: str | None = None
     public_base_url: str | None = None
     membership_required: bool | None = None
+    registration_mode: str | None = None
+    registration_invite_code: str | None = None
     email_enabled: bool | None = None
     smtp_host: str | None = None
     smtp_port: int | None = None
@@ -390,6 +392,12 @@ class SignupBody(BaseModel):
     username: str = ""
     password: str = ""
     email: str = ""
+    invite_code: str = ""
+
+
+class ApiKeyCreateBody(BaseModel):
+    name: str = "default"
+    rate_limit: int = 60
 
 
 class ChangePasswordBody(BaseModel):
@@ -1061,6 +1069,25 @@ def create_app() -> FastAPI:
     def auth_signup(body: SignupBody, response: Response):
         _reject_desktop_saas("Sign-up")
         from studio.members import create_user, ensure_members_store, public_session
+        from studio.settings import load_settings, normalize_registration_mode
+
+        settings = load_settings()
+        mode = normalize_registration_mode(settings.get("registration_mode"), "invite_only")
+        if mode == "disabled":
+            raise HTTPException(
+                status_code=403,
+                detail="Registration is disabled. Ask an admin for access.",
+            )
+        if mode == "invite_only":
+            expected = str(settings.get("registration_invite_code") or "").strip()
+            provided = (body.invite_code or "").strip()
+            if not expected:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Registration is invite-only. Ask an admin to set an invite code.",
+                )
+            if provided != expected:
+                raise HTTPException(status_code=403, detail="Invalid invite code")
 
         ensure_members_store()
         try:
@@ -1097,6 +1124,36 @@ def create_app() -> FastAPI:
             **public_session(full),
             "next": "Subscribe via /api/billing/checkout to unlock Studio (all members equal).",
         }
+
+    @app.get("/api/auth/api-keys")
+    def list_api_keys(request: Request):
+        user = studio_auth.require_session(request)
+        from studio.api_keys import list_keys_for_user
+
+        return {"keys": list_keys_for_user(str(user.get("id") or ""))}
+
+    @app.post("/api/auth/api-keys")
+    def create_api_key(request: Request, body: ApiKeyCreateBody):
+        user = studio_auth.require_session(request)
+        from studio.api_keys import create_api_key as _create
+
+        return _create(
+            str(user.get("id") or ""),
+            name=body.name or "default",
+            rate_limit=int(body.rate_limit or 60),
+        )
+
+    @app.delete("/api/auth/api-keys/{key_id}")
+    def delete_api_key(request: Request, key_id: str):
+        user = studio_auth.require_session(request)
+        from studio.api_keys import revoke_api_key
+
+        try:
+            return revoke_api_key(str(user.get("id") or ""), key_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     @app.post("/api/auth/forgot-password")
     def auth_forgot_password(body: ForgotPasswordBody):
@@ -1783,6 +1840,12 @@ def create_app() -> FastAPI:
             updates["stickman_head_color"] = body.stickman_head_color
         if body.membership_required is not None:
             updates["membership_required"] = body.membership_required
+        if body.registration_mode is not None:
+            from studio.settings import normalize_registration_mode
+
+            updates["registration_mode"] = normalize_registration_mode(body.registration_mode)
+        if body.registration_invite_code is not None:
+            updates["registration_invite_code"] = str(body.registration_invite_code or "").strip()
         if body.email_enabled is not None:
             updates["email_enabled"] = body.email_enabled
         if body.smtp_host is not None:

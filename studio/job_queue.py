@@ -646,7 +646,13 @@ def request_run(
 
 
 def pump(*, limit: int | None = None) -> dict[str, Any]:
-    """Start up to ``slots_free()`` (or ``limit``) queued jobs. Safe to call often."""
+    """Start up to ``slots_free()`` (or ``limit``) queued jobs. Safe to call often.
+
+    Launches directly via start/resume_project — must not call request_run(), which
+    no-ops on already-queued rows and would leave reboot re-queues stuck forever.
+    """
+    from studio.pipeline import resume_project, start_project
+
     started: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     if not _pump_lock.acquire(blocking=False):
@@ -664,27 +670,41 @@ def pump(*, limit: int | None = None) -> dict[str, Any]:
             pid = str(item.get("project_id") or "")
             if not pid:
                 continue
+            qid = str(item.get("id") or "")
             if pid in _live_running_ids():
-                mark_running(pid, queue_id=str(item.get("id") or ""))
+                mark_running(pid, queue_id=qid)
                 continue
-            kind = str(item.get("kind") or "start")
+            kind = str(item.get("kind") or "start").strip().lower()
+            if kind not in ("start", "resume"):
+                kind = "start"
+            mark_running(pid, queue_id=qid)
             try:
-                result = request_run(
-                    pid,
-                    kind=kind,
-                    owner_id=item.get("owner_id"),
-                    wait_gpu=False,
-                    topic_id=str(item.get("topic_id") or ""),
-                )
+                if kind == "resume":
+                    result = resume_project(pid, wait_gpu=False)
+                else:
+                    result = start_project(pid, wait_gpu=False)
             except Exception as exc:
                 mark_finished(pid, outcome="error", detail=str(exc), error=str(exc))
                 skipped.append({"project_id": pid, "error": str(exc)})
                 continue
+            if result.get("gpu_lock") and not (result.get("running") or result.get("busy") or result.get("attached")):
+                # GPU busy — put back on the queue for a later pump.
+                with _lock:
+                    with _file_mutex(QUEUE_MUTEX_PATH):
+                        data = _reconcile(_read_store())
+                        for row in data.get("jobs") or []:
+                            if str(row.get("project_id") or "") == pid and row.get("status") == STATUS_RUNNING:
+                                row["status"] = STATUS_QUEUED
+                                row["started_at"] = None
+                                row["detail"] = result.get("detail") or "GPU busy — waiting for slot."
+                                row["updated_at"] = _now()
+                        _write_store(data)
+                skipped.append({"project_id": pid, "reason": "gpu_busy"})
+                continue
             if result.get("started") or result.get("running") or result.get("busy") or result.get("attached"):
                 started.append({"project_id": pid, "job": result})
-            elif result.get("queued"):
-                skipped.append({"project_id": pid, "reason": "still_queued"})
             else:
+                mark_finished(pid, outcome="done", detail=result.get("detail") or "Already complete.")
                 skipped.append({"project_id": pid, "reason": result.get("detail") or "not_started"})
         return {"started": started, "skipped": skipped, "reason": "ok", **public_status()}
     finally:

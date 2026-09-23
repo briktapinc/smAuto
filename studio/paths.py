@@ -54,6 +54,9 @@ def _resolve_user_data() -> Path:
 
 USER_DATA = _resolve_user_data()
 PROJECTS_DIR = USER_DATA / "projects"
+USERS_DIR = USER_DATA / "users"
+PROJECT_INDEX_PATH = USER_DATA / "project_index.json"
+API_KEYS_PATH = USER_DATA / "api_keys.json"
 MUSIC_DIR = USER_DATA / "music"
 VOICES_DIR = USER_DATA / "voices"
 PIPER_DIR = USER_DATA / "piper"
@@ -145,9 +148,18 @@ def poses_env_for_subprocess() -> dict[str, str]:
     }
 
 
+def user_projects_dir(user_id: str) -> Path:
+    """Per-tenant projects root: user_data/users/<user_id>/projects/."""
+    uid = (user_id or "").strip()
+    if not uid or Path(uid).name != uid:
+        raise ValueError(f"Invalid user_id for projects path: {user_id!r}")
+    return USERS_DIR / uid / "projects"
+
+
 def ensure_dirs() -> None:
     USER_DATA.mkdir(parents=True, exist_ok=True)
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    USERS_DIR.mkdir(parents=True, exist_ok=True)
     MUSIC_DIR.mkdir(parents=True, exist_ok=True)
     VOICES_DIR.mkdir(parents=True, exist_ok=True)
     PIPER_DIR.mkdir(parents=True, exist_ok=True)

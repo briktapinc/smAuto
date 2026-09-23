@@ -396,24 +396,42 @@ def require_user(request: Request) -> str:
 
 
 def require_session(request: Request) -> dict[str, Any]:
-    """Return the members-store user for this JWT (creates store on demand)."""
+    """Return the members-store user for this JWT or bp_live_ API key."""
     if is_desktop_mode():
         return desktop_local_user()
     from studio.members import ensure_members_store
 
     ensure_members_store()
+
+    # Per-user API keys (Authorization: Bearer bp_live_...)
+    auth = request.headers.get("Authorization") or ""
+    if auth.lower().startswith("bearer "):
+        raw = auth[7:].strip()
+        from studio.api_keys import looks_like_api_key, resolve_api_key
+
+        if looks_like_api_key(raw):
+            user = resolve_api_key(raw)
+            if user is None:
+                raise HTTPException(status_code=401, detail="Invalid API key")
+            return user
+
     tokens = extract_tokens(request)
     if not tokens:
         raise HTTPException(status_code=401, detail="Not authenticated")
     last_exc: HTTPException | None = None
     for token in tokens:
+        from studio.api_keys import looks_like_api_key
+
+        if looks_like_api_key(token):
+            continue
         try:
             return _user_from_access_token(token)
         except HTTPException as exc:
             last_exc = exc
             continue
-    assert last_exc is not None
-    raise last_exc
+    if last_exc is not None:
+        raise last_exc
+    raise HTTPException(status_code=401, detail="Not authenticated")
 
 
 def require_admin(request: Request) -> dict[str, Any]:
@@ -736,6 +754,19 @@ def authorize_mcp_http(request: Request) -> str:
                 raise HTTPException(status_code=401, detail="Invalid MCP PIN")
         _bind_mcp_username(request, user, method="jwt")
         return user
+
+    # Per-user API key (Bearer bp_live_...) — scoped to that user, not owner PIN.
+    auth = request.headers.get("Authorization") or ""
+    if auth.lower().startswith("bearer "):
+        raw = auth[7:].strip()
+        from studio.api_keys import looks_like_api_key, resolve_api_key
+
+        if looks_like_api_key(raw):
+            keyed = resolve_api_key(raw)
+            if keyed is None:
+                raise HTTPException(status_code=401, detail="Invalid API key")
+            _bind_mcp_username(request, keyed.get("username") or "", method="api_key")
+            return str(keyed.get("username") or "")
 
     pin = extract_mcp_pin(request)
     if pin:

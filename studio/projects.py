@@ -26,7 +26,14 @@ from studio.aspect import (
     normalize_job_aspect,
 )
 from studio.backgrounds import default_background, resolve_background
-from studio.paths import DELETED_IDS_PATH, PROJECTS_DIR, ensure_dirs
+from studio.paths import (
+    DELETED_IDS_PATH,
+    PROJECT_INDEX_PATH,
+    PROJECTS_DIR,
+    USERS_DIR,
+    ensure_dirs,
+    user_projects_dir,
+)
 from studio.script_rules import ALLOWED_EMOTIONS
 from studio.settings import (
     default_voice_for_provider,
@@ -78,11 +85,106 @@ def _safe_project_id(project_id: str) -> str:
     pid = (project_id or "").strip()
     if not pid or Path(pid).name != pid:
         raise FileNotFoundError(f"Unknown project: {project_id}")
+    if ".." in pid or "/" in pid or "\\" in pid:
+        raise FileNotFoundError(f"Unknown project: {project_id}")
     return pid
 
 
+def _load_project_index() -> dict[str, str]:
+    ensure_dirs()
+    if not PROJECT_INDEX_PATH.is_file():
+        return {}
+    try:
+        data = json.loads(PROJECT_INDEX_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    projects = data.get("projects") if isinstance(data, dict) else None
+    if not isinstance(projects, dict):
+        return {}
+    return {str(k): str(v) for k, v in projects.items() if k and v}
+
+
+def _save_project_index(mapping: dict[str, str]) -> None:
+    ensure_dirs()
+    PROJECT_INDEX_PATH.write_text(
+        json.dumps({"version": 1, "projects": mapping}, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def index_project(project_id: str, owner_id: str) -> None:
+    pid = _safe_project_id(project_id)
+    oid = (owner_id or "").strip()
+    if not oid:
+        return
+    mapping = _load_project_index()
+    mapping[pid] = oid
+    _save_project_index(mapping)
+
+
+def owner_id_for_project(project_id: str) -> str | None:
+    pid = _safe_project_id(project_id)
+    mapping = _load_project_index()
+    if pid in mapping:
+        return mapping[pid]
+    try:
+        meta = json.loads((project_dir(pid) / "meta.json").read_text(encoding="utf-8"))
+        oid = str(meta.get("owner_id") or "").strip()
+        return oid or None
+    except Exception:
+        return None
+
+
+def _ensure_compat_symlink(tenant_folder: Path, project_id: str) -> None:
+    """Keep user_data/projects/<id> → tenant folder so legacy paths still resolve."""
+    link = PROJECTS_DIR / project_id
+    try:
+        if link.is_symlink():
+            if link.resolve() == tenant_folder.resolve():
+                return
+            link.unlink()
+        elif link.exists():
+            # Real directory already at legacy path — leave alone (pre-migration).
+            return
+        link.symlink_to(tenant_folder)
+    except OSError:
+        pass
+
+
 def project_dir(project_id: str) -> Path:
-    return PROJECTS_DIR / _safe_project_id(project_id)
+    """Resolve project folder: tenant path preferred, then legacy flat / symlink."""
+    pid = _safe_project_id(project_id)
+    mapping = _load_project_index()
+    oid = mapping.get(pid)
+    if oid:
+        return user_projects_dir(oid) / pid
+    legacy = PROJECTS_DIR / pid
+    if legacy.exists():
+        try:
+            return legacy.resolve() if legacy.is_symlink() else legacy
+        except OSError:
+            return legacy
+    # Scan tenant trees (index miss after partial migration)
+    if USERS_DIR.is_dir():
+        for user_dir in USERS_DIR.iterdir():
+            candidate = user_dir / "projects" / pid
+            if candidate.is_dir() and (candidate / "meta.json").is_file():
+                index_project(pid, user_dir.name)
+                return candidate
+    return PROJECTS_DIR / pid
+
+
+def _tenant_create_dir(project_id: str, owner_id: str | None) -> Path:
+    oid = (owner_id or "").strip()
+    if oid:
+        folder = user_projects_dir(oid) / project_id
+        folder.mkdir(parents=True, exist_ok=True)
+        index_project(project_id, oid)
+        _ensure_compat_symlink(folder, project_id)
+        return folder
+    folder = PROJECTS_DIR / project_id
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
 
 
 def input_prefix(project_id: str) -> str:
@@ -343,18 +445,42 @@ def is_listed_project(project_id: str) -> bool:
 def list_projects() -> list[dict[str, Any]]:
     ensure_dirs()
     hidden = load_deleted_ids()
-    items = []
-    for folder in sorted(PROJECTS_DIR.glob("*"), key=lambda p: p.stat().st_mtime, reverse=True):
+    items: list[dict[str, Any]] = []
+    seen_real: set[str] = set()
+
+    def _consume(folder: Path) -> None:
         if not folder.is_dir():
-            continue
+            return
+        try:
+            real = str(folder.resolve())
+        except OSError:
+            real = str(folder)
+        if real in seen_real:
+            return
         meta_path = folder / "meta.json"
         if not meta_path.is_file():
-            continue
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            return
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return
         pid = str(meta.get("id") or folder.name)
         if meta.get("deleted") or pid in hidden:
-            continue
+            return
+        seen_real.add(real)
         items.append(meta)
+
+    if USERS_DIR.is_dir():
+        for user_dir in sorted(USERS_DIR.iterdir()):
+            projects_root = user_dir / "projects"
+            if not projects_root.is_dir():
+                continue
+            for folder in projects_root.iterdir():
+                _consume(folder)
+    for folder in sorted(PROJECTS_DIR.glob("*"), key=lambda p: p.stat().st_mtime, reverse=True):
+        _consume(folder)
+
+    items.sort(key=lambda m: str(m.get("updated_at") or m.get("created_at") or ""), reverse=True)
     return items
 
 
@@ -437,12 +563,30 @@ def rename_video(
             candidate = f"{base}-{uuid.uuid4().hex[:6]}"
         if candidate != pid:
             src = project_dir(pid)
-            dest = project_dir(candidate)
+            oid = str(meta.get("owner_id") or owner_id_for_project(pid) or "").strip()
+            if oid:
+                dest = user_projects_dir(oid) / candidate
+            else:
+                dest = PROJECTS_DIR / candidate
             if dest.exists():
                 raise RuntimeError(f"Target folder already exists: {candidate}")
+            dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), str(dest))
+            # Drop stale legacy symlink for old id
+            legacy = PROJECTS_DIR / pid
+            try:
+                if legacy.is_symlink():
+                    legacy.unlink()
+            except OSError:
+                pass
             new_id = candidate
             folder_moved = True
+            if oid:
+                index_project(new_id, oid)
+                mapping = _load_project_index()
+                mapping.pop(pid, None)
+                _save_project_index(mapping)
+                _ensure_compat_symlink(dest, new_id)
             meta = load_meta(new_id)
             meta["id"] = new_id
             meta["title"] = new_title
@@ -510,8 +654,7 @@ def create_project(
     project_id = base
     if project_dir(project_id).exists():
         project_id = f"{base}-{uuid.uuid4().hex[:6]}"
-    folder = project_dir(project_id)
-    folder.mkdir(parents=True, exist_ok=True)
+    folder = _tenant_create_dir(project_id, owner_id)
     (folder / f"{INPUT_STEM}_billboards").mkdir(exist_ok=True)
     (folder / f"{INPUT_STEM}_backgrounds").mkdir(exist_ok=True)
     tts_provider = normalize_tts_provider(

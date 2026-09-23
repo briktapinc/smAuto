@@ -259,17 +259,9 @@ def _resolve_voice_prompt(voice_id: str | None) -> str | None:
 
 def _prefer_chatterbox_device() -> str:
     """Prefer CUDA when this Python's torch build can see a GPU; else CPU."""
-    override = (os.environ.get("BUBBLEPOD_TTS_DEVICE") or "").strip().lower()
-    if override in ("cpu", "cuda"):
-        return override
-    try:
-        import torch
+    from studio.device import preferred_torch_device
 
-        if torch.cuda.is_available():
-            return "cuda"
-    except Exception:
-        pass
-    return "cpu"
+    return preferred_torch_device()
 
 
 def _load_chatterbox():
