@@ -1,0 +1,1176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bubble Pod</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <div id="login-gate" class="login-gate" hidden>
+    <form id="login-form" class="card login-card" autocomplete="on">
+      <div class="brand login-brand">
+        <span class="scribble">BP</span>
+        <div>
+          <strong>Bubble Pod</strong>
+          <small>Sign in to Studio</small>
+        </div>
+      </div>
+      <label>
+        Username or email
+        <input id="login-user" name="username" type="text" autocomplete="username" required />
+      </label>
+      <label>
+        Password
+        <input id="login-pass" name="password" type="password" autocomplete="current-password" required />
+      </label>
+      <p id="login-error" class="login-error" hidden></p>
+      <button type="submit" class="primary" id="login-submit">Sign in</button>
+      <button type="button" class="ghost" id="login-forgot-toggle">Forgot password?</button>
+      <button type="button" class="ghost" id="login-signup-toggle">Need an account? Sign up</button>
+      <p class="hint" style="margin:0">Members share equal Studio access for their own jobs.</p>
+    </form>
+    <form id="forgot-form" class="card login-card" autocomplete="on" hidden>
+      <div class="brand login-brand">
+        <span class="scribble">BP</span>
+        <div>
+          <strong>Bubble Pod</strong>
+          <small>Reset password</small>
+        </div>
+      </div>
+      <label>
+        Email
+        <input id="forgot-email" name="email" type="email" autocomplete="email" />
+      </label>
+      <label>
+        Or username
+        <input id="forgot-user" name="username" type="text" autocomplete="username" />
+      </label>
+      <p id="forgot-error" class="login-error" hidden></p>
+      <p id="forgot-ok" class="hint" hidden></p>
+      <button type="submit" class="primary" id="forgot-submit">Send reset link</button>
+      <button type="button" class="ghost" id="forgot-login-toggle">Back to sign in</button>
+    </form>
+    <form id="reset-form" class="card login-card" autocomplete="on" hidden>
+      <div class="brand login-brand">
+        <span class="scribble">BP</span>
+        <div>
+          <strong>Bubble Pod</strong>
+          <small>Choose a new password</small>
+        </div>
+      </div>
+      <label>
+        New password
+        <input id="reset-pass" name="password" type="password" autocomplete="new-password" required minlength="6" />
+      </label>
+      <label>
+        Confirm password
+        <input id="reset-pass2" name="confirm" type="password" autocomplete="new-password" required minlength="6" />
+      </label>
+      <p id="reset-error" class="login-error" hidden></p>
+      <button type="submit" class="primary" id="reset-submit">Update password</button>
+      <button type="button" class="ghost" id="reset-login-toggle">Back to sign in</button>
+    </form>
+    <form id="signup-form" class="card login-card" autocomplete="on" hidden>
+      <div class="brand login-brand">
+        <span class="scribble">BP</span>
+        <div>
+          <strong>Bubble Pod</strong>
+          <small>Create a member account</small>
+        </div>
+      </div>
+      <label>
+        Username
+        <input id="signup-user" name="username" type="text" autocomplete="username" required />
+      </label>
+      <label>
+        Email
+        <input id="signup-email" name="email" type="email" autocomplete="email" />
+      </label>
+      <label>
+        Password
+        <input id="signup-pass" name="password" type="password" autocomplete="new-password" required minlength="6" />
+      </label>
+      <p id="signup-error" class="login-error" hidden></p>
+      <button type="submit" class="primary" id="signup-submit">Create account</button>
+      <button type="button" class="ghost" id="signup-login-toggle">Back to sign in</button>
+    </form>
+  </div>
+
+  <div class="app" id="studio-app" hidden>
+    <header class="chrome">
+      <div class="chrome-top">
+        <div class="brand" id="brand-home" role="button" tabindex="0">
+          <span class="scribble">BP</span>
+          <div>
+            <strong>Bubble Pod</strong>
+            <small>lip-sync jobs</small>
+          </div>
+        </div>
+        <nav id="app-tabs" class="tab-row util-tabs" aria-label="App">
+          <button type="button" data-step="create" id="new-job-tab" class="new-job">New job</button>
+          <button type="button" data-step="jobs">Jobs</button>
+          <button type="button" data-step="topics">Topics</button>
+          <button type="button" data-step="costs">Costs</button>
+          <button type="button" data-step="settings">Settings</button>
+          <button type="button" data-step="prompts">Prompts</button>
+          <a class="tab-link member-only" href="/pricing" id="pricing-link">Pricing</a>
+          <a class="tab-link admin-only" href="/admin" id="admin-link" hidden>Admin</a>
+        </nav>
+        <div class="chrome-meta">
+          <p id="health-line" class="chrome-gentle">
+            <span class="gentle-dot" id="gentle-dot" data-state="unknown" aria-hidden="true"></span>
+            <span id="gentle-label">Checking Gentle…</span>
+            <button type="button" class="gentle-copy" id="gentle-copy" title="Copy Gentle URL" aria-label="Copy Gentle URL" hidden>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="9" y="9" width="13" height="13" rx="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+            </button>
+          </p>
+          <p class="chrome-mcp admin-only">MCP <code>/mcp</code></p>
+        </div>
+        <div class="chrome-actions">
+          <label class="chrome-hands-off admin-only" title="Walk-away: auto-generate, schedule, render, and upload as private. Interval and queue live in Settings.">
+            <input type="checkbox" id="chrome-hands-off" />
+            Hands-off
+          </label>
+          <button type="button" class="restart-api admin-only" id="restart-api" title="Restart Studio API (default port 7878). Gentle and VoiceSync stay up.">Restart API</button>
+          <button type="button" class="restart-api logout-btn" id="logout-btn" title="Sign out of Studio">Log out</button>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <header class="top">
+        <div>
+          <h1 id="page-title">Library</h1>
+          <p id="page-sub">Finished videos and jobs in one pager. Click a ready video to watch, or an unfinished job to keep editing.</p>
+        </div>
+        <button type="button" class="job-resume" id="header-resume" hidden>Resume</button>
+      </header>
+      <div id="run-status" class="run-status" role="status" aria-live="polite" hidden>
+        <div class="run-status-fill" id="run-status-fill" aria-hidden="true"></div>
+        <span class="run-status-text" id="run-status-text"></span>
+      </div>
+      <p id="toast" hidden></p>
+      <div id="membership-banner" class="membership-banner" hidden>
+        <span class="membership-banner-text" id="membership-banner-text">Membership required for Studio access. All members have equal privileges.</span>
+        <a class="primary button-link" id="membership-pricing" href="/pricing">View pricing</a>
+        <button type="button" class="primary" id="membership-checkout">Subscribe</button>
+        <button type="button" id="membership-portal">Manage / cancel</button>
+      </div>
+
+      <div class="content-shell">
+        <nav id="content-tabs" class="panel-tabs" aria-label="Content">
+          <button type="button" data-step="library" class="on">Library</button>
+          <span id="job-tabs" class="job-tabs" hidden>
+            <button type="button" data-step="script">Script</button>
+            <button type="button" data-step="pictures">Pictures</button>
+            <button type="button" data-step="voice">Voice</button>
+            <button type="button" data-step="backgrounds">Backgrounds</button>
+            <button type="button" data-step="music">Music</button>
+            <button type="button" data-step="video">Video</button>
+          </span>
+        </nav>
+        <div class="content-panel">
+
+      <section id="view-library" class="view on">
+        <div class="lib-toolbar">
+          <p class="meta" id="lib-count"></p>
+        </div>
+        <h3 class="lib-heading" id="library-heading">Ready to watch</h3>
+        <div id="library-grid" class="library-grid"></div>
+        <div class="library-pager" id="library-pager" hidden>
+          <button type="button" id="lib-prev">Previous</button>
+          <span id="lib-page-label"></span>
+          <button type="button" id="lib-next">Next</button>
+        </div>
+      </section>
+
+      <section id="view-jobs" class="view">
+        <div class="list-toolbar" id="jobs-toolbar">
+          <input type="search" id="jobs-search" placeholder="Search jobs…" aria-label="Search jobs" />
+          <div class="filter-pills" id="jobs-filters" role="group" aria-label="Job filters">
+            <button type="button" data-jobs-filter="all" class="on">All</button>
+            <button type="button" data-jobs-filter="running">Running</button>
+            <button type="button" data-jobs-filter="paused">Paused / stopped</button>
+            <button type="button" data-jobs-filter="ready">Ready</button>
+            <button type="button" data-jobs-filter="draft">In progress</button>
+            <button type="button" data-jobs-filter="error">Errors</button>
+            <button type="button" data-jobs-filter="startable">Can Start</button>
+            <button type="button" data-jobs-filter="resumable">Can Resume</button>
+          </div>
+        </div>
+        <div id="jobs-queue" class="jobs-queue"></div>
+        <div class="library-pager" id="jobs-pager" hidden>
+          <button type="button" id="jobs-prev">Previous</button>
+          <span id="jobs-page-label"></span>
+          <button type="button" id="jobs-next">Next</button>
+        </div>
+      </section>
+
+      <section id="view-costs" class="view">
+        <div class="card costs-rates-card">
+          <h3 class="lib-heading" style="margin-top:0">Flux rates (estimate)</h3>
+          <p class="hint" id="costs-rates-hint">Flux Dev 2 (<code>fal-ai/flux-2</code>) ≈ <strong>~4.6¢</strong> per ~2MP image. A ~10-minute video needs about <strong>~56 images</strong> ≈ <strong>~$2.60</strong>. At 6 videos/day, ballpark <strong>~$15–16/day</strong>.</p>
+          <p class="meta" id="costs-today-line">Loading spend…</p>
+        </div>
+        <div class="card">
+          <h3 class="lib-heading" style="margin-top:0">Cost per video</h3>
+          <p class="hint">Bar height is estimated Flux $ from on-disk illustration PNGs (covers + line art) × $0.046. Empty jobs fall back to a duration-based estimate. OpenAI TTS/script calls are counted for today only when tracked.</p>
+          <div id="costs-chart" class="costs-chart" aria-label="Bar chart of estimated cost per video"></div>
+          <div id="costs-daily-chart" class="costs-chart costs-daily-chart" aria-label="Daily Flux spend estimate" hidden></div>
+          <div class="list-toolbar costs-toolbar">
+            <input type="search" id="costs-search" placeholder="Search videos…" aria-label="Search costs" />
+          </div>
+          <div id="costs-table" class="costs-table"></div>
+          <div class="library-pager" id="costs-pager" hidden>
+            <button type="button" id="costs-prev">Previous</button>
+            <span id="costs-page-label"></span>
+            <button type="button" id="costs-next">Next</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-topics" class="view">
+        <form id="topics-form" class="card">
+          <label>Niche / seed (optional)
+            <textarea name="seed" id="topics-seed" rows="2" placeholder="Surprising ocean physics, or leave blank for a mixed batch"></textarea>
+          </label>
+          <div class="row">
+            <label>How many
+              <input name="count" id="topics-count" type="number" min="1" max="20" value="8" />
+            </label>
+            <label>Duration (minutes)
+              <input name="duration" id="topics-duration" type="number" min="1" max="30" value="5" />
+            </label>
+            <button type="submit" class="primary" id="topics-generate">Generate topics</button>
+          </div>
+          <p class="hint" id="topics-hint">Uses the live <code>topics.generate</code> prompt (edit it on Prompts). Drafts save to <code>user_data/topics.json</code>. Set a date and time on a card, then Schedule. Due topics auto-start only while <strong>Hands-off</strong> is on (about every 30 seconds, one at a time). Run now starts as soon as the queue is free.</p>
+        </form>
+        <div class="topics-status-row">
+          <p class="meta" id="topics-queue-line"></p>
+          <label class="check" id="topics-auto-wrap">
+            <input type="checkbox" id="topics-auto-scheduler" checked />
+            Auto-scheduler
+          </label>
+        </div>
+        <div class="list-toolbar" id="topics-toolbar">
+          <input type="search" id="topics-search" placeholder="Search topics…" aria-label="Search topics" />
+          <div class="filter-pills" id="topics-filters" role="group" aria-label="Topic filters">
+            <button type="button" data-topics-filter="all" class="on">All</button>
+            <button type="button" data-topics-filter="draft">Draft</button>
+            <button type="button" data-topics-filter="queued">Queued</button>
+            <button type="button" data-topics-filter="running">Running</button>
+            <button type="button" data-topics-filter="done">Done</button>
+          </div>
+        </div>
+        <div id="topics-list" class="topic-grid"></div>
+        <div class="library-pager" id="topics-pager" hidden>
+          <button type="button" id="topics-prev">Previous</button>
+          <span id="topics-page-label"></span>
+          <button type="button" id="topics-next">Next</button>
+        </div>
+      </section>
+
+      <section id="view-watch" class="view">
+        <div class="watch-stage" id="watch-stage">
+          <video id="watch-player" controls playsinline></video>
+          <div id="watch-youtube-embed" class="watch-youtube-embed" hidden>
+            <iframe id="watch-youtube-frame" title="YouTube video" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>
+            <p class="meta" id="watch-youtube-fallback" hidden>
+              Local file missing — <a id="watch-youtube-link" href="#" target="_blank" rel="noopener">open on YouTube</a>
+            </p>
+          </div>
+          <button type="button" class="thumb-x" id="watch-delete" title="Delete job" aria-label="Delete this job">×</button>
+        </div>
+        <div class="watch-meta card">
+          <div class="watch-head">
+            <div>
+              <h2 id="watch-title">Video</h2>
+              <p id="watch-sub" class="meta"></p>
+            </div>
+            <div class="row watch-actions">
+              <label id="watch-aspect-pick-wrap" hidden>Play
+                <select id="watch-aspect-pick"></select>
+              </label>
+              <button type="button" id="watch-resume" hidden>Resume</button>
+              <button type="button" id="watch-edit" class="primary">Edit this job</button>
+              <button type="button" id="watch-back">Back to library</button>
+              <button type="button" id="watch-yt-upload" hidden title="Connect YouTube in Settings">Send to YouTube</button>
+            </div>
+          </div>
+          <p id="watch-yt-line" class="meta" hidden></p>
+        </div>
+        <h3 class="lib-heading" id="watch-more-heading">More videos</h3>
+        <div id="watch-more" class="library-grid compact"></div>
+      </section>
+
+      <section id="view-create" class="view">
+        <form id="create-form" class="card">
+          <label>Topic
+            <textarea name="topic" rows="3" required placeholder="How black holes eat light, for people who liked space in school"></textarea>
+          </label>
+          <div class="row">
+            <label>Length (seconds)
+              <input name="duration" type="number" min="15" max="1800" value="90" required />
+            </label>
+            <label>Aspect
+              <select name="aspect">
+                <option value="16:9" selected>16:9 landscape (default)</option>
+                <option value="9:16">9:16 portrait</option>
+                <option value="both">Both (16:9 and 9:16)</option>
+              </select>
+            </label>
+            <label>Title (optional)
+              <input name="title" type="text" placeholder="auto from topic" />
+            </label>
+          </div>
+          <button type="submit" class="primary">Create job</button>
+        </form>
+      </section>
+
+      <section id="view-script" class="view">
+        <div class="card job-panel">
+          <div class="job-toolbar">
+            <div class="job-toolbar-section">
+              <p class="section-label">Generate</p>
+              <div class="job-actions">
+                <label class="field-compact">Script writer
+                  <select id="script-text-provider">
+                    <option value="openai">OpenAI API (billed)</option>
+                    <option value="chatgpt">ChatGPT (MCP)</option>
+                    <option value="claude">Claude (MCP)</option>
+                    <option value="lmstudio">LM Studio (local)</option>
+                  </select>
+                </label>
+                <button id="gen-script" class="primary">Generate script</button>
+              </div>
+              <label class="field-block">Extra direction
+                <input id="script-extra" placeholder="funnier, more history, keep it under 2 minutes of actual science…" />
+              </label>
+              <p class="meta" id="script-shape-hint">Hook opens the 9:16 short; subscribe closes the 16:9 explainer.</p>
+            </div>
+            <div class="job-toolbar-section">
+              <p class="section-label">After generate</p>
+              <div class="job-actions job-actions-wrap">
+                <div class="check-group">
+                  <label class="check">
+                    <input type="checkbox" id="regen-pictures" checked />
+                    Regenerate pictures
+                  </label>
+                  <label class="check">
+                    <input type="checkbox" id="regen-audio" checked />
+                    Regenerate audio
+                  </label>
+                  <label class="check" title="Hook-only short: script_9x16 + 1080×1920 art + hook+CTA audio">
+                    <input type="checkbox" id="generate-9x16" />
+                    Generate 9:16
+                  </label>
+                </div>
+                <button id="save-script">Save edits</button>
+              </div>
+            </div>
+          </div>
+          <p class="meta" id="script-meta"></p>
+          <div class="tabs">
+            <button data-tab="tagged" class="on">Tagged (emotions)</button>
+            <button data-tab="raw">Raw (no tags)</button>
+          </div>
+          <textarea id="script-tagged" class="script" spellcheck="true"></textarea>
+          <textarea id="script-raw" class="script" hidden readonly></textarea>
+          <div class="yt-meta-fields" id="script-yt-meta">
+            <p class="section-label">Publish metadata</p>
+            <p class="hint">Saved with the script; used when you Send to YouTube.</p>
+            <label class="field-block">YouTube description
+              <textarea id="script-yt-description" class="yt-desc" rows="4" spellcheck="true" placeholder="Video description for YouTube…"></textarea>
+            </label>
+            <div class="job-actions job-actions-fields">
+              <label class="field-grow">Keywords / tags
+                <input id="script-yt-keywords" type="text" placeholder="comma, separated, tags" autocomplete="off" />
+              </label>
+              <label class="field-grow">Hashtags
+                <input id="script-yt-hashtags" type="text" placeholder="#Topic #Science" autocomplete="off" />
+              </label>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-pictures" class="view">
+        <div class="card">
+          <div class="row">
+            <label>Image provider
+              <select id="image-provider">
+                <option value="flux" selected>Flux (fal-ai/flux-2)</option>
+                <option value="chatgpt">ChatGPT (native in-chat)</option>
+                <option value="comfyui">ComfyUI (local API)</option>
+              </select>
+            </label>
+            <button id="gen-flux" class="primary">Generate backgrounds with Flux</button>
+          </div>
+          <p id="pictures-help">Flux (default) queues a server job that fills missing line backgrounds via fal-ai/flux-2 (Flux Dev 2). ChatGPT means generate in the built-in image tool, then upload or MCP-save. ComfyUI posts your uploaded API JSON to a local ComfyUI server. Never DALL-E / OpenAI Images API.</p>
+          <p id="pictures-live" class="meta" hidden></p>
+          <p class="hint">Every render starts with a generated 5-second title card (full-bleed topic art, no narrator), then the lip-sync explainer. 16:9 jobs: 1920×1080 landscape. 9:16 jobs: 1080×1920 portrait. Cover layout is full-bleed for line art; billboard layout is a 16:9 TV screen (opaque art, thin dark bezel, no brown wood). Colors should change from line to line. Flux Dev 2 at ~2MP is about <strong>~4.6¢/image</strong>; a ~10-min video (~56 images) is about <strong>~$2.60</strong> (≈$15–16/day at 6 videos).</p>
+          <div id="picture-list" class="pictures"></div>
+        </div>
+      </section>
+
+      <section id="view-voice" class="view">
+        <div class="card">
+          <div class="row">
+            <label>Provider
+              <select id="voice-provider">
+                <option value="openai">OpenAI / ChatGPT TTS</option>
+                <option value="elevenlabs">ElevenLabs</option>
+                <option value="local">Local (Resemble Chatterbox)</option>
+              </select>
+            </label>
+            <label class="grow">Voice
+              <select id="voice-id"></select>
+            </label>
+            <button id="gen-audio" class="primary">Generate audio</button>
+          </div>
+          <p id="voice-local-hint" class="hint" hidden>Local uses Resemble Chatterbox on this PC (no OpenAI TTS bill). Optional clone: drop a short .wav into <code>user_data/voices/</code>. After the wav is written, Gentle still aligns phonemes.</p>
+          <audio id="audio-player" controls hidden></audio>
+        </div>
+      </section>
+
+      <section id="view-backgrounds" class="view">
+        <div class="card">
+          <h3 class="lib-heading" style="margin-top:0">Studio room</h3>
+          <p class="hint">Background behind the stick figure (clock, wall, floor — not the TV doodle). Billboard uses this at full color. Cover stays full-bleed art. Drop more PNG/JPG files in <code>backgrounds/</code> or <code>user_data/backgrounds/</code>.</p>
+          <div id="bg-picker" class="bg-picker"></div>
+        </div>
+      </section>
+
+      <section id="view-music" class="view">
+        <div class="card" id="music-card">
+          <h3 class="lib-heading" style="margin-top:0">Background music</h3>
+          <p class="hint">Upload tracks to <code>user_data/music/</code>, set loudness, then pick a track for this job or shuffle. Music loops under the whole video, including the 5-second title card.</p>
+          <label>Loudness
+            <div class="volume-row">
+              <input id="music-volume" name="music_volume_pct" type="range" min="0" max="100" value="15" />
+              <output id="music-volume-out">15%</output>
+            </div>
+          </label>
+          <p class="hint">0% is silent. Default 15%. Saved when you release the slider.</p>
+          <label>Upload tracks
+            <input type="file" id="music-upload" accept=".mp3,.wav,.m4a,.ogg,.flac,audio/mpeg,audio/wav,audio/ogg,audio/flac,audio/mp4,audio/*" multiple />
+          </label>
+          <div class="row music-mode-row">
+            <button type="button" id="music-mode-shuffle" data-music-mode="shuffle">Shuffle</button>
+            <button type="button" id="shuffle-music">Shuffle again</button>
+            <p id="music-pick" class="meta grow">Background music: picked at first render from the library.</p>
+          </div>
+          <div id="music-list" class="music-list music-pick-list"></div>
+        </div>
+      </section>
+
+      <section id="view-video" class="view">
+        <div class="card job-panel">
+          <div class="job-toolbar">
+            <div class="job-toolbar-section">
+              <p class="section-label">Output</p>
+              <div class="job-actions job-actions-fields">
+                <label class="field-compact">Aspect
+                  <select id="render-aspect">
+                    <option value="16:9">16:9 landscape (default)</option>
+                    <option value="9:16">9:16 portrait</option>
+                    <option value="both">Both (16:9 and 9:16)</option>
+                  </select>
+                </label>
+                <label class="field-compact">Video layout
+                  <select id="render-layout">
+                    <option value="cover">Full-bleed cover</option>
+                    <option value="billboard">Billboard (image left, speaker right)</option>
+                  </select>
+                </label>
+                <label class="field-compact">Art style
+                  <select id="render-art-style">
+                    <option value="classic" selected>Classic (hand-drawn 2D)</option>
+                    <option value="pixar_3d">3D Pixar / Disney</option>
+                    <option value="cinematic">Cinematic</option>
+                    <option value="claymation">Claymation</option>
+                    <option value="watercolor">Watercolor</option>
+                    <option value="anime">Anime</option>
+                    <option value="comic_book">Comic book</option>
+                    <option value="paper_craft">Paper craft</option>
+                    <option value="voxel">Voxel / blocky 3D</option>
+                  </select>
+                </label>
+                <label class="field-compact">Bubble-head size
+                  <select id="render-character-size">
+                    <option value="large">Large (current)</option>
+                    <option value="medium">Medium (half)</option>
+                    <option value="small">Small (1/3)</option>
+                  </select>
+                </label>
+                <label class="check check-inline">
+                  <input type="checkbox" id="include-bubblehead" checked />
+                  Include Bubblehead
+                </label>
+              </div>
+              <p class="hint">Per-job only — does not change Settings. Art style applies to new covers and line pictures (regenerate after changing). Studio room and music are on their own tabs.</p>
+            </div>
+            <div class="job-toolbar-section">
+              <p class="section-label">Build</p>
+              <div class="job-actions">
+                <button id="start-gentle">Start Gentle</button>
+                <button id="align">Align phonemes</button>
+                <button id="render" class="primary">Render video</button>
+                <button type="button" class="job-resume" id="video-resume" hidden>Resume</button>
+              </div>
+              <p id="render-aspect-status" class="meta">No renders yet.</p>
+              <details class="job-help">
+                <summary>How layout works</summary>
+                <p class="hint">Cover fills the whole frame. Billboard puts opaque 16:9 art on a TV screen (left on 16:9, top on 9:16). Art style reshapes Flux/ComfyUI/ChatGPT prompts for this job (Classic is the original hand-drawn look). Bubble-head size scales around the feet without moving the bottom anchor. Uncheck Include Bubblehead to keep pictures and voice without the stick figure. Both renders 16:9 then 9:16 as separate files. On Windows/Linux, Gentle uses Docker when healthy, else a local aligner. On macOS, prefer the Gentle app (or set Gentle URL).</p>
+              </details>
+            </div>
+          </div>
+          <div class="yt-job">
+            <p class="section-label">YouTube</p>
+            <div class="job-actions job-actions-wrap">
+              <label class="check">
+                <input type="checkbox" id="job-yt-auto" />
+                Auto-upload when video completes
+              </label>
+              <label class="field-compact">Privacy
+                <select id="job-yt-privacy">
+                  <option value="private">private</option>
+                  <option value="unlisted" selected>unlisted</option>
+                  <option value="public">public</option>
+                </select>
+              </label>
+              <button type="button" id="job-yt-upload" title="Connect YouTube in Settings">Send to YouTube</button>
+            </div>
+            <div class="yt-meta-fields">
+              <label class="field-block">Description
+                <textarea id="job-yt-description" class="yt-desc" rows="4" spellcheck="true" placeholder="Uses script-generated description when set…"></textarea>
+              </label>
+              <div class="job-actions job-actions-fields">
+                <label class="field-grow">Keywords / tags
+                  <input id="job-yt-keywords" type="text" placeholder="comma, separated, tags" autocomplete="off" />
+                </label>
+                <label class="field-grow">Hashtags
+                  <input id="job-yt-hashtags" type="text" placeholder="#Topic #Science" autocomplete="off" />
+                </label>
+              </div>
+            </div>
+            <p id="job-yt-line" class="meta">Connect YouTube in Settings to upload.</p>
+          </div>
+          <video id="video-player" controls hidden></video>
+          <label id="video-aspect-pick-wrap" hidden>Play
+            <select id="video-aspect-pick"></select>
+          </label>
+        </div>
+      </section>
+
+      <section id="view-settings" class="view">
+        <form id="settings-form" class="settings-stack">
+          <details class="card settings-card" id="settings-account-card" open>
+            <summary class="lib-heading settings-card-summary">Account</summary>
+            <div class="settings-fields">
+              <p class="hint settings-lead member-only">Change your Studio password here.</p>
+              <p class="hint settings-lead admin-only" hidden>Default login is <code>admin</code> / <code>bubblepod</code>. Change the password here. Studio listens on <strong>127.0.0.1</strong>; change the port below then Save and Restart API.</p>
+              <div class="field-group">
+                <p class="meta" id="account-user-line">Signed in as: …</p>
+                <div class="row settings-row">
+                  <label>Current password
+                    <input id="account-current-password" type="password" autocomplete="current-password" />
+                  </label>
+                  <label>New password
+                    <input id="account-new-password" type="password" autocomplete="new-password" placeholder="at least 6 characters" />
+                  </label>
+                  <label>Confirm new password
+                    <input id="account-confirm-password" type="password" autocomplete="new-password" />
+                  </label>
+                </div>
+                <div class="row settings-actions">
+                  <button type="button" id="account-change-password" class="primary">Change password</button>
+                </div>
+              </div>
+              <div class="field-group admin-only" hidden>
+                <div class="row settings-row">
+                  <label>Studio server port
+                    <input name="port" id="studio-port" type="number" min="1" max="65535" step="1" value="7878" />
+                  </label>
+                </div>
+                <p class="hint">Default <code>7878</code>. After changing the port, click <strong>Save settings</strong>, then <strong>Restart API</strong> (or the Restart API button in the header). Update your YouTube OAuth redirect to match if you use Connect YouTube.</p>
+              </div>
+            </div>
+          </details>
+
+          <details class="card settings-card" id="settings-membership-card" open>
+            <summary class="lib-heading settings-card-summary">Membership</summary>
+            <div class="settings-fields">
+              <p class="hint settings-lead" id="membership-settings-lead">All members share the same Studio privileges for their own jobs.</p>
+              <p class="meta" id="membership-status-line">Status: …</p>
+              <div id="settings-membership-banner" class="membership-banner membership-banner--settings" hidden>
+                <span class="membership-banner-text" id="settings-membership-banner-text"></span>
+                <a class="primary button-link" href="/pricing">View pricing</a>
+                <button type="button" class="primary" id="settings-membership-checkout">Subscribe</button>
+                <button type="button" id="settings-membership-portal">Manage / cancel</button>
+              </div>
+              <div class="row settings-actions" id="settings-membership-actions">
+                <a class="primary button-link" id="settings-membership-pricing" href="/pricing">Open pricing page</a>
+              </div>
+              <p class="hint">Trial, expired, and inactive accounts use the pricing page to subscribe, resubscribe, or cancel via Stripe.</p>
+            </div>
+          </details>
+
+          <details class="card settings-card admin-only" id="settings-text-card" hidden>
+            <summary class="lib-heading settings-card-summary">Text generation</summary>
+            <div class="settings-fields">
+              <p class="hint settings-lead">Script and topic writer. Edit live prompts on the Prompts tab.</p>
+              <div class="field-group">
+                <label>OpenAI API key
+                  <input name="openai_api_key" type="password" placeholder="sk-…" autocomplete="off" />
+                </label>
+              </div>
+              <div class="field-group">
+                <label>Script / topic writer
+                  <select name="text_provider">
+                    <option value="openai" selected>OpenAI API (billed)</option>
+                    <option value="chatgpt">ChatGPT Desktop (MCP)</option>
+                    <option value="claude">Claude Desktop (MCP)</option>
+                    <option value="lmstudio">LM Studio (local)</option>
+                  </select>
+                </label>
+                <p class="hint">OpenAI API spends chat tokens on scripts and topic batches. LM Studio uses the local OpenAI-compatible server (no OpenAI cloud). ChatGPT and Claude write natively through Desktop MCP (<code>save_script</code>, <code>create_topic</code>) — unless the writer is LM Studio, in which case they should call <code>generate_script_via_api</code>.</p>
+                <label>Auto-draft when writer is ChatGPT/Claude
+                  <select name="script_draft_provider">
+                    <option value="" selected>Off (agent writes via save_script)</option>
+                    <option value="openai">OpenAI API first draft</option>
+                    <option value="lmstudio">LM Studio first draft</option>
+                  </select>
+                </label>
+                <p class="hint">Optional: when <code>text_provider</code> is chatgpt/claude, scheduled jobs can draft a tagged script via OpenAI or LM Studio. Agent can still override with <code>save_script</code>. Does not auto-publish by itself — pipeline continues only if Hands-off / scheduler would anyway.</p>
+                <label>OpenAI chat model
+                  <input name="openai_model" />
+                </label>
+              </div>
+              <div class="field-group">
+                <div class="row settings-row">
+                  <label>LM Studio base URL
+                    <input name="lmstudio_base_url" placeholder="http://127.0.0.1:1234/v1" />
+                  </label>
+                  <label>LM Studio model (optional)
+                    <input name="lmstudio_model" placeholder="first loaded model if empty" />
+                  </label>
+                </div>
+                <p class="hint">Default URL is <code>http://127.0.0.1:1234/v1</code>. Leave model blank to use the first loaded model. If generation fails, start the LM Studio local server.</p>
+              </div>
+            </div>
+          </details>
+
+          <details class="card settings-card admin-only" id="settings-images-card" hidden>
+            <summary class="lib-heading settings-card-summary">Images</summary>
+            <div class="settings-fields">
+              <p class="hint settings-lead">Default generator for covers and line illustrations. Jobs can override on Pictures. Flux Dev 2 (<code>fal-ai/flux-2</code>) ≈ <strong>~4.6¢</strong> per ~2MP image; ~10-min video (~56 images) ≈ <strong>~$2.60</strong>; 6 videos/day ≈ <strong>~$15–16/day</strong>.</p>
+              <div class="field-group">
+                <label>fal API key
+                  <input name="fal_key" type="password" placeholder="fal-…" autocomplete="off" />
+                </label>
+                <label>Default image provider
+                  <select name="image_provider">
+                    <option value="flux" selected>Flux (fal-ai/flux-2)</option>
+                    <option value="chatgpt">ChatGPT (native in-chat)</option>
+                    <option value="comfyui">ComfyUI (local API)</option>
+                  </select>
+                </label>
+                <label>Cover provider override
+                  <select name="cover_provider">
+                    <option value="" selected>Same as image provider</option>
+                    <option value="manual">Manual / agent upload only</option>
+                    <option value="chatgpt">ChatGPT (native / agent upload)</option>
+                    <option value="comfyui">ComfyUI (local)</option>
+                    <option value="flux">Flux (fal)</option>
+                  </select>
+                </label>
+                <p class="hint">When covers are <code>manual</code> or <code>chatgpt</code>, line art can still use Flux — Studio will not spend fal on title-cards. Use MCP <code>refresh_covers</code> to upload + re-render in one step.</p>
+              </div>
+              <div class="field-group">
+                <label>ComfyUI URL
+                  <input name="comfyui_url" placeholder="http://127.0.0.1:8188" />
+                </label>
+                <div class="row settings-row settings-actions">
+                  <label class="grow">Upload ComfyUI API JSON
+                    <input type="file" id="comfyui-workflow-file" accept=".json,application/json" />
+                  </label>
+                  <button type="button" id="comfyui-workflow-delete" hidden>Remove workflow</button>
+                  <button type="button" id="comfyui-test">Test connection</button>
+                </div>
+                <p id="comfyui-workflow-status" class="meta">No API workflow uploaded.</p>
+                <p class="hint">Use ComfyUI <code>Save (API Format)</code> — the <code>/prompt</code> graph, not the editor workflow. Studio stores it in <code>user_data/comfyui_workflow.json</code>. fal key can also come from env <code>FAL_KEY</code> or <code>FAL_API_KEY</code>.</p>
+              </div>
+            </div>
+          </details>
+
+          <details class="card settings-card admin-only" id="settings-voice-card" hidden>
+            <summary class="lib-heading settings-card-summary">Voice / TTS</summary>
+            <div class="settings-fields">
+              <p class="hint settings-lead">Studio-wide default. Each job can override on the Voice step.</p>
+              <div class="field-group">
+                <label>ElevenLabs API key
+                  <input name="elevenlabs_api_key" type="password" placeholder="xi-…" autocomplete="off" />
+                </label>
+                <label>Voice / TTS provider
+                  <select name="tts_provider">
+                    <option value="openai" selected>OpenAI / ChatGPT TTS (paid)</option>
+                    <option value="elevenlabs">ElevenLabs (paid)</option>
+                    <option value="local">Local (Resemble Chatterbox)</option>
+                  </select>
+                </label>
+                <p id="local-tts-status" class="meta"></p>
+                <p class="hint">Local is Resemble’s open-source Chatterbox on this machine — no OpenAI TTS charges. Install with <code>pip install chatterbox-tts</code> (or <code>pip install -r requirements-tts-local.txt</code>) and restart Studio.</p>
+              </div>
+              <div class="field-group">
+                <label>OpenAI TTS model
+                  <input name="openai_tts_model" />
+                </label>
+              </div>
+            </div>
+          </details>
+
+          <details class="card settings-card admin-only" id="settings-video-card" hidden>
+            <summary class="lib-heading settings-card-summary">Video defaults</summary>
+            <div class="settings-fields">
+              <p class="hint settings-lead">Applied to new jobs. Override layout and character size on Video; aspect on New job / Video.</p>
+              <div class="field-group">
+                <div class="row settings-row">
+                  <label>Video layout
+                    <select name="video_layout">
+                      <option value="cover" selected>Full-bleed cover</option>
+                      <option value="billboard">Billboard (image left, speaker right)</option>
+                    </select>
+                  </label>
+                  <label>Bubble-head size
+                    <select name="character_size">
+                      <option value="large" selected>Large (current)</option>
+                      <option value="medium">Medium (half)</option>
+                      <option value="small">Small (1/3)</option>
+                    </select>
+                  </label>
+                </div>
+                <label>Default aspect
+                  <select name="default_aspect">
+                    <option value="16:9" selected>16:9 landscape</option>
+                    <option value="9:16">9:16 portrait</option>
+                    <option value="both">Both (16:9 and 9:16)</option>
+                  </select>
+                </label>
+                <p class="hint">Cover fills the frame; billboard is a 16:9 TV screen. Bubble-head size scales around the feet so the figure stays bottom-anchored. Both writes two mp4s (16:9 then 9:16).</p>
+              </div>
+              <div class="field-group" id="stickman-head-group">
+                <p class="settings-subhead">Stickman head color</p>
+                <p class="hint">Recolors the yellow head fill on every file in <code>poses/</code>. Shadow is auto-derived (H - 10.4&deg;, L - 8.4). Outlines stay black.</p>
+                <div class="row settings-row stickman-head-row">
+                  <label class="stickman-color-label">Head color
+                    <span class="stickman-color-inputs">
+                      <input type="color" id="stickman-head-picker" value="#FAE02E" />
+                      <input type="text" id="stickman-head-hex" name="stickman_head_color" value="#FAE02E" maxlength="7" spellcheck="false" autocomplete="off" />
+                    </span>
+                  </label>
+                  <div class="stickman-swatches" aria-hidden="true">
+                    <span class="stickman-swatch" id="stickman-swatch-light" title="Light fill"></span>
+                    <span class="stickman-swatch dark" id="stickman-swatch-dark" title="Shadow"></span>
+                  </div>
+                </div>
+                <div class="row settings-row stickman-head-actions">
+                  <img id="stickman-head-preview" class="stickman-head-preview" alt="Pose preview" width="96" height="108" />
+                  <button type="button" class="primary" id="stickman-head-apply">Apply to all poses</button>
+                  <button type="button" id="stickman-head-reset">Reset yellow</button>
+                </div>
+                <p class="hint" id="stickman-head-status"></p>
+              </div>
+            </div>
+          </details>
+
+          <details class="card settings-card admin-only" id="settings-handsoff-card" hidden>
+            <summary class="lib-heading settings-card-summary">Hands-off scheduling</summary>
+            <div class="settings-fields">
+              <p class="hint settings-lead">Main Hands-off switch is in the top bar next to Restart API. Interval and queue depth live here.</p>
+              <div class="field-group">
+                <label class="check">
+                  <input type="checkbox" id="auto-scheduler" name="auto_scheduler" checked />
+                  Auto-run due topics
+                </label>
+                <p class="hint">Only applies while Hands-off is on. Then Studio checks about every 30 seconds and starts the next due queued topic — one pipeline at a time. With Hands-off off, use Run now.</p>
+              </div>
+              <div class="field-group">
+                <div class="row settings-row">
+                  <label>Hands-off interval (hours)
+                    <input name="hands_off_interval_hours" id="hands-off-interval" type="number" min="0" max="336" step="0.25" value="0" />
+                  </label>
+                  <label>Keep at least (drafts + queued)
+                    <input name="hands_off_min_queue" id="hands-off-min-queue" type="number" min="1" max="20" step="1" value="5" />
+                  </label>
+                </div>
+                <p class="hint">Hands-off generates topics when the queue is low (openai / LM Studio only), auto-schedules drafts, runs the pipeline, and uploads each job to YouTube as <strong>private</strong> without changing your default privacy. 0 hours = due now (FIFO).</p>
+                <p class="hint bad" id="hands-off-warn" hidden></p>
+              </div>
+            </div>
+          </details>
+
+          <details class="card settings-card admin-only" id="settings-mcp-card" hidden>
+            <summary class="lib-heading settings-card-summary">MCP</summary>
+            <div class="settings-fields">
+              <p class="hint settings-lead">Connect ChatGPT Desktop (HTTP), remote agents over ngrok, Claude Desktop / Claude Code (stdio), or Codex. Same tools as the GUI.</p>
+              <div class="field-group">
+                <div class="settings-status mcp-status-row">
+                  <div class="settings-pills">
+                    <span class="pill" id="mcp-build-pill">Build: …</span>
+                    <span class="pill" id="mcp-http-pill">HTTP: …</span>
+                    <span class="pill" id="mcp-tools-pill">Tools: …</span>
+                    <span class="pill" id="mcp-pin-pill">PIN: …</span>
+                  </div>
+                  <p class="meta" id="mcp-status-line">Loading…</p>
+                </div>
+              </div>
+              <div class="field-group">
+                <label>MCP connection PIN
+                  <input name="mcp_pin" id="mcp-pin-input" type="password" placeholder="Set or change PIN" autocomplete="new-password" />
+                </label>
+                <p class="meta" id="mcp-pin-status">PIN: …</p>
+                <p class="hint" id="mcp-auth-hint">How HTTP <code>/mcp</code> authenticates (pick one):
+                  (1) <strong>Ngrok Basic only</strong> — username/password from Settings → Ngrok; do <em>not</em> also send <code>Authorization: Bearer</code> (many clients drop Basic when both are set).
+                  (2) <strong>MCP PIN</strong> — <code>?mcp_pin=…</code> or header <code>X-MCP-Pin</code> (optional even with ngrok).
+                  (3) <strong>Studio JWT</strong> — <code>Authorization: Bearer &lt;jwt&gt;</code> after login (per-member).
+                  PIN is hashed after save. Stdio Claude/Codex does not need HTTP auth.</p>
+              </div>
+              <div class="field-group">
+                <label>HTTP endpoint (ChatGPT Desktop)
+                  <div class="row mcp-copy-row">
+                    <input id="mcp-http-url" type="text" readonly value="http://127.0.0.1:7878/mcp" />
+                    <button type="button" id="mcp-copy-http">Copy</button>
+                  </div>
+                </label>
+                <label>Public MCP URL (ngrok)
+                  <div class="row mcp-copy-row">
+                    <input id="mcp-public-url" type="text" readonly value="" placeholder="Start ngrok to expose /mcp" />
+                    <button type="button" id="mcp-copy-public">Copy</button>
+                  </div>
+                </label>
+                <p class="hint" id="mcp-chatgpt-hint">Remote HTTP clients need the <strong>Public MCP URL</strong> (ngrok must be running). Local LAN: use the HTTP endpoint above. After a Studio update: fully quit ChatGPT, reopen, type <code>/mcp</code>, start a new thread.</p>
+              </div>
+              <div class="field-group">
+                <label>Stdio command (Claude / Codex)
+                  <div class="row mcp-copy-row">
+                    <input id="mcp-stdio-line" type="text" readonly value="python -m studio.mcp_server" />
+                    <button type="button" id="mcp-copy-stdio">Copy</button>
+                  </div>
+                </label>
+                <p class="meta" id="mcp-claude-desktop-line">Claude Desktop: …</p>
+                <p class="meta" id="mcp-claude-code-line">Claude Code: …</p>
+                <div class="row settings-actions">
+                  <button type="button" id="mcp-install-claude" class="primary">Install Claude config</button>
+                  <button type="button" id="mcp-copy-codex">Copy Codex snippet</button>
+                  <button type="button" id="mcp-refresh">Refresh</button>
+                </div>
+                <p class="hint" id="mcp-claude-hint">Install writes <code>mcpServers.lazykh</code> into Claude Desktop’s config (and Claude Code if <code>~/.claude.json</code> already exists). Quit and reopen Claude afterward.</p>
+                <details class="mcp-tools-details">
+                  <summary>Tool catalog</summary>
+                  <pre id="mcp-tools-list" class="mcp-tools-list"></pre>
+                </details>
+                <label>Codex <code>~/.codex/config.toml</code> snippet
+                  <textarea id="mcp-codex-snippet" rows="6" readonly></textarea>
+                </label>
+              </div>
+            </div>
+          </details>
+
+          <details class="card settings-card admin-only" id="settings-ngrok-card" hidden>
+            <summary class="lib-heading settings-card-summary">Ngrok</summary>
+            <div class="settings-fields">
+              <p class="hint settings-lead">Expose Studio (and MCP at <code>/mcp</code>) on your reserved ngrok domain. Edge basic-auth runs first; Studio then trusts the tunnel hop automatically. Point local port at Studio’s listen port (default <strong>7878</strong>).</p>
+              <div class="field-group">
+                <div class="settings-status gentle-status">
+                  <div class="settings-pills">
+                    <span class="pill" id="ngrok-ok-pill">Status: …</span>
+                    <span class="pill" id="ngrok-found-pill">Binary: …</span>
+                  </div>
+                  <p class="meta" id="ngrok-status-line">Checking…</p>
+                  <p class="meta" id="ngrok-command-line">Command: …</p>
+                </div>
+              </div>
+              <div class="field-group">
+                <label>Public URL
+                  <div class="row mcp-copy-row">
+                    <input name="ngrok_url" id="ngrok-url" type="text" value="" placeholder="https://your-subdomain.ngrok-free.app" />
+                    <button type="button" id="ngrok-copy-url">Copy</button>
+                  </div>
+                </label>
+                <label>Public MCP URL
+                  <div class="row mcp-copy-row">
+                    <input id="ngrok-mcp-url" type="text" readonly value="" placeholder="…/mcp" />
+                    <button type="button" id="ngrok-copy-mcp">Copy</button>
+                  </div>
+                </label>
+                <div class="row settings-row">
+                  <label>Local port
+                    <input name="ngrok_local_port" id="ngrok-local-port" type="number" min="1" max="65535" value="7878" />
+                  </label>
+                  <label class="check">
+                    <input type="checkbox" id="ngrok-autostart" name="ngrok_autostart" />
+                    Autostart ngrok when Studio boots
+                  </label>
+                </div>
+              </div>
+              <div class="field-group">
+                <label>Basic auth username
+                  <input name="ngrok_basic_auth_user" id="ngrok-basic-user" type="text" value="bubblepod" autocomplete="off" />
+                </label>
+                <label>Basic auth password
+                  <div class="row mcp-copy-row">
+                    <input name="ngrok_basic_auth_password" id="ngrok-basic-pass" type="text" value="" placeholder="Generated on first start" autocomplete="off" />
+                    <button type="button" id="ngrok-copy-basic">Copy</button>
+                  </div>
+                </label>
+                <p class="meta" id="ngrok-basic-line">Basic auth: …</p>
+                <p class="hint">Leave password blank to keep the current one. A strong password is created on first tunnel start. Give remote MCP clients <strong>only</strong> this username + password (HTTP Basic) — that is enough for admin MCP over the tunnel. Optional: still add <code>?mcp_pin=…</code> if you prefer PIN auth.</p>
+              </div>
+              <div class="field-group">
+                <div class="row settings-actions">
+                  <button type="button" id="ngrok-start" class="primary">Start ngrok</button>
+                  <button type="button" id="ngrok-stop">Stop ngrok</button>
+                  <button type="button" id="ngrok-refresh">Refresh</button>
+                  <button type="button" id="ngrok-rotate-pass">Rotate password</button>
+                </div>
+                <p class="hint bad" id="ngrok-error-line" hidden></p>
+                <p class="hint">Final command: <code id="ngrok-command-code">ngrok http 7878 --url &lt;your-ngrok-url&gt; --traffic-policy-file …</code>. Stop only ends the process Studio started.</p>
+                <p class="hint">One-time agent setup: install the <a href="https://ngrok.com/download" target="_blank" rel="noopener">ngrok app</a>, then run <code>ngrok config add-authtoken YOUR_TOKEN</code> with a token from <a href="https://dashboard.ngrok.com/get-started/your-authtoken" target="_blank" rel="noopener">dashboard.ngrok.com</a> (token stays in your ngrok config, not this repo). If Start fails with <code>ERR_NGROK_107</code>, the token was revoked — paste a fresh one and retry. After rotating the Basic password, click Start again so the traffic policy reloads.</p>
+              </div>
+            </div>
+          </details>
+
+          <details class="card settings-card admin-only" id="settings-security-card" hidden>
+            <summary class="lib-heading settings-card-summary">Security / spend</summary>
+            <div class="settings-fields">
+              <p class="hint settings-lead">Rate limits (per client IP), spend confirmation for OpenAI cloud + Flux/fal, and optional daily caps. LM Studio, ChatGPT/Claude native, ComfyUI, and local TTS skip spend confirm.</p>
+              <div class="field-group">
+                <label class="check">
+                  <input type="checkbox" id="rate-limit-enabled" name="rate_limit_enabled" />
+                  Enable rate limits
+                </label>
+                <div class="row settings-row">
+                  <label>Login attempts / window
+                    <input name="rate_limit_login" id="rate-limit-login" type="number" min="1" max="100" step="1" value="8" />
+                  </label>
+                  <label>Login window (sec)
+                    <input name="rate_limit_login_window_sec" id="rate-limit-login-window" type="number" min="60" max="86400" step="60" value="900" />
+                  </label>
+                </div>
+                <div class="row settings-row">
+                  <label>API req / window
+                    <input name="rate_limit_api" id="rate-limit-api" type="number" min="30" max="10000" step="10" value="180" />
+                  </label>
+                  <label>API window (sec)
+                    <input name="rate_limit_api_window_sec" id="rate-limit-api-window" type="number" min="10" max="3600" step="10" value="60" />
+                  </label>
+                </div>
+                <label class="check">
+                  <input type="checkbox" id="require-spend-confirm" name="require_spend_confirm" />
+                  Require confirm before OpenAI / Flux spend
+                </label>
+                <div class="row settings-row">
+                  <label>Max OpenAI calls / day (0 = unlimited)
+                    <input name="max_openai_calls_per_day" id="max-openai-day" type="number" min="0" max="100000" step="1" value="0" />
+                  </label>
+                  <label>Max Flux images / day (0 = unlimited)
+                    <input name="max_flux_images_per_day" id="max-flux-day" type="number" min="0" max="100000" step="1" value="0" />
+                  </label>
+                </div>
+                <p class="meta" id="spend-status-line">Spend today: …</p>
+              </div>
+            </div>
+          </details>
+
+          <details class="card settings-card admin-only" id="settings-audit-card" hidden>
+            <summary class="lib-heading settings-card-summary">Audit</summary>
+            <div class="settings-fields">
+              <p class="hint settings-lead">Read-only tail of <code>user_data/audit.log</code> (JSONL). MCP tool calls and significant API actions. Secrets redacted.</p>
+              <div class="field-group">
+                <div class="row settings-actions">
+                  <button type="button" id="audit-refresh">Refresh audit</button>
+                </div>
+                <pre id="audit-log" class="audit-log" aria-live="polite">Loading…</pre>
+              </div>
+            </div>
+          </details>
+
+          <details class="card settings-card admin-only" id="gentle-status-card" hidden>
+            <summary class="lib-heading settings-card-summary">Gentle aligner</summary>
+            <div class="settings-fields">
+              <p class="hint settings-lead" id="gentle-settings-lead">Phoneme aligner for lip-sync. On Windows/Linux, Docker on 8766 is preferred; otherwise Studio starts a local compatible server. On macOS, open the Gentle app (often port 8765) or set Gentle URL — Docker is not required.</p>
+              <div class="field-group">
+                <div class="settings-status gentle-status">
+                  <div class="settings-pills">
+                    <span class="pill" id="gentle-backend-pill">Backend: …</span>
+                    <span class="pill" id="gentle-ok-pill">Status: …</span>
+                  </div>
+                  <p class="meta" id="gentle-status-line">Checking…</p>
+                  <p class="meta" id="gentle-port-line">Port: …</p>
+                </div>
+                <label>Gentle URL
+                  <input name="gentle_url" />
+                </label>
+                <div class="row settings-actions">
+                  <button type="button" id="start-gentle-settings">Start Gentle</button>
+                  <button type="button" id="stop-gentle-settings">Stop Gentle</button>
+                </div>
+                <p class="hint">MCP: <code>start_gentle</code> / <code>ensure_gentle</code> and <code>stop_gentle</code>. Stop ends Docker/local processes Studio owns; it does not quit Gentle.app. Optional: <code>pip install pronouncing</code> for a fuller dictionary.</p>
+              </div>
+            </div>
+          </details>
+
+        <details class="card settings-card" id="youtube-card">
+          <summary class="lib-heading settings-card-summary">YouTube</summary>
+          <div class="settings-fields">
+            <p class="hint settings-lead">Connect opens your <strong>system browser</strong> (not a popup). Add a Google Cloud OAuth client (Desktop app, or Web with redirect <code id="yt-oauth-callback-hint">http://127.0.0.1:7878/api/youtube/oauth/callback</code>). Client id/secret can also come from env <code>YOUTUBE_CLIENT_ID</code> / <code>YOUTUBE_CLIENT_SECRET</code>. Tokens stay in <code>user_data/youtube_token.json</code>.</p>
+            <div class="field-group">
+              <label>YouTube client ID
+                <input name="youtube_client_id" form="settings-form" autocomplete="off" />
+              </label>
+              <label>YouTube client secret
+                <input name="youtube_client_secret" form="settings-form" type="password" placeholder="••••" autocomplete="off" />
+              </label>
+              <div class="row settings-actions">
+                <button type="button" id="yt-connect" class="primary">Connect YouTube</button>
+                <button type="button" id="yt-disconnect">Disconnect</button>
+              </div>
+              <p id="yt-status" class="meta">Not connected.</p>
+              <p class="hint" id="yt-auth-url" hidden></p>
+            </div>
+            <div class="field-group">
+              <label>Channel
+                <select id="yt-channel">
+                  <option value="">Connect first, then pick a channel</option>
+                </select>
+              </label>
+              <label class="check">
+                <input type="checkbox" id="yt-auto" name="youtube_auto_upload" form="settings-form" />
+                Auto-upload when video completes
+              </label>
+              <label>Default privacy
+                <select id="yt-privacy" name="youtube_privacy" form="settings-form">
+                  <option value="private">private</option>
+                  <option value="unlisted" selected>unlisted</option>
+                  <option value="public">public</option>
+                </select>
+              </label>
+              <p class="hint">Auto-upload default is unlisted. Per-job override lives on the Video step. If the browser does not return to Studio, paste the redirect URL or code below.</p>
+              <div class="row settings-row">
+                <label class="grow">Paste redirect URL or code
+                  <input id="yt-code" type="text" placeholder="http://127.0.0.1:7878/api/youtube/oauth/callback?code=…" autocomplete="off" />
+                </label>
+                <button type="button" id="yt-paste">Submit code</button>
+              </div>
+            </div>
+          </div>
+        </details>
+
+          <div class="card settings-card settings-save-card admin-only" hidden>
+            <div class="settings-save-inner">
+              <button type="submit" class="primary">Save settings</button>
+              <p class="hint">Keys save above. MCP connectors are on the MCP card.</p>
+            </div>
+          </div>
+        </form>
+
+      </section>
+
+      <section id="view-prompts" class="view">
+        <div class="prompts-toolbar">
+          <button type="button" id="prompts-save-all" class="primary">Save all</button>
+          <button type="button" id="prompts-restore-all" class="danger">Restore my defaults</button>
+          <p class="hint" id="prompts-note">Edits apply only to your account. Restore clears your overrides; other members keep theirs.</p>
+        </div>
+        <div id="prompt-list"></div>
+        <div class="library-pager" id="prompts-pager" hidden>
+          <button type="button" id="prompts-prev">Previous</button>
+          <span id="prompts-page-label"></span>
+          <button type="button" id="prompts-next">Next</button>
+        </div>
+      </section>
+
+        </div>
+      </div>
+    </main>
+  </div>
+  <dialog id="spend-confirm-dialog">
+    <form method="dialog" id="spend-confirm-form">
+      <h2>Confirm billed action</h2>
+      <p id="spend-confirm-message">This will spend OpenAI or fal credits.</p>
+      <p class="hint" id="spend-confirm-cost-hint">Flux Dev 2 ≈ ~4.6¢/image at ~2MP; ~$2.60 per ~10-min video (~56 images).</p>
+      <p class="hint">LM Studio, ChatGPT/Claude native, ComfyUI, and local TTS do not need this step.</p>
+      <div class="dialog-actions">
+        <button type="submit" value="cancel">Cancel</button>
+        <button type="submit" value="confirm" class="primary" id="spend-confirm-ok">Confirm spend</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="delete-dialog">
+    <form method="dialog" id="delete-form">
+      <h2>Delete this job?</h2>
+      <p>Are you sure you want to delete this job?</p>
+      <p class="delete-name" id="delete-job-name"></p>
+      <label class="check">
+        <input type="checkbox" id="delete-files" />
+        Delete files on disk
+      </label>
+      <p class="hint">Leave unchecked to hide the job in Studio but keep the project folder (scripts, audio, frames, billboards, mp4). Check it to permanently delete <code>user_data/projects/{id}</code>.</p>
+      <div class="dialog-actions">
+        <button type="submit" value="cancel">Cancel</button>
+        <button type="submit" value="confirm" class="danger">Delete</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="job-error-dialog">
+    <form method="dialog" id="job-error-form">
+      <h2 id="job-error-title">Something went wrong</h2>
+      <p id="job-error-message">The job failed.</p>
+      <p class="hint" id="job-error-hint" hidden></p>
+      <details id="job-error-details" hidden>
+        <summary>Technical details</summary>
+        <pre id="job-error-raw" class="audit-log"></pre>
+      </details>
+      <div class="dialog-actions">
+        <button type="submit" value="ok" class="primary">OK</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="prompts-reset-dialog">
+    <form method="dialog" id="prompts-reset-form">
+      <h2>Restore your defaults?</h2>
+      <p>This clears <strong>your</strong> prompt overrides only. Other members keep theirs. Built-in defaults are used until you save again.</p>
+      <div class="dialog-actions">
+        <button type="submit" value="cancel">Cancel</button>
+        <button type="submit" value="confirm" class="danger">Restore my defaults</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="topic-schedule-dialog">
+    <form method="dialog" id="topic-schedule-form">
+      <h2>Schedule topic</h2>
+      <p class="meta" id="topic-schedule-title"></p>
+      <div class="row">
+        <label>Date
+          <input type="date" id="topic-schedule-date" required />
+        </label>
+        <label>Time
+          <input type="time" id="topic-schedule-time" required />
+        </label>
+      </div>
+      <p class="hint">Times are this computer’s local timezone. Studio starts due queued topics about every 30 seconds, one at a time.</p>
+      <div class="dialog-actions">
+        <button type="button" id="topic-schedule-cancel">Cancel</button>
+        <button type="button" id="topic-schedule-now">Run now</button>
+        <button type="submit" class="primary" id="topic-schedule-confirm">Schedule</button>
+      </div>
+    </form>
+  </dialog>
+  <script src="/static/app.js"></script>
+</body>
+</html>

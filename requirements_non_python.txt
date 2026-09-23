@@ -1,0 +1,14 @@
+ffmpeg (not a Python library; required to mux the final mp4).
+The Bubble Pod Electron installer ships ffmpeg/ffprobe under resources/ffmpeg/.
+Dev builds: run `npm run ensure-ffmpeg` (or `npm run dist`) to download into desktop/bin/ffmpeg/.
+Or install ffmpeg yourself and put it on PATH / set FFMPEG_BINARY.
+
+Gentle phoneme aligner — either:
+  - Docker Desktop + image lowerquality/gentle, published at localhost:8766 (8766→8765 so it does not collide with other tools on 8765), or
+  - nothing extra: Studio starts a local Gentle-compatible HTTP server when Docker is missing/unusable
+
+Optional local-aligner extras (pip, not required):
+  - pronouncing  (fuller CMU dictionary; already in requirements.txt)
+  - openai-whisper  (better word timings if a model such as tiny.pt is already cached)
+
+Node.js + npm — only if you want the Electron desktop window (`npm start`)

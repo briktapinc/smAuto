@@ -1,0 +1,139 @@
+{
+  "name": "lazykh-studio",
+  "productName": "Bubble Pod",
+  "version": "1.0.0",
+  "description": "Desktop window for Bubble Pod (Python uvicorn + Gentle)",
+  "main": "desktop/main.js",
+  "author": "Bubble Pod",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "electron": "electron .",
+    "ensure-ffmpeg": "node desktop/ensure-ffmpeg.js",
+    "assert-clean-package": "node desktop/assert-clean-package.js",
+    "prebuild": "node desktop/ensure-ffmpeg.js",
+    "predist": "node desktop/ensure-ffmpeg.js",
+    "build": "electron-builder --win nsis && node desktop/assert-clean-package.js",
+    "dist": "electron-builder --win nsis && node desktop/assert-clean-package.js",
+    "dist:win": "electron-builder --win nsis && node desktop/assert-clean-package.js",
+    "dist:mac": "electron-builder --mac dmg zip",
+    "dist:mac:unsigned": "electron-builder --mac dmg zip"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.lazykh.studio",
+    "productName": "Bubble Pod",
+    "directories": {
+      "output": "dist",
+      "buildResources": "desktop/icons"
+    },
+    "icon": "desktop/icons/icon.png",
+    "files": [
+      "desktop/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": ".",
+        "to": "lazykh",
+        "filter": [
+          "run_studio.py",
+          "studio/**/*",
+          "code/**/*",
+          "requirements.txt",
+          "docker-compose.yml",
+          "poses/**/*",
+          "mouths/**/*",
+          "backgrounds/**/*",
+          "music/**/*",
+          "!user_data",
+          "!user_data/**/*",
+          "!.env",
+          "!.env.*",
+          "!.git",
+          "!.git/**/*",
+          "!dist",
+          "!dist/**/*",
+          "!node_modules",
+          "!node_modules/**/*",
+          "!**/__pycache__",
+          "!**/__pycache__/**/*",
+          "!**/*.pyc",
+          "!**/settings.json",
+          "!**/auth.json",
+          "!**/members.json",
+          "!**/youtube_token.json",
+          "!**/audit.log",
+          "!**/prompts.json",
+          "!**/topics.json",
+          "!**/gpu.lock",
+          "!**/ngrok.pid",
+          "!**/ngrok_traffic_policy.json",
+          "!**/listen_port.json",
+          "!**/comfyui_workflow.json",
+          "!exampleVideo",
+          "!exampleVideo/**/*",
+          "!desktop",
+          "!desktop/**/*"
+        ]
+      },
+      {
+        "from": "desktop/bin/ffmpeg",
+        "to": "ffmpeg",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "icon": "desktop/icons/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "mac": {
+      "category": "public.app-category.video",
+      "icon": "desktop/icons/icon.png",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "identity": null
+    },
+    "dmg": {
+      "title": "Bubble Pod"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": true,
+      "include": "desktop/installer.nsh",
+      "installerIcon": "desktop/icons/icon.ico",
+      "uninstallerIcon": "desktop/icons/icon.ico",
+      "installerHeaderIcon": "desktop/icons/icon.ico",
+      "shortcutName": "Bubble Pod"
+    }
+  }
+}

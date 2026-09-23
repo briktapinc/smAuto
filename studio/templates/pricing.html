@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bubble Pod — Pricing</title>
+  <link rel="stylesheet" href="/static/pricing.css" />
+</head>
+<body>
+  <div id="pricing-login" class="gate" hidden>
+    <form id="pricing-login-form" class="card login-card">
+      <div class="brand">
+        <span class="mark">BP</span>
+        <div>
+          <strong>Bubble Pod</strong>
+          <small>Sign in to manage membership</small>
+        </div>
+      </div>
+      <label>Username or email
+        <input id="pricing-user" name="username" autocomplete="username" required />
+      </label>
+      <label>Password
+        <input id="pricing-pass" name="password" type="password" autocomplete="current-password" required />
+      </label>
+      <p id="pricing-login-error" class="error" hidden></p>
+      <button type="submit" class="primary">Sign in</button>
+      <p class="muted"><a href="/">← Studio</a> · <a href="/#signup" id="pricing-signup-link">Create account</a></p>
+    </form>
+  </div>
+
+  <div id="pricing-app" hidden>
+    <header class="top">
+      <a class="brand" href="/pricing">
+        <span class="mark">BP</span>
+        <div>
+          <strong>Bubble Pod</strong>
+          <small>Membership</small>
+        </div>
+      </a>
+      <nav>
+        <a href="/">Studio</a>
+        <button type="button" id="pricing-logout">Log out</button>
+      </nav>
+    </header>
+
+    <main class="pricing-main">
+      <p class="eyebrow" id="pricing-who">Signed in</p>
+      <h1>Studio membership</h1>
+      <p class="lede" id="pricing-lede">One plan. Every member gets the same Studio privileges for their own jobs.</p>
+
+      <article class="plan-card" id="plan-card">
+        <p class="plan-name" id="plan-name">Bubble Pod Membership</p>
+        <p class="plan-price" id="plan-price">…</p>
+        <p class="plan-interval" id="plan-interval"></p>
+        <ul class="plan-perks">
+          <li>Create jobs, topics, and renders</li>
+          <li>Your library stays private to your account</li>
+          <li>Cancel anytime in Stripe billing</li>
+        </ul>
+        <p class="status-pill" id="plan-status">Status: …</p>
+        <p class="muted" id="plan-hint"></p>
+        <div class="plan-actions" id="plan-actions">
+          <button type="button" class="primary" id="btn-subscribe" hidden>Subscribe</button>
+          <button type="button" class="primary" id="btn-resubscribe" hidden>Resubscribe</button>
+          <button type="button" id="btn-manage" hidden>Manage billing</button>
+          <button type="button" id="btn-cancel" hidden>Cancel subscription</button>
+        </div>
+        <p id="plan-error" class="error" hidden></p>
+      </article>
+
+      <p class="muted foot" id="pricing-foot">
+        Checkout and cancellation open on Stripe’s secure pages. You’ll return here when finished.
+      </p>
+    </main>
+  </div>
+
+  <p id="toast" hidden></p>
+  <script src="/static/pricing.js"></script>
+</body>
+</html>

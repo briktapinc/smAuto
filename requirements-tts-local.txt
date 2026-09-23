@@ -1,0 +1,25 @@
+# Optional local TTS — Studio boots from requirements.txt without PyTorch.
+#
+# Resemble Chatterbox (preferred, tts_provider=local):
+#   py -3.11 -m pip install chatterbox-tts
+#
+# Prefer a CUDA PyTorch build so Local TTS uses VRAM when a GPU is present
+# (falls back to CPU automatically if CUDA is missing or fails to load):
+#   py -3.11 -m pip install --upgrade torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+#
+# Or install everything from this file after the CUDA torch line above:
+#   pip install -r requirements-tts-local.txt
+#
+# First Local generate downloads ResembleAI/chatterbox weights from Hugging Face
+# if they are not already cached. Restart Studio after installing.
+#
+# Force device (optional): BUBBLEPOD_TTS_DEVICE=cuda|cpu
+#
+# If chatterbox-tts cannot install on this Python, a CPU-friendly fallback is:
+#   pip install piper-tts
+# then place an English ONNX voice in user_data/piper/
+# (e.g. en_US-lessac-medium.onnx from rhasspy/piper-voices).
+#
+# Do not add these packages to the main requirements.txt — they pull torch.
+
+chatterbox-tts

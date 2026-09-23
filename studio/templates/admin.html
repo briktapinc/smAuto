@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bubble Pod Admin</title>
+  <link rel="stylesheet" href="/static/admin.css" />
+</head>
+<body>
+  <div id="admin-login" class="gate" hidden>
+    <form id="admin-login-form" class="card">
+      <h1>Admin sign-in</h1>
+      <p class="muted">Manage members, subscriptions, and Stripe payments. All members have equal Studio privileges.</p>
+      <label>Username <input id="admin-user" autocomplete="username" required /></label>
+      <label>Password <input id="admin-pass" type="password" autocomplete="current-password" required /></label>
+      <p id="admin-login-error" class="error" hidden></p>
+      <button type="submit">Sign in</button>
+      <p class="muted"><a href="/">← Studio</a></p>
+    </form>
+  </div>
+
+  <div id="admin-app" hidden>
+    <header class="top">
+      <div>
+        <a class="brand" href="/admin">Bubble Pod Admin</a>
+        <p class="muted" id="admin-who"></p>
+      </div>
+      <nav>
+        <button type="button" data-panel="overview" class="on">Overview</button>
+        <button type="button" data-panel="members">Members</button>
+        <button type="button" data-panel="signups">Signups</button>
+        <button type="button" data-panel="payments">Payments</button>
+        <button type="button" data-panel="refunds">Refunds</button>
+        <button type="button" data-panel="subscriptions">Subscriptions</button>
+        <button type="button" data-panel="stripe">Stripe</button>
+        <button type="button" data-panel="email">Email</button>
+        <a href="/">Studio</a>
+        <button type="button" id="admin-logout">Log out</button>
+      </nav>
+    </header>
+
+    <main>
+      <section id="panel-overview" class="panel on">
+        <h2>Overview</h2>
+        <p class="muted">Single membership plan — every paying member gets the same access.</p>
+        <div id="overview-cards" class="cards"></div>
+      </section>
+
+      <section id="panel-members" class="panel">
+        <div class="row-between">
+          <h2>Members</h2>
+          <button type="button" id="member-new-btn">Add user</button>
+        </div>
+        <div id="members-table" class="table-wrap"></div>
+        <dialog id="member-dialog">
+          <form method="dialog" id="member-form" class="card">
+            <h3 id="member-dialog-title">Add user</h3>
+            <input type="hidden" id="member-id" />
+            <label>Username <input id="member-username" required /></label>
+            <label>Email <input id="member-email" type="email" /></label>
+            <label>Password <input id="member-password" type="password" placeholder="min 6 chars" /></label>
+            <label>Role
+              <select id="member-role">
+                <option value="member">member (equal access)</option>
+                <option value="admin">admin</option>
+              </select>
+            </label>
+            <label>Subscription status
+              <select id="member-status">
+                <option value="none">none</option>
+                <option value="active">active</option>
+                <option value="trialing">trialing</option>
+                <option value="past_due">past_due</option>
+                <option value="canceled">canceled</option>
+                <option value="unpaid">unpaid</option>
+              </select>
+            </label>
+            <label class="check"><input type="checkbox" id="member-disabled" /> Disabled</label>
+            <p id="member-form-error" class="error" hidden></p>
+            <div class="row">
+              <button type="submit" value="save" id="member-save">Save</button>
+              <button type="submit" value="cancel">Cancel</button>
+            </div>
+          </form>
+        </dialog>
+      </section>
+
+      <section id="panel-signups" class="panel">
+        <h2>Signups</h2>
+        <div id="signups-table" class="table-wrap"></div>
+      </section>
+
+      <section id="panel-payments" class="panel">
+        <h2>Payments</h2>
+        <div id="payments-table" class="table-wrap"></div>
+      </section>
+
+      <section id="panel-refunds" class="panel">
+        <div class="row-between">
+          <h2>Refunds</h2>
+          <button type="button" id="refund-new-btn">Issue refund</button>
+        </div>
+        <div id="refunds-table" class="table-wrap"></div>
+        <dialog id="refund-dialog">
+          <form method="dialog" id="refund-form" class="card">
+            <h3>Issue Stripe refund</h3>
+            <label>Payment intent id <input id="refund-pi" placeholder="pi_..." /></label>
+            <label>or Charge id <input id="refund-charge" placeholder="ch_..." /></label>
+            <label>Amount cents (blank = full) <input id="refund-amount" type="number" min="1" /></label>
+            <label>Reason
+              <select id="refund-reason">
+                <option value="requested_by_customer">requested_by_customer</option>
+                <option value="duplicate">duplicate</option>
+                <option value="fraudulent">fraudulent</option>
+              </select>
+            </label>
+            <p id="refund-form-error" class="error" hidden></p>
+            <div class="row">
+              <button type="submit" value="save">Refund</button>
+              <button type="submit" value="cancel">Cancel</button>
+            </div>
+          </form>
+        </dialog>
+      </section>
+
+      <section id="panel-subscriptions" class="panel">
+        <h2>Subscription events</h2>
+        <div id="subscriptions-table" class="table-wrap"></div>
+      </section>
+
+      <section id="panel-stripe" class="panel">
+        <h2>Stripe setup</h2>
+        <p class="muted">Keys are stored in <code>user_data/settings.json</code>. Create one Product + Price for membership (equal access for all members).</p>
+        <form id="stripe-form" class="card stack">
+          <label>Secret key <input id="stripe-secret" type="password" placeholder="sk_test_... or rk_..." autocomplete="off" /></label>
+          <label>Publishable key <input id="stripe-pub" placeholder="pk_test_..." autocomplete="off" /></label>
+          <label>Webhook secret <input id="stripe-whsec" type="password" placeholder="whsec_..." autocomplete="off" /></label>
+          <label>Price id (optional if auto-created) <input id="stripe-price" placeholder="price_..." /></label>
+          <label>Amount (cents) <input id="stripe-amount" type="number" min="100" step="100" value="2900" /></label>
+          <label>Public base URL (for Checkout redirects / webhooks) <input id="stripe-public-url" placeholder="https://your-tunnel.example" /></label>
+          <label class="check"><input type="checkbox" id="stripe-membership-required" checked /> Require membership when Stripe is configured</label>
+          <div class="row">
+            <button type="submit">Save Stripe settings</button>
+            <button type="button" id="stripe-ensure-catalog">Ensure membership catalog</button>
+          </div>
+          <p id="stripe-status" class="muted"></p>
+        </form>
+        <p class="muted">Webhook endpoint: <code id="stripe-webhook-url">/api/stripe/webhook</code></p>
+      </section>
+
+      <section id="panel-email" class="panel">
+        <h2>Email (SMTP)</h2>
+        <p class="muted">Used for signup welcome, password reset, membership, and payment receipts. Leave disabled until SMTP is verified.</p>
+        <form id="email-form" class="card stack">
+          <label class="check"><input type="checkbox" id="email-enabled" /> Enable outbound email</label>
+          <label>SMTP host <input id="smtp-host" placeholder="smtp.hostinger.com" autocomplete="off" /></label>
+          <label>SMTP port <input id="smtp-port" type="number" min="1" max="65535" value="587" /></label>
+          <label>SMTP username <input id="smtp-user" placeholder="noreply@yourdomain.com" autocomplete="off" /></label>
+          <label>SMTP password <input id="smtp-password" type="password" placeholder="********" autocomplete="off" /></label>
+          <div class="row">
+            <label class="check"><input type="checkbox" id="smtp-tls" checked /> STARTTLS</label>
+            <label class="check"><input type="checkbox" id="smtp-ssl" /> SSL (port 465)</label>
+          </div>
+          <label>From address <input id="email-from" placeholder="noreply@yourdomain.com" /></label>
+          <label>From name <input id="email-from-name" placeholder="Bubble Pod" /></label>
+          <label>Reply-To (optional) <input id="email-reply-to" placeholder="support@yourdomain.com" /></label>
+          <div class="row">
+            <button type="submit">Save email settings</button>
+            <button type="button" id="email-test-btn">Send test email</button>
+          </div>
+          <label>Test recipient <input id="email-test-to" type="email" placeholder="you@example.com" /></label>
+          <p id="email-status" class="muted"></p>
+        </form>
+        <h3>Templates</h3>
+        <p class="muted">Edit subject/body. Placeholders: <code>{{username}}</code> <code>{{app_name}}</code> <code>{{studio_url}}</code> <code>{{login_url}}</code> <code>{{reset_url}}</code> <code>{{amount}}</code> <code>{{currency}}</code> <code>{{invoice_line}}</code> <code>{{period_end_clause}}</code> <code>{{amount_clause}}</code> <code>{{expires_minutes}}</code> <code>{{portal_hint}}</code></p>
+        <div id="email-templates" class="stack"></div>
+        <div class="row" style="margin-top:12px">
+          <button type="button" id="email-templates-save">Save templates</button>
+          <button type="button" id="email-templates-reset">Restore default templates</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" hidden></div>
+  <script src="/static/admin.js"></script>
+</body>
+</html>
