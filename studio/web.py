@@ -682,6 +682,12 @@ def _cors_origins() -> list[str]:
         origins.extend([local, local.replace("127.0.0.1", "localhost")])
         public = resolve_public_base_url(settings)
         if public:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(public)
+            if parsed.scheme and parsed.netloc:
+                # Origin header is scheme+host only (no /app path).
+                origins.append(f"{parsed.scheme}://{parsed.netloc}")
             origins.append(public)
     except Exception:
         from studio.settings import DEFAULT_LISTEN_PORT
@@ -700,6 +706,52 @@ def _cors_origins() -> list[str]:
             seen.add(o)
             out.append(o)
     return out
+
+
+def _studio_prefix() -> str:
+    from studio.settings import studio_url_prefix
+
+    return studio_url_prefix()
+
+
+def _pref_path(path: str) -> str:
+    """Prefix a root-absolute path when Studio is under a subpath (e.g. /app)."""
+    prefix = _studio_prefix()
+    if not prefix or not path.startswith("/"):
+        return path
+    if path == prefix or path.startswith(prefix + "/"):
+        return path
+    return prefix + path
+
+
+def _render_html(page: Path) -> HTMLResponse:
+    """Serve an HTML template, injecting window.__STUDIO_BASE__ and rewriting asset hrefs."""
+    import json
+
+    html = page.read_text(encoding="utf-8")
+    prefix = _studio_prefix()
+    if prefix:
+        inject = f"<script>window.__STUDIO_BASE__={json.dumps(prefix)};</script>\n"
+        if "<head>" in html.lower():
+            # Preserve original <head> casing
+            idx = html.lower().index("<head>")
+            html = html[: idx + 6] + "\n  " + inject + html[idx + 6 :]
+        else:
+            html = inject + html
+        for old, new in (
+            ('href="/static/', f'href="{prefix}/static/'),
+            ('src="/static/', f'src="{prefix}/static/'),
+            ('href="/pricing', f'href="{prefix}/pricing'),
+            ('href="/admin', f'href="{prefix}/admin'),
+            ('href="/"', f'href="{prefix}/"'),
+            ('href="/#', f'href="{prefix}/#'),
+        ):
+            html = html.replace(old, new)
+    return HTMLResponse(html)
+
+
+def _redir(path: str, status_code: int = 303) -> RedirectResponse:
+    return RedirectResponse(url=_pref_path(path), status_code=status_code)
 
 
 def _err(exc: Exception) -> HTTPException:
@@ -868,6 +920,9 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Stickman Automation",
         lifespan=studio_lifespan,
+        # Do not set root_path here: Starlette StaticFiles mounts break when
+        # root_path is set and nginx strips /app. Public URLs use PUBLIC_BASE_URL
+        # + window.__STUDIO_BASE__ instead.
         # Docs/OpenAPI served only to authenticated sessions (AuthMiddleware).
         docs_url="/docs",
         redoc_url="/redoc",
@@ -895,37 +950,37 @@ def create_app() -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def home():
         index = TEMPLATES_DIR / "index.html"
-        return HTMLResponse(index.read_text(encoding="utf-8"))
+        return _render_html(index)
 
     @app.get("/admin", response_class=HTMLResponse)
     def admin_home():
         if studio_auth.is_desktop_mode():
-            return RedirectResponse(url="/", status_code=303)
+            return _redir("/")
         page = TEMPLATES_DIR / "admin.html"
         if not page.is_file():
             raise HTTPException(404, "Admin UI missing")
-        return HTMLResponse(page.read_text(encoding="utf-8"))
+        return _render_html(page)
 
     @app.get("/pricing", response_class=HTMLResponse)
     def pricing_home():
         if studio_auth.is_desktop_mode():
-            return RedirectResponse(url="/", status_code=303)
+            return _redir("/")
         page = TEMPLATES_DIR / "pricing.html"
         if not page.is_file():
             raise HTTPException(404, "Pricing page missing")
-        return HTMLResponse(page.read_text(encoding="utf-8"))
+        return _render_html(page)
 
     @app.get("/billing/success", response_class=HTMLResponse)
     def billing_success():
         if studio_auth.is_desktop_mode():
-            return RedirectResponse(url="/", status_code=303)
-        return RedirectResponse(url="/pricing?checkout=success", status_code=303)
+            return _redir("/")
+        return _redir("/pricing?checkout=success")
 
     @app.get("/billing/cancel", response_class=HTMLResponse)
     def billing_cancel():
         if studio_auth.is_desktop_mode():
-            return RedirectResponse(url="/", status_code=303)
-        return RedirectResponse(url="/pricing?checkout=canceled", status_code=303)
+            return _redir("/")
+        return _redir("/pricing?checkout=canceled")
 
     @app.post("/api/auth/login")
     def auth_login(body: LoginBody, response: Response, request: Request):
@@ -1321,8 +1376,10 @@ def create_app() -> FastAPI:
         port = normalize_listen_port(settings.get("port"), DEFAULT_LISTEN_PORT)
         local = local_base_url(settings)
         public = resolve_public_base_url(settings)
-        mcp_path = "/mcp" if mcp_app is not None else None
-        mcp_url = f"{public.rstrip('/')}{mcp_path}" if mcp_path and public else mcp_path
+        prefix = _studio_prefix()
+        mcp_path = f"{prefix}/mcp" if mcp_app is not None else None
+        # public already includes /app when mounted under a subpath
+        mcp_url = f"{public.rstrip('/')}/mcp" if mcp_app is not None and public else mcp_path
         out = {
             "ok": True,
             "host": host,
@@ -1330,6 +1387,7 @@ def create_app() -> FastAPI:
             "url": f"{local}/",
             "local_url": f"{local}/",
             "public_base_url": public,
+            "url_prefix": prefix,
             "app_env": app_env(),
             "gentle": gentle_status(),
             "mcp": mcp_path,

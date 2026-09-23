@@ -2,6 +2,16 @@ const TOKEN_KEY = "bubblepod.authToken";
 
 const $ = (sel) => document.querySelector(sel);
 
+const STUDIO_BASE = (typeof window !== "undefined" && window.__STUDIO_BASE__) || "";
+function withBase(path) {
+  if (!path || typeof path !== "string") return path;
+  if (!STUDIO_BASE) return path;
+  if (/^(https?:|data:|blob:|mailto:)/i.test(path)) return path;
+  if (path === STUDIO_BASE || path.startsWith(STUDIO_BASE + "/")) return path;
+  if (path.startsWith("/")) return STUDIO_BASE + path;
+  return path;
+}
+
 function getToken() {
   try { return localStorage.getItem(TOKEN_KEY) || ""; } catch { return ""; }
 }
@@ -39,7 +49,7 @@ async function api(path, { method = "GET", body } = {}) {
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  const res = await fetch(path, {
+  const res = await fetch(withBase(path), {
     method,
     headers,
     credentials: "same-origin",

@@ -47,6 +47,17 @@ let membershipLocked = false;
 /** True when running as local Electron/.exe single-user app (no login / tenants / Stripe). */
 let desktopMode = !!(typeof window !== "undefined" && window.bubblePod && window.bubblePod.isDesktop);
 
+/** Path prefix when Studio is under a subpath (e.g. "/app"). Empty at domain root. */
+const STUDIO_BASE = (typeof window !== "undefined" && window.__STUDIO_BASE__) || "";
+function withBase(path) {
+  if (!path || typeof path !== "string") return path;
+  if (!STUDIO_BASE) return path;
+  if (/^(https?:|data:|blob:|mailto:)/i.test(path)) return path;
+  if (path === STUDIO_BASE || path.startsWith(STUDIO_BASE + "/")) return path;
+  if (path.startsWith("/")) return STUDIO_BASE + path;
+  return path;
+}
+
 function applyDesktopModeUi() {
   document.body.classList.add("desktop-mode", "is-admin");
   document.body.classList.remove("is-member", "membership-locked");
@@ -363,7 +374,7 @@ async function api(path, opts = {}) {
   let res;
   try {
     const { timeoutMs: _t, signal: _s, ...fetchOpts } = opts;
-    res = await fetch(path, {
+    res = await fetch(withBase(path), {
       credentials: "same-origin",
       ...fetchOpts,
       headers,
@@ -726,7 +737,7 @@ function cardHtml(item, compact = false) {
     <div class="yt-card ${portrait ? "portrait" : ""} ${ready ? "ready" : "pending"} ${ytOnly ? "youtube-only" : ""} ${compact ? "compact" : ""} ${item.running ? "running" : ""}" data-id="${esc(item.id)}">
     <div class="thumb">
       <div class="ph-doodle" aria-hidden="true">LK</div>
-      <img src="/api/projects/${esc(item.id)}/thumbnail?t=${stamp}" alt="" onerror="this.remove()">
+      <img src="${withBase(`/api/projects/${esc(item.id)}/thumbnail?t=${stamp}`)}" alt="" onerror="this.remove()">
       ${ready ? `<span class="play" aria-hidden="true"></span>` : `<span class="chip">${esc(state)}</span>`}
       ${ytOnly ? `<span class="chip yt-chip">YouTube</span>` : ""}
       <span class="dur">${formatDuration(item.duration_seconds)}</span>
@@ -980,7 +991,7 @@ async function loadJob(id, { poll = true } = {}) {
   await refreshIllustrations({ lite: false, rebuild: true });
   if (current.has_audio) {
     $("#audio-player").hidden = false;
-    $("#audio-player").src = `/api/projects/${id}/audio-file?t=${Date.now()}`;
+    $("#audio-player").src = withBase(`/api/projects/${id}/audio-file?t=${Date.now()}`);
   } else {
     $("#audio-player").hidden = true;
   }
@@ -1042,7 +1053,7 @@ function preferredPlayAspect() {
 
 function videoSrc(id, aspect) {
   const q = aspect ? `&aspect=${encodeURIComponent(aspect)}` : "";
-  return `/api/projects/${id}/video?t=${Date.now()}${q}`;
+  return withBase(`/api/projects/${id}/video?t=${Date.now()}${q}`);
 }
 
 function fillAspectPick(select, wrap, selected) {
@@ -1420,14 +1431,14 @@ function coverAspectOf(job) {
 }
 
 function pictureSrc(job) {
-  if (job?.url && (job.ready ?? job.has_image)) return job.url;
+  if (job?.url && (job.ready ?? job.has_image)) return withBase(job.url);
   if (!current?.id || !job?.filename) return "";
   const mtime = job.mtime || Date.now();
   if (pictureIsCover(job)) {
     const aspect = coverAspectOf(job);
-    return `/api/projects/${current.id}/cover?aspect=${encodeURIComponent(aspect)}&t=${mtime}`;
+    return withBase(`/api/projects/${current.id}/cover?aspect=${encodeURIComponent(aspect)}&t=${mtime}`);
   }
-  return `/api/projects/${current.id}/billboards/${job.filename}?t=${mtime}`;
+  return withBase(`/api/projects/${current.id}/billboards/${job.filename}?t=${mtime}`);
 }
 
 function picturePlaceholderHtml(job) {
@@ -3227,7 +3238,7 @@ function refreshStickmanSwatches(hex) {
 function refreshStickmanPreview() {
   const img = $("#stickman-head-preview");
   if (!img) return;
-  img.src = `/api/poses/preview?t=${Date.now()}`;
+  img.src = withBase(`/api/poses/preview?t=${Date.now()}`);
 }
 
 function fillStickmanHead(data) {
@@ -3874,7 +3885,7 @@ function renderBackgroundPicker() {
   const selected = current?.background_file || "";
   root.innerHTML = bgCatalog.map((b) => `
     <button type="button" class="bg-thumb${b.filename === selected ? " on" : ""}" data-bg="${esc(b.filename)}" title="${esc(b.filename)}">
-      <img src="/api/backgrounds/${encodeURIComponent(b.filename)}" alt="${esc(b.name)}" />
+      <img src="${withBase(`/api/backgrounds/${encodeURIComponent(b.filename)}`)}" alt="${esc(b.name)}" />
       <span>${esc(b.filename)}</span>
     </button>
   `).join("");
@@ -3901,7 +3912,7 @@ function renderMusicList(tracks) {
       <button type="button" class="music-pick-btn" data-music-pick="${esc(t.id)}" title="Use for this job">
         <strong>${esc(t.name)}${tag}</strong>
       </button>
-      <audio controls preload="none" src="/api/music/${esc(t.id)}"></audio>
+      <audio controls preload="none" src="${withBase(`/api/music/${esc(t.id)}`)}"></audio>
       <button type="button" class="danger" data-music-delete="${esc(t.id)}">Delete</button>
     </div>`;
   }).join("");

@@ -267,6 +267,17 @@ def _cookie_secure() -> bool:
     return False
 
 
+def _cookie_path() -> str:
+    """Scope auth cookie to Studio subpath when mounted under /app (etc.)."""
+    try:
+        from studio.settings import studio_url_prefix
+
+        prefix = studio_url_prefix()
+        return prefix or "/"
+    except Exception:
+        return "/"
+
+
 def set_auth_cookie(response: Response, token: str, max_age: int) -> None:
     response.set_cookie(
         key=COOKIE_NAME,
@@ -274,7 +285,7 @@ def set_auth_cookie(response: Response, token: str, max_age: int) -> None:
         max_age=max_age,
         httponly=True,
         samesite="lax",
-        path="/",
+        path=_cookie_path(),
         secure=_cookie_secure(),
     )
 
@@ -522,7 +533,7 @@ def enforce_mcp_tool_membership(tool_name: str, request: Request | None = None) 
 
 
 def clear_auth_cookie(response: Response) -> None:
-    response.delete_cookie(key=COOKIE_NAME, path="/")
+    response.delete_cookie(key=COOKIE_NAME, path=_cookie_path())
 
 
 def looks_like_jwt(token: str) -> bool:

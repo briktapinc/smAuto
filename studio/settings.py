@@ -620,6 +620,34 @@ def resolve_public_base_url(settings: dict[str, Any] | None = None) -> str:
     return local_base_url(data)
 
 
+def studio_url_prefix(settings: dict[str, Any] | None = None) -> str:
+    """Path prefix when Studio is mounted under a subpath (e.g. '/app').
+
+    Empty string when Studio is at the domain root.
+    Priority: BUBBLEPOD_ROOT_PATH / LAZYKH_ROOT_PATH / ROOT_PATH env, else the
+    path component of PUBLIC_BASE_URL (e.g. https://example.com/app → /app).
+    """
+    load_repo_dotenv()
+    for key in ("BUBBLEPOD_ROOT_PATH", "LAZYKH_ROOT_PATH", "ROOT_PATH"):
+        raw = (os.environ.get(key) or "").strip()
+        if raw:
+            if not raw.startswith("/"):
+                raw = "/" + raw
+            return raw.rstrip("/")
+    try:
+        from urllib.parse import urlparse
+
+        base = resolve_public_base_url(settings)
+        path = (urlparse(base).path or "").rstrip("/")
+        if path and path != "/":
+            if not path.startswith("/"):
+                path = "/" + path
+            return path
+    except Exception:
+        pass
+    return ""
+
+
 def _env_overrides() -> dict[str, Any]:
     load_repo_dotenv()
     mapping = {
