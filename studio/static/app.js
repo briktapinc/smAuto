@@ -566,7 +566,7 @@ function setStep(name) {
   $$(".view").forEach((v) => v.classList.toggle("on", v.id === `view-${name}`));
   const titles = {
     library: ["Library", "Finished videos. Click a ready video to watch."],
-    jobs: ["Jobs", "Work queue. Start runs when a slot is free, or enqueues (round-robin by user). Shows queue position and N running / M queued. Stop halts after the current step. Resume continues and skips finished artifacts."],
+    jobs: ["Jobs", "Work queue. Start runs when a slot is free, or enqueues (round-robin by user). Shows queue position and N running / M queued. Stop halts after the current step. Resume continues and skips finished artifacts. Delete stops a live/queued run and permanently removes the job and all assets."],
     topics: ["Topics", "Set a date and time, then Schedule. Studio starts due queued topics about every 30 seconds into free pipeline slots (up to max concurrent). Run now enqueues/starts as soon as a slot is free."],
     costs: ["Costs", "Estimated Flux spend per video from illustration counts × ~4.6¢, plus today’s counters. Open the Costs tab anytime — estimates, not a fal invoice."],
     watch: ["Watch", "Play the rendered mp4, then jump into script, pictures, voice, or render."],
@@ -831,6 +831,7 @@ function renderJobsQueue() {
         <button type="button" data-stop="${esc(item.id)}" ${stopOff} title="Pause/Stop — halt after the current step">Stop</button>
         <button type="button" class="job-resume" data-resume="${esc(item.id)}" ${resumeOff} title="${esc(resumeLabel(item))}">Resume</button>
         ${cancelQueued}
+        <button type="button" class="danger" data-delete="${esc(item.id)}" title="Stop if running, then permanently delete this job and all assets">Delete</button>
         ${errRaw ? `<button type="button" data-job-error="${esc(item.id)}">Details</button>` : ""}
       </div>
     </div>`;
@@ -2090,6 +2091,7 @@ $("#view-jobs")?.addEventListener("click", async (e) => {
     setStep("create");
     return;
   }
+  if (handleDeleteClick(e)) return;
   if (handleJobActionClick(e)) return;
   const open = e.target.closest("[data-open]");
   if (open) {
