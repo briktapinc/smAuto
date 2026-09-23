@@ -1439,3 +1439,27 @@ def on_pipeline_finished(project_id: str, outcome: str, detail: str = "") -> Non
         except Exception:
             pass
 
+
+def unlink_job_from_topics(project_id: str) -> dict[str, Any]:
+    """Clear topic.job_id when a Studio job is permanently deleted."""
+    pid = str(project_id or "").strip()
+    if not pid:
+        return {"ok": True, "updated": 0}
+    updated = 0
+    with _lock:
+        data = _load()
+        for topic in data.get("topics") or []:
+            if topic.get("job_id") != pid:
+                continue
+            topic["job_id"] = None
+            if topic.get("status") in ("running", "queued", "done"):
+                topic["status"] = "draft"
+            topic["error"] = None
+            tid = str(topic.get("id") or "")
+            if tid:
+                data["queue"] = [x for x in (data.get("queue") or []) if x != tid]
+            updated += 1
+        if updated:
+            _save(data)
+    return {"ok": True, "updated": updated, "project_id": pid}
+

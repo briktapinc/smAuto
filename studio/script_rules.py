@@ -492,10 +492,11 @@ JOBS / LIBRARY
   get_file(path='projects/…'): returns utf-8 text + base64 when ≤15MB, else a short-lived
   /api/mcp/download/{token} URL. Roots: projects/, music/, user_data/ (allowlisted logs),
   backgrounds/. Refuses auth.json, settings.json, tokens/secrets.
-- delete_project(project_id, delete_files=False): default False HIDES the job but
-  KEEPS user_data/projects/{id} (scripts, audio, frames, billboards, mp4, thumbs, meta).
-  delete_files=True permanently deletes that folder. ALWAYS confirm with the user
-  before delete_files=True. Same confirm as the GUI "Delete files on disk" checkbox.
+- delete_project(project_id, delete_files=True): STOPS the job if running or queued, then
+  permanently deletes user_data/projects/{id} and all assets (scripts, audio, frames,
+  billboards, mp4, thumbs, meta), purges queue rows, and unlinks Topics. ALWAYS confirm
+  with the user before calling. Pass delete_files=False only to soft-hide while keeping
+  files (still stops a live run). Same as the Studio library × delete.
 - rename_video(project_id, title, update_youtube=true, rename_folder=false): set Studio
   meta title; when already uploaded, also rename the YouTube listing. rename_folder
   moves the project folder (and Topics job_id) — only when the job is idle.

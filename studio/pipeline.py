@@ -1066,6 +1066,15 @@ def stop_project(project_id: str) -> dict:
     return halt_project(project_id, "stop")
 
 
+def forget_live_job(project_id: str) -> None:
+    """Drop in-memory worker bookkeeping after a hard delete (folder gone)."""
+    pid = str(project_id or "").strip()
+    if not pid:
+        return
+    with _lock:
+        _jobs.pop(pid, None)
+
+
 def _check_stop(project_id: str) -> None:
     with _lock:
         mode = (_jobs.get(project_id) or {}).get("_stop")

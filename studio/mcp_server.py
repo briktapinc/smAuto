@@ -291,7 +291,9 @@ def handshake_instructions() -> str:
         "get_file(path='projects/…') returns text/base64 (max 15MB) or a short-lived "
         "/api/mcp/download/{token} URL for larger binaries — secrets (auth.json, settings.json, "
         "tokens) are refused. "
-        "delete_project(delete_files=False), rename_video(project_id, title, update_youtube=true), "
+        "delete_project(delete_files=True) stops a running/queued job then permanently "
+        "deletes the folder and all assets (pass delete_files=False to soft-hide only), "
+        "rename_video(project_id, title, update_youtube=true), "
         "start_job, pause_job, stop_job, resume_job. "
         "Topics: generate_topics when text_provider is openai or lmstudio; otherwise invent topics "
         "yourself then create_topic / schedule_topic. list_topics(status) includes scheduled_at, "
@@ -1092,8 +1094,13 @@ def build_mcp() -> "FastMCP":
         }
 
     @mcp.tool
-    def delete_project(project_id: str, delete_files: bool = False) -> dict:
-        """Remove a job from the Studio listing. delete_files defaults to False: hide the job but keep user_data/projects/{id}. True permanently deletes that folder (scripts, audio, frames, billboards, mp4, thumbs, meta)."""
+    def delete_project(project_id: str, delete_files: bool = True) -> dict:
+        """Stop the job if it is running or queued, then remove it from Studio.
+
+        delete_files defaults to True: permanently deletes the project folder and all
+        assets (scripts, audio, frames, billboards, mp4, thumbs, meta), purges queue
+        rows, and unlinks Topics that pointed at this job_id. Pass delete_files=False
+        only to soft-hide the job while keeping files on disk (still stops a live run)."""
         return remove_studio_project(project_id, delete_files=delete_files)
 
     @mcp.tool

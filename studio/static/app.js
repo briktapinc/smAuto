@@ -1975,11 +1975,10 @@ function jobById(id) {
 
 function askDelete(id) {
   pendingDeleteId = id;
-  pendingDeleteFiles = false;
+  pendingDeleteFiles = true;
   const dlg = $("#delete-dialog");
   if (!dlg) return;
   $("#delete-job-name").textContent = jobLabel(jobById(id));
-  $("#delete-files").checked = false;
   dlg.showModal();
 }
 
@@ -1993,7 +1992,6 @@ function releaseMedia(sel) {
 
 async function confirmDelete() {
   const id = pendingDeleteId;
-  const deleteFiles = pendingDeleteFiles;
   pendingDeleteId = null;
   pendingDeleteFiles = false;
   if (!id) return;
@@ -2009,9 +2007,9 @@ async function confirmDelete() {
       releaseMedia("#video-player");
       releaseMedia("#audio-player");
     }
-    await api(`/api/projects/${encodeURIComponent(id)}?delete_files=${deleteFiles ? "true" : "false"}`, {
+    await api(`/api/projects/${encodeURIComponent(id)}?delete_files=true`, {
       method: "DELETE",
-      body: { delete_files: deleteFiles },
+      body: { delete_files: true },
     });
     if (wasCurrent) {
       current = null;
@@ -2020,7 +2018,7 @@ async function confirmDelete() {
       goLibrary();
     }
     await refreshJobs();
-    toast(deleteFiles ? "Job and files deleted." : "Job removed from Studio. Files kept on disk.");
+    toast("Job stopped and deleted with all assets.");
   } catch (err) {
     toast(err.message, true);
   }
@@ -2131,7 +2129,7 @@ $("#watch-delete")?.addEventListener("click", (e) => {
   if (current?.id) askDelete(current.id);
 });
 $("#delete-form")?.addEventListener("submit", (e) => {
-  pendingDeleteFiles = e.submitter?.value === "confirm" && !!$("#delete-files")?.checked;
+  pendingDeleteFiles = e.submitter?.value === "confirm";
 });
 $("#delete-dialog")?.addEventListener("close", () => {
   if ($("#delete-dialog").returnValue === "confirm") confirmDelete();

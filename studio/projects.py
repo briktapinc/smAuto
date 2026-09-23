@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import stat
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -497,20 +498,117 @@ def _rmtree(folder: Path) -> None:
         raise RuntimeError(f"Could not delete project folder: {folder}")
 
 
-def delete_project(project_id: str, delete_files: bool = False) -> dict[str, Any]:
+def _stop_job_for_delete(project_id: str, *, wait_sec: float = 45.0) -> dict[str, Any]:
+    """Signal stop if the pipeline is live, wait briefly for the worker to exit, purge queue rows."""
+    out: dict[str, Any] = {"stopped": False, "was_busy": False, "waited_sec": 0.0, "queue": None}
+    try:
+        from studio.pipeline import forget_live_job, is_busy, is_running, stop_project
+
+        busy = bool(is_busy(project_id) or is_running(project_id))
+        out["was_busy"] = busy
+        if busy:
+            try:
+                stop_project(project_id)
+                out["stopped"] = True
+            except Exception as exc:
+                out["stop_error"] = str(exc)
+            deadline = time.monotonic() + max(0.0, float(wait_sec))
+            started = time.monotonic()
+            while time.monotonic() < deadline and is_busy(project_id):
+                time.sleep(0.2)
+            out["waited_sec"] = round(time.monotonic() - started, 2)
+            out["still_busy"] = bool(is_busy(project_id))
+        forget_live_job(project_id)
+    except Exception as exc:
+        out["pipeline_error"] = str(exc)
+    try:
+        from studio.job_queue import purge_project, pump
+
+        out["queue"] = purge_project(project_id)
+        try:
+            pump()
+        except Exception:
+            pass
+    except Exception as exc:
+        out["queue_error"] = str(exc)
+    try:
+        from studio.topics import unlink_job_from_topics
+
+        out["topics"] = unlink_job_from_topics(project_id)
+    except Exception as exc:
+        out["topics_error"] = str(exc)
+    return out
+
+
+def _remove_compat_symlink(project_id: str, tenant_folder: Path) -> None:
+    link = PROJECTS_DIR / project_id
+    try:
+        if link.is_symlink():
+            link.unlink(missing_ok=True)
+        elif link.exists() and link.resolve() == tenant_folder.resolve():
+            # Same folder as tenant path via resolve — already deleted with rmtree
+            pass
+        elif link.exists() and link.is_dir() and link.resolve() != tenant_folder.resolve():
+            # Legacy flat directory (not a symlink) — deleted via tenant_folder if same
+            pass
+    except OSError:
+        pass
+
+
+def delete_project(project_id: str, delete_files: bool = True) -> dict[str, Any]:
+    """Stop a running/queued job (if any) and remove it from Studio.
+
+    delete_files=True (default): permanently delete the project folder and all assets
+    (scripts, audio, frames, billboards, mp4, thumbs, meta). Also purges queue rows,
+    clears in-memory worker state, and unlinks Topics that pointed at this job.
+
+    delete_files=False: soft-hide only (keeps folder on disk) after stopping.
+    """
     pid = _safe_project_id(project_id)
     folder = project_dir(pid)
     hidden = load_deleted_ids()
     exists = folder.exists()
     if not exists and pid not in hidden:
+        halt = _stop_job_for_delete(pid, wait_sec=5.0)
+        mapping = _load_project_index()
+        if pid in mapping:
+            mapping.pop(pid, None)
+            _save_project_index(mapping)
         raise FileNotFoundError(f"Unknown project: {project_id}")
+
+    halt = _stop_job_for_delete(pid)
 
     if delete_files:
         if exists:
-            _rmtree(folder)
+            # Prefer deleting the real tenant folder; remove legacy symlink after.
+            real = folder
+            try:
+                real = folder.resolve()
+            except OSError:
+                real = folder
+            _rmtree(real)
+            _remove_compat_symlink(pid, real)
+            # If legacy path was a separate real dir (pre-migration), remove it too.
+            legacy = PROJECTS_DIR / pid
+            if legacy.exists() and not legacy.is_symlink():
+                try:
+                    if legacy.resolve() != real:
+                        _rmtree(legacy)
+                except OSError:
+                    _rmtree(legacy)
+        mapping = _load_project_index()
+        if pid in mapping:
+            mapping.pop(pid, None)
+            _save_project_index(mapping)
         hidden.discard(pid)
         save_deleted_ids(hidden)
-        return {"id": pid, "deleted": True, "files_deleted": True, "folder": str(folder)}
+        return {
+            "id": pid,
+            "deleted": True,
+            "files_deleted": True,
+            "folder": str(folder),
+            "halt": halt,
+        }
 
     if (folder / "meta.json").is_file():
         meta = load_meta(pid)
@@ -518,7 +616,13 @@ def delete_project(project_id: str, delete_files: bool = False) -> dict[str, Any
         save_meta(pid, meta)
     hidden.add(pid)
     save_deleted_ids(hidden)
-    return {"id": pid, "deleted": True, "files_deleted": False, "folder": str(folder)}
+    return {
+        "id": pid,
+        "deleted": True,
+        "files_deleted": False,
+        "folder": str(folder),
+        "halt": halt,
+    }
 
 
 def rename_video(

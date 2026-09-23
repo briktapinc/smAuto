@@ -2464,7 +2464,7 @@ def create_app() -> FastAPI:
     async def remove_project(
         project_id: str,
         request: Request,
-        delete_files: bool = Query(False),
+        delete_files: bool = Query(True),
     ):
         flag = bool(delete_files)
         ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()

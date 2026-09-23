@@ -700,6 +700,44 @@ def cancel(project_id: str, *, owner_id: str | None = None, is_admin: bool = Fal
             return _public_job(job)
 
 
+def purge_project(
+    project_id: str,
+    *,
+    detail: str = "Deleted with project assets.",
+) -> dict[str, Any]:
+    """Cancel any queued/running queue rows for this project and drop them from the store."""
+    pid = str(project_id or "").strip()
+    if not pid:
+        return {"ok": True, "removed": 0, "cancelled": 0}
+    removed = 0
+    cancelled = 0
+    with _lock:
+        with _file_mutex(QUEUE_MUTEX_PATH):
+            data = _reconcile(_read_store())
+            kept: list[dict[str, Any]] = []
+            for item in data.get("jobs") or []:
+                if str(item.get("project_id") or "") != pid:
+                    kept.append(item)
+                    continue
+                status = str(item.get("status") or "")
+                if status in _ACTIVE:
+                    item["status"] = STATUS_CANCELLED
+                    item["finished_at"] = _now()
+                    item["updated_at"] = _now()
+                    item["lease_expires_at"] = None
+                    item["next_retry_at"] = None
+                    item["error"] = None
+                    item["detail"] = detail
+                    cancelled += 1
+                    # Drop entirely so dead-letter / history cannot retry a missing folder
+                    removed += 1
+                else:
+                    removed += 1
+            data["jobs"] = kept
+            _write_store(data)
+    return {"ok": True, "project_id": pid, "removed": removed, "cancelled": cancelled}
+
+
 def mark_running(project_id: str, *, queue_id: str | None = None) -> dict[str, Any] | None:
     pid = str(project_id or "").strip()
     with _lock:
