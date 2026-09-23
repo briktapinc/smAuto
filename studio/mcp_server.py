@@ -93,7 +93,7 @@ from studio.tts import list_voices
 from studio.utils_script import parse_tagged_script, raw_from_tagged, script_structure_warnings, validate_tagged_script
 from studio import youtube as yt
 
-MCP_BUILD = "2026-09-23-external-images"
+MCP_BUILD = "2026-09-23-external-images-mcp"
 
 # Keep in sync with every @mcp.tool in build_mcp (stdio and FastMCP HTTP /mcp).
 MCP_TOOL_NAMES = (
@@ -257,16 +257,20 @@ def handshake_instructions() -> str:
         "auto-schedules drafts (interval hours, 0 = due now FIFO), runs the full pipeline, and uploads "
         "each hands-off job to YouTube as private (per-job override; Settings defaults unchanged). "
         "If YouTube is not connected, still generate+schedule+render and mark upload pending. "
-        "Headless providers: text openai|lmstudio, images flux|comfyui (chatgpt pictures cannot run headless). "
+        "Headless providers: text openai|lmstudio; images flux|comfyui|external "
+        "(external/chatgpt = MCP save_illustration_image for every slot; missing → EXTERNAL_IMAGES_MISSING; "
+        "API text + fal_key may fall back empty chatgpt slots to flux). "
         "restart_api() from stdio MCP restarts http://127.0.0.1:7878 (python run_studio.py) without killing "
         "Gentle 8766, VoiceSync 8765, or the Electron window. "
-        "Otherwise: set text_provider openai|lmstudio, image_provider flux|comfyui "
-        "(chatgpt pictures cannot run headless — schedule_topic falls back to flux if fal_key exists, else errors), "
-        "tts openai|elevenlabs|local. youtube_connect once if uploading. generate_topics then "
+        "Otherwise: set text_provider openai|lmstudio, image_provider flux|comfyui|external "
+        "(or chatgpt with MCP uploads), "
+        "tts openai|elevenlabs|local|external. youtube_connect once if uploading. generate_topics then "
         "schedule_topic(topic_id, scheduled_at='YYYY-MM-DDTHH:MM') — naive times are this PC's local zone, "
         "stored as UTC ISO. With hands_off on, Studio's ~30s due-picker starts queued topics with scheduled_at <= now, "
         "FIFO by scheduled_at, one pipeline at a time (script via API → pictures → audio → Gentle → "
         "render including both → optional YouTube). Without hands_off, due topics stay queued until Hands-off or Run now. "
+        "MCP image path: set_image_provider('external') (or chatgpt), list_illustration_jobs, generate art, "
+        "save_illustration_image / save_illustration_images for cover + every line, then start_job / resume_job. "
         "GPU lock: ComfyUI, local Chatterbox TTS, Flux batches, "
         "and pipeline image/audio/render run one at a time — never fire illustrations + local TTS + "
         "another job in parallel; wait or call get_gpu_lock. run_now=true starts immediately. Pause holds the queue. "
@@ -277,8 +281,8 @@ def handshake_instructions() -> str:
         "Call get_chatgpt_playbook and get_script_rules for LIVE production text "
         "(they re-read user_data/prompts.json). Call get_studio_settings for "
         "text_provider/script_provider (openai|chatgpt|claude|lmstudio), "
-        "image_provider, video_layout, character_size, default_aspect, music_volume_pct, "
-        "tts_provider (openai|elevenlabs|local; local is Resemble Chatterbox, alias resemble), "
+        "image_provider (flux|chatgpt|comfyui|external), video_layout, character_size, default_aspect, music_volume_pct, "
+        "tts_provider (openai|elevenlabs|local|external; local is Resemble Chatterbox, alias resemble), "
         "voices, fal_key_set, "
         "youtube_auto_upload/privacy/connected, gpu_lock {busy, holder, waiters}, mcp_build, and mcp_tools. "
         "SPEND GUARD: OpenAI cloud (generate_script_via_api, generate_topics, generate_speech) and "
@@ -993,7 +997,7 @@ def build_mcp() -> "FastMCP":
         scheduled_at: str = "",
         run_now: bool = False,
     ) -> dict:
-        """Create a Studio job from a saved topic_id, or from title + duration_min + optional angle, then queue the full unsupervised pipeline (script with hook+subscribe → pictures → audio → Gentle → render at Settings default_aspect including both → optional YouTube). scheduled_at is ISO datetime; naive values are this PC's local timezone and are stored as UTC. Empty scheduled_at means now. run_now=true (or run='now') starts as soon as the queue is free. run='queue' waits until scheduled_at. With hands_off on, Studio's ~30s due-picker starts queued topics with scheduled_at <= now, FIFO by scheduled_at, one at a time. Without hands_off, due topics wait. Pause holds the queue. chatgpt pictures cannot run headless (falls back to flux if fal_key exists). chatgpt/claude text: save_script on the returned job_id in this same turn before walking away."""
+        """Create a Studio job from a saved topic_id, or from title + duration_min + optional angle, then queue the full unsupervised pipeline (script with hook+subscribe → pictures → audio → Gentle → render at Settings default_aspect including both → optional YouTube). scheduled_at is ISO datetime; naive values are this PC's local timezone and are stored as UTC. Empty scheduled_at means now. run_now=true (or run='now') starts as soon as the queue is free. run='queue' waits until scheduled_at. With hands_off on, Studio's ~30s due-picker starts queued topics with scheduled_at <= now, FIFO by scheduled_at, one at a time. Without hands_off, due topics wait. Pause holds the queue. Pictures: flux/comfyui auto-generate; external/chatgpt = MCP save_illustration_image for every slot (missing → EXTERNAL_IMAGES_MISSING). chatgpt/claude text: save_script on the returned job_id in this same turn before walking away."""
         return enqueue_topic(
             topic_id=topic_id,
             title=title,
@@ -1408,7 +1412,7 @@ def build_mcp() -> "FastMCP":
         confirm_spend: bool = False,
         spend_confirm_id: str = "",
     ) -> dict:
-        """Queue cover + missing line illustrations for THIS project's aspect (16:9→1920x1080, 9:16→1080x1920, both→both; read list_illustration_jobs.aspect first). Uses image_provider: flux (fal — needs confirm_spend or spend_confirm_id), comfyui (local, free), not chatgpt (native + save_illustration_image). Poll get_render_status. Waits for the GPU lock."""
+        """Queue cover + missing line illustrations for THIS project's aspect (16:9→1920x1080, 9:16→1080x1920, both→both; read list_illustration_jobs.aspect first). Uses image_provider: flux (fal — needs confirm_spend or spend_confirm_id), comfyui (local, free). For chatgpt/external: do NOT call this — generate art yourself then save_illustration_image / save_illustration_images for every slot (missing → EXTERNAL_IMAGES_MISSING). Poll get_render_status. Waits for the GPU lock when Studio generates."""
         aspect_info = resolve_project_image_aspect(project_id)
         _mcp_spend(
             "flux_images",
@@ -1550,7 +1554,7 @@ def build_mcp() -> "FastMCP":
 
     @mcp.tool
     def set_cover_provider(project_id: str = "", provider: str = "") -> dict:
-        """Set cover_provider override: '' (inherit image_provider), manual, chatgpt, comfyui, or flux. With project_id sets per-job meta; without project_id updates global Settings. When manual/chatgpt, generate_cover/regenerate_cover never spend fal on covers."""
+        """Set cover_provider override: '' (inherit image_provider), manual, external, chatgpt, comfyui, or flux. With project_id sets per-job meta; without project_id updates global Settings. When manual/external/chatgpt, generate_cover/regenerate_cover never spend fal on covers — upload via save_illustration_image / refresh_covers."""
         from studio.projects import set_cover_provider as write_cover_provider
         from studio.settings import normalize_cover_provider, public_settings, save_settings
 
@@ -1956,7 +1960,7 @@ def build_mcp() -> "FastMCP":
         rate_limit_api: int = -1,
         rate_limit_login: int = -1,
     ) -> dict:
-        """Store API keys, text_provider/script_provider (openai billed API, chatgpt MCP, claude MCP, or lmstudio local), lmstudio_base_url / lmstudio_model, default image provider (flux, chatgpt, or comfyui), comfyui_url (default http://127.0.0.1:8188), default video layout (cover or billboard), character_size (large, medium, or small), default_aspect (16:9, 9:16, or both), background music loudness 0–100, tts_provider (openai, elevenlabs, or local/resemble Chatterbox), voice settings, YouTube auto-upload (youtube_auto_upload true/false, youtube_privacy private|unlisted|public, youtube_channel_id), auto_scheduler (true/false, default on — only auto-starts due topics while hands_off is also on), hands_off (true/false — generate topics, auto-schedule, run pipeline, YouTube private per job), hands_off_interval_hours (0 = due now FIFO), require_spend_confirm, daily OpenAI/Flux caps (0=unlimited), and rate_limit_api / rate_limit_login. fal_key is optional and only needed for Flux. Empty string / ******** / omitted secrets are ignored and never wipe stored keys. ComfyUI workflows are uploaded in Settings or save_comfyui_workflow. YouTube OAuth is youtube_connect (open the URL in a browser; no popup). Prefer set_youtube_channel after listing channels. Prefer set_hands_off for walk-away. Billed OpenAI/Flux tools still need confirm_spend or spend_confirm_id unless require_spend_confirm is false."""
+        """Store API keys, text_provider/script_provider (openai billed API, chatgpt MCP, claude MCP, or lmstudio local), lmstudio_base_url / lmstudio_model, default image provider (flux, chatgpt, comfyui, or external MCP upload), comfyui_url (default http://127.0.0.1:8188), default video layout (cover or billboard), character_size (large, medium, or small), default_aspect (16:9, 9:16, or both), background music loudness 0–100, tts_provider (openai, elevenlabs, local/resemble Chatterbox, or external), voice settings, YouTube auto-upload (youtube_auto_upload true/false, youtube_privacy private|unlisted|public, youtube_channel_id), auto_scheduler (true/false, default on — only auto-starts due topics while hands_off is also on), hands_off (true/false — generate topics, auto-schedule, run pipeline, YouTube private per job), hands_off_interval_hours (0 = due now FIFO), require_spend_confirm, daily OpenAI/Flux caps (0=unlimited), and rate_limit_api / rate_limit_login. fal_key is optional and only needed for Flux. Empty string / ******** / omitted secrets are ignored and never wipe stored keys. ComfyUI workflows are uploaded in Settings or save_comfyui_workflow. YouTube OAuth is youtube_connect (open the URL in a browser; no popup). Prefer set_youtube_channel after listing channels. Prefer set_hands_off for walk-away. Billed OpenAI/Flux tools still need confirm_spend or spend_confirm_id unless require_spend_confirm is false."""
         candidate = {
             "openai_api_key": openai_api_key,
             "elevenlabs_api_key": elevenlabs_api_key,

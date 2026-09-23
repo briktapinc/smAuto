@@ -87,8 +87,12 @@ SPEND GUARD (OpenAI cloud + fal/Flux only): request_spend_confirm(action) then p
 
 UNSUPERVISED_REQUIREMENT = """
 UNSUPERVISED WALK-AWAY (MCP + Studio due-picker):
-Providers that can run headless: text openai or lmstudio; pictures flux or comfyui; audio openai, elevenlabs, or local Chatterbox.
-chatgpt pictures CANNOT be unsupervised (schedule_topic falls back to flux if fal_key exists, else errors).
+Providers that can run headless: text openai or lmstudio; pictures flux, comfyui, or external;
+audio openai, elevenlabs, local Chatterbox, or external MP3.
+external images (preferred for MCP): set_image_provider('external'), list_illustration_jobs, generate art,
+save_illustration_image / save_illustration_images for cover + every line, then schedule/start/resume.
+Missing slots → EXTERNAL_IMAGES_MISSING (Studio will not call Flux/ComfyUI).
+chatgpt pictures: same upload path; with openai/lmstudio text + fal_key, empty slots may fall back to flux.
 chatgpt/claude text CAN be unsupervised only if you save_script(job_id) in the SAME turn after schedule_topic returns job_id.
 schedule_topic(topic_id?, title?, duration_min?, scheduled_at, run_now?). Naive scheduled_at is this PC's local timezone, stored as UTC ISO.
 Studio checks queued topics about every 30s: status queued AND scheduled_at <= now, FIFO by scheduled_at, one pipeline at a time.
@@ -97,7 +101,7 @@ Pipeline: script (generate_script_via_api for openai/lmstudio) → pictures → 
 hands_off() returns readiness + recipe. set_hands_off(true) enables walk-away: auto generate_topics, auto-schedule, due-picker, YouTube private. restart_api() restarts 7878 from stdio MCP.
 list_topics shows due times. start_topic_pipeline aliases schedule_topic (run_now default true).
 GPU LOCK: ComfyUI, local Chatterbox TTS, Flux image batches, and pipeline image/audio/render run one at a time. Never fire illustrations + local TTS + another job in parallel — wait for get_gpu_lock (timeout + error if still busy).
-Playbook: set_hands_off(true) with headless providers (text openai/lmstudio, images flux/comfyui), then walk away. Or generate_topics + schedule_topic with a datetime.
+Playbook: set_hands_off(true) with headless providers (text openai/lmstudio, images flux/comfyui/external), then walk away. Or generate_topics + schedule_topic with a datetime.
 """.strip()
 
 
@@ -167,6 +171,12 @@ def with_playbook_runtime_notes(text: str) -> str:
     if "comfyui" not in blob:
         text = (text or "").rstrip() + "\n\n" + IMAGE_PROVIDER_REQUIREMENT
         blob = text.lower()
+    if "external_images_missing" not in blob and "image_provider=external" not in blob.replace(" ", ""):
+        text = (text or "").rstrip() + "\n\n" + IMAGE_PROVIDER_REQUIREMENT
+        blob = text.lower()
+    if "cannot run headless" in blob or "cannot be unsupervised" in blob:
+        text = (text or "").rstrip() + "\n\n" + UNSUPERVISED_REQUIREMENT
+        blob = (text or "").lower()
     if "scheduled_at" not in blob and "unsupervised" not in blob:
         text = (text or "").rstrip() + "\n\n" + UNSUPERVISED_REQUIREMENT
         blob = (text or "").lower()
@@ -375,7 +385,7 @@ openai | chatgpt | claude | lmstudio. Call get_text_provider before writing a sc
 - lmstudio: local OpenAI-compatible API (default http://127.0.0.1:1234/v1). Studio generates via the local LLM — no OpenAI cloud, no spend confirm. YOU must call generate_script_via_api (and generate_topics) rather than writing the body yourself. Optional lmstudio_model; empty uses the first loaded model from GET /v1/models. If it fails, start the LM Studio local server.
 Topics: openai or lmstudio → generate_topics. chatgpt/claude → invent titles, then create_topic and/or schedule_topic. Do not call generate_topics unless provider is openai or lmstudio.
 SPEND GUARD: Never silently bill OpenAI cloud or fal. Call request_spend_confirm(action) then pass spend_confirm_id, or pass confirm_spend=true on generate_script_via_api / generate_topics / generate_speech / generate_illustrations_with_flux / generate_illustrations / generate_cover / regenerate_illustration when those hit OpenAI or Flux. get_spend_status, get_audit_log (user_data/audit.log).
-UNSUPERVISED: set_hands_off(true) then walk away, or schedule_topic(..., scheduled_at='YYYY-MM-DDTHH:MM'). Naive times are this PC's local zone. Studio's ~30s due-picker starts queued topics when due ONLY while hands_off is on (FIFO by scheduled_at, one at a time). Hands-off also auto-generates topics (openai/lmstudio) and auto-schedules drafts; each job uploads to YouTube as private (per-job override). text openai/lmstudio auto-writes the script; chatgpt/claude must save_script in the same turn. Pictures flux or comfyui (chatgpt images cannot run headless). hands_off() / set_hands_off / list_topics / start_topic_pipeline / restart_api.
+UNSUPERVISED: set_hands_off(true) then walk away, or schedule_topic(..., scheduled_at='YYYY-MM-DDTHH:MM'). Naive times are this PC's local zone. Studio's ~30s due-picker starts queued topics when due ONLY while hands_off is on (FIFO by scheduled_at, one at a time). Hands-off also auto-generates topics (openai/lmstudio) and auto-schedules drafts; each job uploads to YouTube as private (per-job override). text openai/lmstudio auto-writes the script; chatgpt/claude must save_script in the same turn. Pictures: flux, comfyui, or external (MCP save_illustration_image for every slot — like external TTS; missing → EXTERNAL_IMAGES_MISSING). chatgpt pictures use the same upload path. hands_off() / set_hands_off / list_topics / start_topic_pipeline / restart_api.
 GPU: never fire illustrations + local TTS + another job in parallel. Wait for get_gpu_lock ({busy, holder, waiters}). ComfyUI, Chatterbox, Flux batches, and pipeline image/audio/render are one-at-a-time (user_data/gpu.lock).
 
 LIVE TEXT: get_chatgpt_playbook and get_script_rules re-read user_data/prompts.json
