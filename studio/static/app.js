@@ -2019,6 +2019,7 @@ async function confirmDelete() {
       goLibrary();
     }
     await refreshJobs();
+    await refreshJobQueueSnap();
     toast("Job stopped and deleted with all assets.");
   } catch (err) {
     toast(err.message, true);
