@@ -25,6 +25,8 @@ EXTERNAL_AUDIO_NAME = "narration_external.mp3"
 EXTERNAL_AUDIO_SHORTS_NAME = "narration_external_9x16.mp3"
 EXTERNAL_AUDIO_MISSING = "EXTERNAL_AUDIO_MISSING"
 MAX_AUDIO_UPLOAD_BYTES = 80 * 1024 * 1024  # 80MB
+MAX_AUDIO_DURATION_SEC = 45 * 60  # 45 minutes
+MIN_AUDIO_DURATION_SEC = 0.5
 MAX_BASE64_CHARS = 110 * 1024 * 1024
 
 
@@ -162,7 +164,10 @@ def upload_narration_audio(
     elif len(data) < 256:
         raise RuntimeError("Audio bytes are empty or too small.")
     elif len(data) > MAX_AUDIO_UPLOAD_BYTES:
-        raise RuntimeError(f"Audio is {len(data)} bytes (max {MAX_AUDIO_UPLOAD_BYTES}).")
+        raise RuntimeError(
+            f"Audio is too large ({len(data)} bytes). Max is {MAX_AUDIO_UPLOAD_BYTES} bytes "
+            f"({MAX_AUDIO_UPLOAD_BYTES // (1024 * 1024)}MB). error_code=upload_too_large HTTP 413."
+        )
 
     dest = external_mp3_path(project_id, shorts=shorts)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -170,6 +175,15 @@ def upload_narration_audio(
     try:
         staging.write_bytes(data)
         duration = _verify_decodable(staging)
+        if duration < MIN_AUDIO_DURATION_SEC:
+            raise RuntimeError(
+                f"Audio duration {duration:.2f}s is too short (min {MIN_AUDIO_DURATION_SEC}s)."
+            )
+        if duration > MAX_AUDIO_DURATION_SEC:
+            raise RuntimeError(
+                f"Audio duration {duration:.1f}s exceeds max {MAX_AUDIO_DURATION_SEC}s "
+                f"({MAX_AUDIO_DURATION_SEC // 60} minutes)."
+            )
         os.replace(staging, dest)
     except Exception:
         staging.unlink(missing_ok=True)

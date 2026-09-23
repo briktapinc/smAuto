@@ -27,6 +27,7 @@
       </div>
       <nav>
         <button type="button" data-panel="overview" class="on">Overview</button>
+        <button type="button" data-panel="jobs">Failed jobs</button>
         <button type="button" data-panel="members">Members</button>
         <button type="button" data-panel="signups">Signups</button>
         <button type="button" data-panel="payments">Payments</button>
@@ -42,8 +43,25 @@
     <main>
       <section id="panel-overview" class="panel on">
         <h2>Overview</h2>
-        <p class="muted">Single membership plan — every paying member gets the same access.</p>
+        <p class="muted">Membership, queue workers, load, and FAL spend. All paying members share feature access; plan tiers meter usage.</p>
         <div id="overview-cards" class="cards"></div>
+        <h3>Workers / leases</h3>
+        <div id="overview-workers" class="table-wrap"></div>
+        <h3>Usage by user</h3>
+        <div id="overview-usage" class="table-wrap"></div>
+        <div class="row" style="margin-top:1rem">
+          <button type="button" id="backup-now-btn">Run JSON backup now</button>
+          <span class="muted" id="backup-status"></span>
+        </div>
+      </section>
+
+      <section id="panel-jobs" class="panel">
+        <div class="row-between">
+          <h2>Failed jobs (dead letter)</h2>
+          <button type="button" id="failed-refresh-btn">Refresh</button>
+        </div>
+        <p class="muted">One-click retry re-queues as resume (resets attempt budget if exhausted).</p>
+        <div id="failed-jobs-table" class="table-wrap"></div>
       </section>
 
       <section id="panel-members" class="panel">

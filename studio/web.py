@@ -1371,9 +1371,51 @@ def create_app() -> FastAPI:
     def admin_overview(request: Request):
         _reject_desktop_saas("Admin console")
         studio_auth.require_admin(request)
-        from studio.stripe_billing import billing_overview
+        from studio.admin_ops import admin_overview_payload
 
-        return billing_overview()
+        return admin_overview_payload()
+
+    @app.get("/api/admin/jobs/failed")
+    def admin_failed_jobs(request: Request, limit: int = Query(50, ge=1, le=200)):
+        _reject_desktop_saas("Admin jobs")
+        studio_auth.require_admin(request)
+        from studio.admin_ops import list_failed_jobs
+
+        rows = list_failed_jobs(limit=limit)
+        return {"ok": True, "count": len(rows), "jobs": rows}
+
+    @app.post("/api/admin/jobs/{job_id}/retry")
+    def admin_retry_job(job_id: str, request: Request):
+        _reject_desktop_saas("Admin jobs")
+        admin = studio_auth.require_admin(request)
+        from studio.admin_ops import retry_failed_job
+
+        try:
+            return retry_failed_job(job_id, admin_username=str(admin.get("username") or ""))
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/admin/backup")
+    def admin_backup_now(request: Request):
+        _reject_desktop_saas("Admin backup")
+        admin = studio_auth.require_admin(request)
+        from studio.audit import write_entry
+        from studio.backup import run_backup
+
+        result = run_backup()
+        try:
+            write_entry(
+                source="admin",
+                action="backup",
+                username=str(admin.get("username") or ""),
+                args={"stamp": result.get("stamp")},
+                success=True,
+            )
+        except Exception:
+            pass
+        return result
 
     @app.get("/api/admin/members")
     def admin_list_members(request: Request):
@@ -2729,6 +2771,12 @@ def create_app() -> FastAPI:
                 shorts=bool(shorts),
             )
         except Exception as exc:
+            msg = str(exc)
+            if "too large" in msg.lower() or "upload_too_large" in msg.lower():
+                raise HTTPException(
+                    status_code=413,
+                    detail={"detail": msg, "error_code": "upload_too_large"},
+                ) from exc
             raise _err(exc)
 
     @app.get("/api/gentle")

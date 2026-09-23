@@ -84,35 +84,87 @@ function setPanel(name) {
 async function loadOverview() {
   const data = await api("/api/admin/overview");
   const cur = data.currency || "usd";
-  let queueBits = [];
-  try {
-    const q = await api("/api/queue");
-    queueBits = [
-      ["Pipeline running", q.running_count ?? 0],
-      ["Pipeline queued", q.queued_count ?? 0],
-      ["Max concurrent", q.max_concurrent ?? 1],
-    ];
-  } catch {}
+  const sys = data.system || {};
+  const fal = data.fal_today || {};
+  const workers = data.workers || {};
+  const q = workers.queue || {};
+  const load = sys.loadavg || {};
   const cards = [
     ["Members active", data.members_active],
     ["Members total", data.members_total],
     ["Admins", data.admins],
-    ...queueBits,
+    ["Pipeline running", q.running_count ?? 0],
+    ["Pipeline queued", q.queued_count ?? 0],
+    ["Max concurrent", q.max_concurrent ?? 1],
+    ["Failed jobs", data.failed_jobs_count ?? 0],
+    ["Load 1/5/15", `${load["1"] ?? "—"} / ${load["5"] ?? "—"} / ${load["15"] ?? "—"}`],
+    ["Mem used %", sys.memory?.used_pct ?? "—"],
+    ["Disk used %", sys.disk?.used_pct ?? "—"],
+    ["FAL images today", fal.flux_images ?? 0],
+    ["FAL $ today (est)", fal.usd_estimate ?? 0],
     ["Signups", data.signups_count],
     ["Payments", data.payments_count],
-    ["Refunds", data.refunds_count],
     ["Gross", money(data.gross_revenue_cents, cur)],
     ["Net", money(data.net_revenue_cents, cur)],
   ];
   $("#overview-cards").innerHTML = cards.map(([label, value]) => (
     `<div class="stat"><span class="muted">${label}</span><strong>${value}</strong></div>`
   )).join("");
+
+  const workerRows = (workers.workers || []).map((w) => `
+    <tr>
+      <td>${w.project_id || ""}</td>
+      <td>${w.step || ""} ${w.progress_pct != null ? w.progress_pct + "%" : ""}</td>
+      <td>${w.thread_alive ? badge(true, "thread") : badge(false, "no thread")}
+          ${w.lease_alive ? badge(true, "lease") : badge(false, "lease expired")}</td>
+      <td>${(w.detail || w.error || "").toString().slice(0, 120)}</td>
+    </tr>`).join("") || `<tr><td colspan="4" class="muted">No running workers</td></tr>`;
+  $("#overview-workers").innerHTML = `<table><thead><tr><th>Project</th><th>Step</th><th>Health</th><th>Detail</th></tr></thead><tbody>${workerRows}</tbody></table>`;
+
+  const usageRows = (data.users_usage || []).map((u) => {
+    const used = u.used || {};
+    const allowed = u.allowed || {};
+    return `<tr>
+      <td>${u.username || ""}</td>
+      <td>${u.plan_tier || ""} / ${u.subscription_status || ""}</td>
+      <td>${u.unlimited ? "∞" : `${used.render_minutes ?? 0} / ${allowed.render_minutes ?? "—"}`}</td>
+      <td>${u.unlimited ? "∞" : `${used.images_generated ?? 0} / ${allowed.images_generated ?? "—"}`}</td>
+      <td>${u.unlimited ? "∞" : `$${(Number(used.fal_spend_cents || 0) / 100).toFixed(2)} / $${(Number(allowed.fal_spend_cents || 0) / 100).toFixed(2)}`}</td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="5" class="muted">No users</td></tr>`;
+  $("#overview-usage").innerHTML = `<table><thead><tr><th>User</th><th>Plan</th><th>Render min</th><th>Images</th><th>FAL $</th></tr></thead><tbody>${usageRows}</tbody></table>`;
+
   const st = $("#stripe-status");
   if (st) {
     st.textContent = data.stripe_configured
       ? `Stripe configured · price ${data.catalog?.price_id || "—"} · ${money(data.catalog?.amount_cents, data.catalog?.currency)} / ${data.catalog?.interval}`
       : "Stripe not configured yet — add keys on the Stripe panel.";
   }
+}
+
+async function loadFailedJobs() {
+  const data = await api("/api/admin/jobs/failed?limit=50");
+  const rows = (data.jobs || []).map((j) => `
+    <tr>
+      <td><code>${j.id || ""}</code></td>
+      <td>${j.project_id || ""}</td>
+      <td>${j.attempts ?? 0}/${j.max_attempts ?? "—"}</td>
+      <td>${(j.error || j.detail || "").toString().slice(0, 160)}</td>
+      <td><button type="button" data-retry="${j.id}">Retry</button></td>
+    </tr>`).join("") || `<tr><td colspan="5" class="muted">No failed jobs</td></tr>`;
+  $("#failed-jobs-table").innerHTML = `<table><thead><tr><th>Job id</th><th>Project</th><th>Attempts</th><th>Error</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  $$("#failed-jobs-table [data-retry]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await api(`/api/admin/jobs/${btn.dataset.retry}/retry`, { method: "POST", body: {} });
+        toast("Re-queued");
+        await loadFailedJobs();
+        await loadOverview();
+      } catch (ex) {
+        toast(ex.message || "Retry failed", true);
+      }
+    });
+  });
 }
 
 function badge(ok, label) {
@@ -244,6 +296,7 @@ $$(".top nav [data-panel]").forEach((btn) => {
     setPanel(name);
     try {
       if (name === "overview") await loadOverview();
+      if (name === "jobs") await loadFailedJobs();
       if (name === "members") await loadMembers();
       if (name === "signups") await loadLedger("signups", "#signups-table", [
         ["When", (r) => esc(r.recorded_at || "")],
@@ -503,6 +556,32 @@ $("#email-templates-reset")?.addEventListener("click", async () => {
     await loadEmailForm();
   } catch (err) {
     toast(err.message, true);
+  }
+});
+
+$("#backup-now-btn")?.addEventListener("click", async () => {
+  const status = $("#backup-status");
+  const btn = $("#backup-now-btn");
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = "Backing up…";
+  try {
+    const data = await api("/api/admin/backup", { method: "POST", body: {} });
+    const n = (data.copied || []).length;
+    if (status) status.textContent = `Backup ${data.stamp || "ok"} · ${n} files`;
+    toast("JSON backup complete");
+  } catch (err) {
+    if (status) status.textContent = "";
+    toast(err.message || "Backup failed", true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+});
+
+$("#failed-refresh-btn")?.addEventListener("click", async () => {
+  try {
+    await loadFailedJobs();
+  } catch (err) {
+    toast(err.message || "Refresh failed", true);
   }
 });
 

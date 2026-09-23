@@ -186,14 +186,37 @@ def enforce(request: Request) -> JSONResponse | None:
     kind = classify_path(path, request.method)
     if kind is None:
         return None
+
+    # Per-user API keys get their own bucket + configured rate_limit (default 60/min).
+    api_key_limit = None
+    api_key_id = None
+    auth = request.headers.get("Authorization") or ""
+    if auth.lower().startswith("bearer "):
+        raw = auth[7:].strip()
+        try:
+            from studio.api_keys import looks_like_api_key, hash_api_key, _load as _load_keys
+
+            if looks_like_api_key(raw):
+                digest = hash_api_key(raw)
+                for row in _load_keys().get("keys") or []:
+                    if row.get("revoked_at"):
+                        continue
+                    if row.get("key_hash") == digest:
+                        api_key_id = str(row.get("id") or "")
+                        api_key_limit = int(row.get("rate_limit") or 60)
+                        break
+        except Exception:
+            api_key_limit = None
+
+    ip = client_ip(request)
     if kind == "login":
         limit, window = cfg["login_limit"], cfg["login_window"]
         detail = (
             f"Too many login attempts. Limit is {limit} per {window // 60} minutes "
             "from this IP. Try again later."
         )
-        # Peek only — successful logins must not burn the quota.
         record = False
+        bucket_ip = ip
     elif kind == "signup":
         limit, window = cfg["signup_limit"], cfg["signup_window"]
         detail = (
@@ -201,30 +224,57 @@ def enforce(request: Request) -> JSONResponse | None:
             "Try again later."
         )
         record = True
+        bucket_ip = ip
     elif kind == "static":
         limit, window = cfg["static_limit"], cfg["static_window"]
         detail = f"Too many requests. Limit is {limit} per {window}s from this IP."
         record = True
+        bucket_ip = ip
     elif kind == "mcp":
-        limit, window = cfg["mcp_limit"], cfg["mcp_window"]
-        detail = f"Too many MCP requests. Limit is {limit} per {window}s from this IP."
+        if api_key_limit is not None and api_key_id:
+            limit, window = max(60, api_key_limit), 60
+            # Owner/agent keys often poll heavily — floor at 600 if rate_limit unset high
+            if api_key_limit >= 600:
+                limit = api_key_limit
+            detail = (
+                f"Too many MCP requests for this API key. Limit is {limit} per {window}s "
+                f"(error_code=rate_limited)."
+            )
+            bucket_ip = f"apikey:{api_key_id}"
+        else:
+            limit, window = cfg["mcp_limit"], cfg["mcp_window"]
+            detail = f"Too many MCP requests. Limit is {limit} per {window}s from this IP."
+            bucket_ip = ip
         record = True
     else:
-        limit, window = cfg["api_limit"], cfg["api_window"]
-        detail = f"Too many API requests. Limit is {limit} per {window}s from this IP."
+        if api_key_limit is not None and api_key_id:
+            limit, window = max(1, api_key_limit), 60
+            detail = (
+                f"Too many API requests for this API key. Limit is {limit} per {window}s "
+                f"(error_code=rate_limited)."
+            )
+            bucket_ip = f"apikey:{api_key_id}"
+        else:
+            limit, window = cfg["api_limit"], cfg["api_window"]
+            detail = f"Too many API requests. Limit is {limit} per {window}s from this IP."
+            bucket_ip = ip
         record = True
 
-    ip = client_ip(request)
-    ok, headers = check(kind, ip, limit=limit, window_sec=window, record=record)
-    if ok:
-        try:
-            request.state.rate_limit_headers = headers
-        except Exception:
-            pass
+    allowed, headers = check(kind, bucket_ip, limit=limit, window_sec=window, record=record)
+    try:
+        request.state.rate_limit_headers = headers
+    except Exception:
+        pass
+    if allowed:
         return None
     return JSONResponse(
-        {"detail": detail, "rate_limited": True, "retry_after": int(headers.get("Retry-After") or 1)},
         status_code=429,
+        content={
+            "detail": detail,
+            "rate_limited": True,
+            "error_code": "rate_limited",
+            "retry_after": int(headers.get("Retry-After") or 1),
+        },
         headers=headers,
     )
 
