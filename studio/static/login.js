@@ -91,6 +91,8 @@ async function bootLogin() {
   }
 
   // Bearer token in localStorage but no cookie → refresh cookie then load workspace.
+  // Also clears a stale Bearer that survived a password change (wrong localStorage key
+  // or missed setAuthToken) so we never bounce / ↔ /api/auth/me.
   if (getToken()) {
     try {
       await api("/api/auth/me");
@@ -98,6 +100,7 @@ async function bootLogin() {
       return;
     } catch {
       setToken("");
+      try { localStorage.removeItem("bubblepod_token"); } catch { /* legacy key */ }
     }
   }
 

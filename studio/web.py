@@ -568,15 +568,24 @@ class AuthASGIMiddleware:
             return
         if studio_auth.path_requires_auth(path):
             request = Request(scope, receive=receive)
-            token = studio_auth.extract_token(request)
-            if not token:
+            tokens = studio_auth.extract_tokens(request)
+            if not tokens:
                 body = JSONResponse({"detail": "Not authenticated"}, status_code=401)
                 await body(scope, receive, send)
                 return
-            try:
-                studio_auth.decode_token(token)
-            except HTTPException as exc:
-                body = JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+            decoded_ok = False
+            last_detail: str | object = "Not authenticated"
+            last_status = 401
+            for token in tokens:
+                try:
+                    studio_auth.decode_token(token)
+                    decoded_ok = True
+                    break
+                except HTTPException as exc:
+                    last_detail = exc.detail
+                    last_status = exc.status_code
+            if not decoded_ok:
+                body = JSONResponse({"detail": last_detail}, status_code=last_status)
                 await body(scope, receive, send)
                 return
             if studio_auth.path_requires_membership(path, scope.get("method") or "GET"):
@@ -1160,11 +1169,17 @@ def create_app() -> FastAPI:
         from studio.members import public_session
 
         user = studio_auth.require_session(request)
-        # Re-assert HttpOnly cookie so HTML / can see Bearer-only sessions.
+        # Re-assert HttpOnly cookie from the first candidate that matches this user
+        # (cookie or Bearer), so a stale localStorage token cannot block HTML /.
         if not studio_auth.is_desktop_mode():
-            token = studio_auth.extract_token(request)
-            if token:
-                studio_auth.set_auth_cookie(response, token, studio_auth.TOKEN_TTL_SEC)
+            for token in studio_auth.extract_tokens(request):
+                try:
+                    matched = studio_auth._user_from_access_token(token)
+                except HTTPException:
+                    continue
+                if matched.get("id") == user.get("id"):
+                    studio_auth.set_auth_cookie(response, token, studio_auth.TOKEN_TTL_SEC)
+                    break
         out = public_session(user)
         out["desktop_mode"] = studio_auth.is_desktop_mode()
         out["auth_required"] = not studio_auth.is_desktop_mode()

@@ -106,6 +106,8 @@ function showLoginGate(message = "", view = "login") {
   }
   // Prefer a clean login-only document (no workspace DOM) when the session is gone.
   if (view === "login" && !message) {
+    setAuthToken("");
+    try { localStorage.removeItem("bubblepod_token"); } catch { /* ignore */ }
     const hash = (location.hash || "").startsWith("#reset=") ? location.hash : "";
     location.replace(withBase("/") + (hash || ""));
     return;
@@ -4800,9 +4802,11 @@ $("#account-change-password")?.addEventListener("click", async () => {
         confirm_password: confirmPassword,
       },
     });
-    if (result.token) {
-      try { localStorage.setItem("bubblepod_token", result.token); } catch { /* ignore */ }
-    }
+    // Must use STORE_TOKEN (bubblepod.authToken). Writing bubblepod_token left the
+    // old Bearer in place while the HttpOnly cookie was refreshed → /api/auth/me 401
+    // and startApp location.replace("/") looped forever.
+    if (result.token) setAuthToken(result.token);
+    try { localStorage.removeItem("bubblepod_token"); } catch { /* ignore legacy key */ }
     ["#account-current-password", "#account-new-password", "#account-confirm-password"].forEach((sel) => {
       const el = $(sel);
       if (el) el.value = "";
@@ -5054,6 +5058,10 @@ async function checkSession() {
     await api("/api/auth/me");
     return true;
   } catch {
+    // Drop stale Bearer so the next / load is not stuck in a reload loop when the
+    // HttpOnly cookie is still valid (or when both are expired and login.html loads).
+    setAuthToken("");
+    try { localStorage.removeItem("bubblepod_token"); } catch { /* ignore */ }
     return false;
   }
 }
@@ -5085,7 +5093,8 @@ async function startApp() {
   }
   const ok = await checkSession();
   if (!ok) {
-    // Drop workspace document; server serves login-only HTML at /.
+    // Already cleared localStorage in checkSession. Reload so the server can serve
+    // login-only HTML (or workspace if the HttpOnly cookie alone is still valid).
     location.replace(withBase("/") + (hash || ""));
     return;
   }

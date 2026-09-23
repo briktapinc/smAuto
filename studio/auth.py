@@ -3,9 +3,13 @@
 Credentials live in user_data/auth.json (bcrypt hash + JWT secret).
 First boot defaults: username admin / password bubblepod
   — override with BUBBLEPOD_USER / BUBBLEPOD_PASSWORD (or LAZYKH_*).
-To change later: Settings → Account (change password), delete auth.json and
-restart with env vars, or set BUBBLEPOD_RESET_AUTH=1 with the new
-user/password and restart.
+To change later: Settings → Account (change password), or from the server:
+
+    cd /root/stickmanautomation && .venv/bin/python -m studio.auth set-password admin 'NewPasswordHere'
+
+That bumps token_version (invalidates old JWTs) without recreating jwt_secret.
+Env reset (new auth.json only): BUBBLEPOD_RESET_AUTH=1 with BUBBLEPOD_USER /
+BUBBLEPOD_PASSWORD and restart — also run set-password for the members store.
 
 HTTP /mcp requires a Studio JWT (per-user) for identity, OR the shared MCP
 connection PIN (header X-MCP-Pin / ?mcp_pin=…) which authenticates as the
@@ -337,38 +341,39 @@ def change_password(current_password: str, new_password: str, *, username: str |
     return {"ok": True, "username": cfg["username"]}
 
 
-def extract_token(request: Request) -> str | None:
+def extract_tokens(request: Request) -> list[str]:
+    """Candidate JWTs: HttpOnly cookie first, then Authorization Bearer.
+
+    Browser fetches send both after login. Trying cookie first avoids a reload
+    loop when localStorage Bearer lags behind a password-change cookie refresh.
+    Bearer-only clients (MCP, curl) still work when no cookie is set. Callers
+    that need resilience try these in order (see require_session).
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    cookie = request.cookies.get(COOKIE_NAME)
+    if cookie and cookie.strip():
+        tok = cookie.strip()
+        seen.add(tok)
+        out.append(tok)
     auth = request.headers.get("Authorization") or ""
     if auth.lower().startswith("bearer "):
         token = auth[7:].strip()
-        if token:
-            return token
-    cookie = request.cookies.get(COOKIE_NAME)
-    if cookie:
-        return cookie.strip()
-    return None
+        if token and token not in seen:
+            out.append(token)
+    return out
 
 
-def require_user(request: Request) -> str:
-    if is_desktop_mode():
-        return str(desktop_local_user().get("username") or DEFAULT_USER)
-    token = extract_token(request)
-    if not token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    payload = decode_token(token)
-    return str(payload["sub"])
+def extract_token(request: Request) -> str | None:
+    """Return the preferred session JWT (cookie first, then Bearer)."""
+    tokens = extract_tokens(request)
+    return tokens[0] if tokens else None
 
 
-def require_session(request: Request) -> dict[str, Any]:
-    """Return the members-store user for this JWT (creates store on demand)."""
-    if is_desktop_mode():
-        return desktop_local_user()
-    from studio.members import ensure_members_store, get_user_by_id, get_user_by_username
+def _user_from_access_token(token: str) -> dict[str, Any]:
+    """Resolve members-store user for a JWT; raise HTTPException on failure."""
+    from studio.members import get_user_by_id, get_user_by_username
 
-    ensure_members_store()
-    token = extract_token(request)
-    if not token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
     payload = decode_token(token)
     uid = str(payload.get("uid") or "").strip()
     user = get_user_by_id(uid) if uid else None
@@ -381,6 +386,34 @@ def require_session(request: Request) -> dict[str, Any]:
     if got_tv != expected_tv:
         raise HTTPException(status_code=401, detail="Session expired — sign in again")
     return user
+
+
+def require_user(request: Request) -> str:
+    if is_desktop_mode():
+        return str(desktop_local_user().get("username") or DEFAULT_USER)
+    user = require_session(request)
+    return str(user.get("username") or "")
+
+
+def require_session(request: Request) -> dict[str, Any]:
+    """Return the members-store user for this JWT (creates store on demand)."""
+    if is_desktop_mode():
+        return desktop_local_user()
+    from studio.members import ensure_members_store
+
+    ensure_members_store()
+    tokens = extract_tokens(request)
+    if not tokens:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    last_exc: HTTPException | None = None
+    for token in tokens:
+        try:
+            return _user_from_access_token(token)
+        except HTTPException as exc:
+            last_exc = exc
+            continue
+    assert last_exc is not None
+    raise last_exc
 
 
 def require_admin(request: Request) -> dict[str, Any]:
@@ -614,22 +647,15 @@ def try_jwt_user(request: Request) -> str | None:
             return str(desktop_local_user().get("username") or DEFAULT_USER)
         except Exception:
             return DEFAULT_USER
-    token = extract_token(request)
-    if not token or not looks_like_jwt(token):
-        return None
-    try:
-        payload = decode_token(token)
-        from studio.members import get_user_by_id, get_user_by_username
-
-        uid = str(payload.get("uid") or "").strip()
-        user = get_user_by_id(uid) if uid else get_user_by_username(str(payload.get("sub") or ""))
-        if not user or user.get("disabled"):
-            return None
-        if int(payload.get("tv") or 0) != int(user.get("token_version") or 0):
-            return None
-        return str(payload["sub"])
-    except HTTPException:
-        return None
+    for token in extract_tokens(request):
+        if not looks_like_jwt(token):
+            continue
+        try:
+            user = _user_from_access_token(token)
+            return str(user.get("username") or "")
+        except HTTPException:
+            continue
+    return None
 
 
 def _bind_mcp_username(request: Request, username: str, *, method: str) -> None:
@@ -836,3 +862,46 @@ def path_requires_auth(path: str) -> bool:
     if is_docs_path(path):
         return True
     return path.startswith("/api/")
+
+
+def _cli_set_password(username: str, new_password: str) -> None:
+    """Admin recovery: set password and bump token_version (no current-password check)."""
+    from studio.members import ensure_members_store, get_user_by_username, update_user
+
+    ensure_members_store()
+    name = (username or "").strip()
+    user = get_user_by_username(name)
+    if not user:
+        raise SystemExit(f"Unknown user: {name}")
+    pw = (new_password or "").strip()
+    if len(pw) < 6:
+        raise SystemExit("Password must be at least 6 characters")
+    update_user(user["id"], password=pw, must_change_password=False)
+    # Keep legacy auth.json hash in sync for the primary admin username.
+    cfg = get_auth_config()
+    if (cfg.get("username") or "").strip().lower() == name.lower():
+        cfg["password_hash"] = hash_password(pw)
+        cfg["password_changed_at"] = datetime.now(timezone.utc).isoformat()
+        _write_auth_file(cfg)
+    fresh = get_user_by_username(name) or user
+    print(
+        f"Password updated for {fresh.get('username')} "
+        f"(token_version={fresh.get('token_version')}). Old sessions are invalid."
+    )
+
+
+if __name__ == "__main__":
+    import sys
+
+    argv = sys.argv[1:]
+    if len(argv) >= 3 and argv[0] in ("set-password", "set_password"):
+        _cli_set_password(argv[1], argv[2])
+    else:
+        print(
+            "Usage:\n"
+            "  python -m studio.auth set-password <username> <new-password>\n"
+            "\n"
+            "Sets the members-store password, bumps token_version (invalidates JWTs),\n"
+            "and syncs user_data/auth.json when username matches the legacy admin."
+        )
+        raise SystemExit(2)
