@@ -132,6 +132,7 @@ DEFAULTS = {
     "youtube_channel_id": "",
     "youtube_channel_title": "",
     "youtube_auto_upload": False,
+    "youtube_delete_file_after_upload": True,
     "youtube_privacy": "unlisted",
     "auto_scheduler": True,
     "hands_off": False,
@@ -706,6 +707,9 @@ def load_settings() -> dict[str, Any]:
     data["music_volume_pct"] = normalize_music_volume_pct(data.get("music_volume_pct"))
     data["default_aspect"] = normalize_default_aspect(data.get("default_aspect"))
     data["youtube_auto_upload"] = normalize_youtube_auto_upload(data.get("youtube_auto_upload"))
+    data["youtube_delete_file_after_upload"] = normalize_bool(
+        data.get("youtube_delete_file_after_upload"), True
+    )
     data["auto_scheduler"] = normalize_auto_scheduler(data.get("auto_scheduler", True))
     data["hands_off"] = normalize_hands_off(data.get("hands_off"))
     data["hands_off_interval_hours"] = normalize_hands_off_interval_hours(data.get("hands_off_interval_hours"))
@@ -805,6 +809,8 @@ def save_settings(updates: dict[str, Any]) -> dict[str, Any]:
                 data[key] = normalize_youtube_privacy(value)
             elif key == "youtube_auto_upload":
                 data[key] = normalize_youtube_auto_upload(value)
+            elif key == "youtube_delete_file_after_upload":
+                data[key] = normalize_bool(value, True)
             elif key == "auto_scheduler":
                 data[key] = normalize_auto_scheduler(value)
             elif key == "hands_off":
@@ -1078,6 +1084,7 @@ _MEMBER_SETTINGS_KEYS = frozenset({
     "youtube_privacy_options",
     "youtube_channel_id",
     "youtube_auto_upload",
+    "youtube_delete_file_after_upload",
     "local_tts",
     "membership_required",
     "membership_equal",

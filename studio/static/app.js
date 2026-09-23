@@ -2869,6 +2869,7 @@ $("#settings-form").addEventListener("submit", async (e) => {
   const fd = new FormData(e.target);
   const body = Object.fromEntries(fd.entries());
   body.youtube_auto_upload = !!$("#yt-auto")?.checked;
+  body.youtube_delete_file_after_upload = !!$("#yt-delete-after")?.checked;
   body.auto_scheduler = !!$("#auto-scheduler")?.checked;
   body.hands_off = !!$("#chrome-hands-off")?.checked;
   body.ngrok_autostart = !!$("#ngrok-autostart")?.checked;
@@ -2995,6 +2996,8 @@ function fillSettings(data) {
   if (createAspect && data.default_aspect) createAspect.value = data.default_aspect;
   const ytAuto = $("#yt-auto");
   if (ytAuto) ytAuto.checked = !!data.youtube_auto_upload;
+  const ytDeleteAfter = $("#yt-delete-after");
+  if (ytDeleteAfter) ytDeleteAfter.checked = data.youtube_delete_file_after_upload !== false;
   const autoSched = $("#auto-scheduler");
   if (autoSched) autoSched.checked = data.auto_scheduler !== false;
   const handsOff = $("#chrome-hands-off");

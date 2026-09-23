@@ -31,6 +31,7 @@ from studio.projects import (
 from studio.settings import (
     YOUTUBE_PRIVACY,
     load_settings,
+    normalize_bool,
     normalize_youtube_privacy,
     save_settings,
 )
@@ -502,6 +503,9 @@ def status() -> dict[str, Any]:
         "channel_title": channel_title,
         "channels": channels,
         "auto_upload": bool(settings.get("youtube_auto_upload")),
+        "delete_file_after_upload": normalize_bool(
+            settings.get("youtube_delete_file_after_upload"), True
+        ),
         "privacy": normalize_youtube_privacy(settings.get("youtube_privacy")),
         "privacy_options": list(YOUTUBE_PRIVACY),
         "studio_connect_url": connect_page_url(),
@@ -521,6 +525,34 @@ def status() -> dict[str, Any]:
 
 def _file_ok(path: Path, min_bytes: int = 1000) -> bool:
     return path.is_file() and path.stat().st_size >= min_bytes
+
+
+def delete_file_after_upload_enabled() -> bool:
+    """Global setting: remove local mp4 after a successful YouTube upload. Default True."""
+    return normalize_bool(load_settings().get("youtube_delete_file_after_upload"), True)
+
+
+def _maybe_delete_local_video(video: Path) -> dict[str, Any]:
+    """Delete the uploaded local mp4 when youtube_delete_file_after_upload is on."""
+    if not delete_file_after_upload_enabled():
+        return {"deleted": False, "skipped": True, "reason": "delete_after_upload_off"}
+    import logging
+
+    log = logging.getLogger("studio.youtube")
+    try:
+        if not video.is_file():
+            return {"deleted": False, "skipped": True, "reason": "missing", "file": video.name}
+        video.unlink()
+        return {"deleted": True, "file": video.name, "path": str(video)}
+    except Exception as exc:
+        log.warning("Failed to delete local video after YouTube upload (%s): %s", video, exc)
+        return {
+            "deleted": False,
+            "skipped": False,
+            "error": str(exc),
+            "file": video.name,
+            "path": str(video),
+        }
 
 
 def _video_path(project_id: str, aspect: str | None = None) -> Path:
@@ -831,6 +863,14 @@ def upload_project_video(
     stored["youtube"] = result
     stored["youtube_error"] = None
     stored["youtube_pending"] = False
+    cleanup = _maybe_delete_local_video(video)
+    result["local_file_deleted"] = bool(cleanup.get("deleted"))
+    if cleanup.get("deleted"):
+        result["local_file_deleted_name"] = cleanup.get("file") or video.name
+        stored["youtube"] = result
+    elif cleanup.get("error"):
+        result["local_file_delete_error"] = cleanup.get("error")
+        stored["youtube"] = result
     save_meta(project_id, stored)
     return result
 
