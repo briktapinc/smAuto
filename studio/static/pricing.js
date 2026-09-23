@@ -257,7 +257,8 @@ $("#pricing-login-form")?.addEventListener("submit", async (ev) => {
 $("#pricing-logout")?.addEventListener("click", async () => {
   try { await api("/api/auth/logout", { method: "POST", body: {} }); } catch { /* ignore */ }
   setToken("");
-  showLogin();
+  // Marketing home (site root), not Studio login at /app/.
+  location.replace("/");
 });
 
 $("#btn-subscribe")?.addEventListener("click", async () => {

@@ -5294,8 +5294,8 @@ $("#logout-btn")?.addEventListener("click", async () => {
   setAuthToken("");
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   if (topicsTimer) { clearInterval(topicsTimer); topicsTimer = null; }
-  // Full navigation so the workspace shell is not left in the DOM.
-  location.replace(withBase("/"));
+  // Leave Studio (/app) for the marketing site root — not the login-only page.
+  location.replace("/");
 });
 
 $("#jobs-search")?.addEventListener("input", (e) => {

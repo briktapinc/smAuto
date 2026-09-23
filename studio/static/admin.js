@@ -234,7 +234,8 @@ $("#admin-login-form")?.addEventListener("submit", async (e) => {
 $("#admin-logout")?.addEventListener("click", async () => {
   try { await api("/api/auth/logout", { method: "POST", body: {} }); } catch {}
   setToken("");
-  showLogin();
+  // Marketing home (site root), not Studio login at /app/.
+  location.replace("/");
 });
 
 $$(".top nav [data-panel]").forEach((btn) => {
