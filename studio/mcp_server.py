@@ -1567,13 +1567,17 @@ def build_mcp() -> "FastMCP":
 
     @mcp.tool
     def start_job(project_id: str) -> dict:
-        """Start a Studio job pipeline from empty or the first incomplete step (script → cover/illustrations → audio → align → render → optional YouTube). If a worker is already live, attaches without starting a duplicate thread. Returns resumed_from for the first incomplete step. Waits for the GPU lock before launching image/TTS/render work."""
-        return start_project(project_id)
+        """Start a Studio job pipeline from empty or the first incomplete step. If pipeline slots are full (see BUBBLEPOD_MAX_CONCURRENT_JOBS), enqueues the job and returns queued=true with queue_position. If a worker is already live for this project, attaches without starting a duplicate. Fair round-robin across users when multiple are waiting."""
+        from studio.job_queue import request_run
+
+        return request_run(project_id, kind="start")
 
     @mcp.tool
     def resume_job(project_id: str) -> dict:
-        """Resume a Studio job from the last successful pipeline step. Skips existing script, cover/illustrations, and wav. Gentle json is reused only if it matches the current script_g.txt and is not older than the wav; otherwise aligns first. Never runs scheduler on stale json. Rendering the current aspect does not remove the other aspect's mp4. If auto-upload is on and the mp4 exists, continues to YouTube. If the job is already running or still winding down after Pause/Stop, attaches without starting a duplicate thread. Failed/stopped/paused jobs clear the halt and continue. Returns resumed_from. Waits for the GPU lock before launching image/TTS/render work."""
-        return resume_project(project_id)
+        """Resume a Studio job from the last successful pipeline step. Enqueues when concurrent capacity is full (same queue as start_job). If the job is already running, attaches without starting a duplicate thread."""
+        from studio.job_queue import request_run
+
+        return request_run(project_id, kind="resume")
 
     @mcp.tool
     def stop_job(project_id: str) -> dict:

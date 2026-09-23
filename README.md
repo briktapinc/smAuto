@@ -31,6 +31,18 @@ Copy `.env.example` → `.env` (gitignored). Absolute URLs (Stripe callbacks, em
 
 Aliases: `BUBBLEPOD_PUBLIC_BASE_URL`, `APP_ENV`, `BUBBLEPOD_HOST` / `HOST`, `BUBBLEPOD_PORT` / `PORT`.
 
+### Multi-user job queue / concurrency
+
+Studio queues pipeline starts when all slots are busy (Start / Resume / topic Run-now / hands-off). Capacity is **not** hard-coded to 1 forever:
+
+| Setting | Meaning |
+|---------|---------|
+| `BUBBLEPOD_MAX_CONCURRENT_JOBS` or `STICKMAN_MAX_CONCURRENT_JOBS` | Max pipeline workers at once (default **1** on a small VPS). Raise to `2`, `4`, `8`, … when the machine has more CPU/RAM. Env overrides the admin Settings field when set. |
+| Settings → Hands-off → **Max concurrent jobs** | Same limit without a redeploy (ignored if the env var is set). |
+| `user_data/job_queue.json` | Persisted queue (survives Studio restart). Round-robin across users; FIFO within a user. |
+
+UI: **Jobs** shows queue position / status; a status line shows `N running / M queued (max X)`. Admins can `GET /api/queue` for the global view. GPU lock holders scale to the same N.
+
 ### Desktop app (Electron)
 
 No need to open a browser. From the repo root, with Node.js and the same Python install that can run Studio:

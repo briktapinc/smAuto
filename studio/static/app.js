@@ -544,8 +544,8 @@ function setStep(name) {
   $$(".view").forEach((v) => v.classList.toggle("on", v.id === `view-${name}`));
   const titles = {
     library: ["Library", "Finished videos. Click a ready video to watch."],
-    jobs: ["Jobs", "Work queue. Start runs the pipeline from empty or the next missing step. Stop halts after the current step. Resume continues and skips finished artifacts."],
-    topics: ["Topics", "Set a date and time, then Schedule. Studio starts due queued topics about every 30 seconds, one at a time. Run now starts as soon as the queue is free."],
+    jobs: ["Jobs", "Work queue. Start runs when a slot is free, or enqueues (round-robin by user). Shows queue position and N running / M queued. Stop halts after the current step. Resume continues and skips finished artifacts."],
+    topics: ["Topics", "Set a date and time, then Schedule. Studio starts due queued topics about every 30 seconds into free pipeline slots (up to max concurrent). Run now enqueues/starts as soon as a slot is free."],
     costs: ["Costs", "Estimated Flux spend per video from illustration counts × ~4.6¢, plus today’s counters. Open the Costs tab anytime — estimates, not a fal invoice."],
     watch: ["Watch", "Play the rendered mp4, then jump into script, pictures, voice, or render."],
     create: ["New job", "Topic, length, and aspect (16:9 default). Jobs keep running on the server if you refresh."],
@@ -630,6 +630,10 @@ function jobLabel(item) {
 }
 
 function jobState(item) {
+  if (item.queued || item.queue?.status === "queued") {
+    const pos = item.queue_position || item.queue?.queue_position;
+    return pos ? `queued (#${pos})` : "queued";
+  }
   if (item.running) return item.job?.detail || item.job?.step || "running";
   if (item.stopping) return item.job?.detail || "stopping";
   if (item.paused || item.job?.step === "paused") return "paused";
@@ -683,6 +687,7 @@ function hasLocalVideo(item) {
 function canStart(item) {
   if (!item) return false;
   if (item.running || item.busy) return false;
+  if (item.queued || item.queue?.status === "queued") return false;
   if (item.can_start != null) return !!item.can_start;
   return true;
 }
@@ -762,6 +767,7 @@ function renderLibrary() {
 function renderJobsQueue() {
   const list = $("#jobs-queue");
   if (!list) return;
+  renderJobsQueueLine();
   const filtered = filteredJobs();
   if (!jobIndex.length) {
     list.innerHTML = `<p class="empty-lib">No jobs yet. <button type="button" id="jobs-empty-create">Create a job</button></p>`;
@@ -777,13 +783,17 @@ function renderJobsQueue() {
   jobsPage = pageData.page;
   updatePager("#jobs-pager", "#jobs-page-label", "#jobs-prev", "#jobs-next", pageData.page, pageData.pages, pageData.total);
   list.innerHTML = pageData.items.map((item) => {
-    const pulse = item.running ? "running" : (item.paused || item.job?.step === "paused" ? "paused" : (item.job?.step === "stopped" ? "stopped" : ""));
+    const queued = !!(item.queued || item.queue?.status === "queued");
+    const pulse = item.running ? "running" : (queued ? "queued" : (item.paused || item.job?.step === "paused" ? "paused" : (item.job?.step === "stopped" ? "stopped" : "")));
     const startOff = (canStart(item) && !membershipLocked) ? "" : "disabled";
     const stopOff = canStop(item) ? "" : "disabled";
     const resumeOff = (canResume(item) && !membershipLocked) ? "" : "disabled";
     const errRaw = item.job?.error || item.job?.youtube_error || item.youtube_error || "";
     const errSmall = errRaw
       ? `<small class="job-card-error">${esc(simplifyJobError(errRaw).message)}</small>`
+      : "";
+    const cancelQueued = queued
+      ? `<button type="button" data-cancel-queue="${esc(item.id)}" title="Remove from pipeline queue">Dequeue</button>`
       : "";
     return `<div class="job-card ${pulse}${errRaw ? " has-error" : ""}" data-id="${esc(item.id)}">
       <button type="button" class="job-card-main" data-open="${esc(item.id)}">
@@ -795,23 +805,51 @@ function renderJobsQueue() {
         </span>
       </button>
       <div class="job-actions">
-        <button type="button" data-start="${esc(item.id)}" ${startOff} title="Run the pipeline from empty or the next missing step">Start</button>
+        <button type="button" data-start="${esc(item.id)}" ${startOff} title="Run the pipeline from empty or the next missing step (queues if busy)">Start</button>
         <button type="button" data-stop="${esc(item.id)}" ${stopOff} title="Pause/Stop — halt after the current step">Stop</button>
         <button type="button" class="job-resume" data-resume="${esc(item.id)}" ${resumeOff} title="${esc(resumeLabel(item))}">Resume</button>
+        ${cancelQueued}
         ${errRaw ? `<button type="button" data-job-error="${esc(item.id)}">Details</button>` : ""}
       </div>
     </div>`;
   }).join("");
 }
 
+let jobQueueSnap = null;
+
+async function refreshJobQueueSnap() {
+  try {
+    jobQueueSnap = await api("/api/queue");
+  } catch {
+    jobQueueSnap = null;
+  }
+  renderJobsQueueLine();
+}
+
+function renderJobsQueueLine() {
+  const line = $("#jobs-queue-line");
+  if (!line) return;
+  const snap = jobQueueSnap;
+  if (!snap) {
+    line.hidden = true;
+    return;
+  }
+  const run = snap.running_count ?? 0;
+  const queued = snap.queued_count ?? 0;
+  const max = snap.max_concurrent ?? 1;
+  line.hidden = false;
+  line.textContent = `${run} running / ${queued} queued (max ${max}) · round-robin by user`;
+}
+
 function jobMatchesFilter(item, filter) {
   if (filter === "all") return true;
+  if (filter === "queued") return !!(item.queued || item.queue?.status === "queued");
   if (filter === "running") return !!(item.running || item.busy);
   if (filter === "paused") {
     return !!(item.paused || item.job?.step === "paused" || item.job?.step === "stopped");
   }
   if (filter === "ready") return isReady(item);
-  if (filter === "draft") return !isReady(item) && !(item.running || item.busy) && !item.job?.error;
+  if (filter === "draft") return !isReady(item) && !(item.running || item.busy || item.queued) && !item.job?.error;
   if (filter === "error") return !!(item.job?.error || item.job?.youtube_error || item.youtube_error);
   if (filter === "startable") return canStart(item);
   if (filter === "resumable") return canResume(item);
@@ -899,6 +937,7 @@ $("#run-status")?.addEventListener("click", () => {
 
 async function refreshJobs(selectId) {
   jobIndex = await api("/api/jobs");
+  refreshJobQueueSnap().catch(() => {});
   renderJobList();
   if ($("#view-library")?.classList.contains("on")) renderLibrary();
   if ($("#view-jobs")?.classList.contains("on")) renderJobsQueue();
@@ -909,6 +948,9 @@ async function refreshJobs(selectId) {
     if (match && current && current.id === selectId) {
       current.running = match.running;
       current.busy = match.busy;
+      current.queued = match.queued;
+      current.queue = match.queue;
+      current.queue_position = match.queue_position;
       current.paused = match.paused;
       current.job = match.job;
       current.progress_pct = match.progress_pct ?? match.job?.progress_pct;
@@ -1207,6 +1249,14 @@ async function resumeJob(id, { stay = false } = {}) {
       await refreshJobs(id);
       return;
     }
+    if (started.queued) {
+      const pos = started.queue_position || started.queue?.queue_position;
+      toast(pos ? `Queued — position ${pos}.` : (started.detail || "Queued until a pipeline slot frees."));
+      startPolling();
+      await refreshJobs(id);
+      await refreshJobQueueSnap();
+      return;
+    }
     const from = started.resumed_from || started.resume_from || started.step || "next step";
     if (!started.running && from === "done") {
       toast(started.detail || started.job?.detail || "Already complete.");
@@ -1242,6 +1292,14 @@ async function startJob(id) {
       await refreshJobs(id);
       return;
     }
+    if (started.queued) {
+      const pos = started.queue_position || started.queue?.queue_position;
+      toast(pos ? `Queued — position ${pos}.` : (started.detail || "Queued until a pipeline slot frees."));
+      startPolling();
+      await refreshJobs(id);
+      await refreshJobQueueSnap();
+      return;
+    }
     const from = started.resumed_from || started.resume_from || started.step || "start";
     if (!started.running && from === "done") {
       toast(started.detail || started.job?.detail || "Already complete.");
@@ -1256,6 +1314,7 @@ async function startJob(id) {
     }
     startPolling();
     await refreshJobs(id);
+    await refreshJobQueueSnap();
   } catch (err) {
     toast(err.message, true);
   }
@@ -1279,6 +1338,18 @@ async function stopJob(id) {
   }
 }
 
+async function cancelQueuedJob(id) {
+  if (!id) return;
+  try {
+    await api(`/api/queue/${encodeURIComponent(id)}/cancel`, { method: "POST", body: {} });
+    toast("Removed from pipeline queue.");
+    await refreshJobs(id);
+    await refreshJobQueueSnap();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
 function handleJobActionClick(e) {
   const errBtn = e.target.closest("[data-job-error]");
   if (errBtn) {
@@ -1294,6 +1365,13 @@ function handleJobActionClick(e) {
     e.preventDefault();
     e.stopPropagation();
     startJob(startBtn.dataset.start);
+    return true;
+  }
+  const cancelQ = e.target.closest("[data-cancel-queue]");
+  if (cancelQ) {
+    e.preventDefault();
+    e.stopPropagation();
+    cancelQueuedJob(cancelQ.dataset.cancelQueue);
     return true;
   }
   const stopBtn = e.target.closest("[data-stop]");
@@ -2881,6 +2959,9 @@ $("#settings-form").addEventListener("submit", async (e) => {
   if (body.hands_off_min_queue != null && body.hands_off_min_queue !== "") {
     body.hands_off_min_queue = Number(body.hands_off_min_queue);
   }
+  if (body.max_concurrent_jobs != null && body.max_concurrent_jobs !== "") {
+    body.max_concurrent_jobs = Number(body.max_concurrent_jobs);
+  }
   if (body.ngrok_local_port != null && body.ngrok_local_port !== "") {
     body.ngrok_local_port = Number(body.ngrok_local_port);
   }
@@ -3010,6 +3091,19 @@ function fillSettings(data) {
   }
   if ($("#hands-off-min-queue") && data.hands_off_min_queue != null) {
     $("#hands-off-min-queue").value = data.hands_off_min_queue;
+  }
+  if ($("#max-concurrent-jobs") && data.max_concurrent_jobs != null) {
+    $("#max-concurrent-jobs").value = data.max_concurrent_jobs_effective ?? data.max_concurrent_jobs;
+  }
+  const maxEff = $("#max-concurrent-effective");
+  if (maxEff) {
+    if (data.max_concurrent_jobs_env_override) {
+      maxEff.textContent = `Effective now: ${data.max_concurrent_jobs_effective} (env override).`;
+    } else if (data.max_concurrent_jobs_effective != null) {
+      maxEff.textContent = `Effective now: ${data.max_concurrent_jobs_effective}.`;
+    } else {
+      maxEff.textContent = "";
+    }
   }
   const ngrokAuto = $("#ngrok-autostart");
   if (ngrokAuto) ngrokAuto.checked = !!data.ngrok_autostart;
@@ -4474,9 +4568,11 @@ function syncHandsOffWarning(data) {
 async function saveHandsOff(enabled) {
   const interval = Number($("#hands-off-interval")?.value);
   const minQueue = Number($("#hands-off-min-queue")?.value);
+  const maxJobs = Number($("#max-concurrent-jobs")?.value);
   const body = { hands_off: !!enabled };
   if (Number.isFinite(interval) && interval >= 0) body.hands_off_interval_hours = interval;
   if (Number.isFinite(minQueue) && minQueue >= 1) body.hands_off_min_queue = minQueue;
+  if (Number.isFinite(maxJobs) && maxJobs >= 1) body.max_concurrent_jobs = maxJobs;
   const saved = await api("/api/settings", { method: "PUT", body });
   fillSettings(saved);
   return saved;

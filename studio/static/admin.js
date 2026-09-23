@@ -74,10 +74,20 @@ function setPanel(name) {
 async function loadOverview() {
   const data = await api("/api/admin/overview");
   const cur = data.currency || "usd";
+  let queueBits = [];
+  try {
+    const q = await api("/api/queue");
+    queueBits = [
+      ["Pipeline running", q.running_count ?? 0],
+      ["Pipeline queued", q.queued_count ?? 0],
+      ["Max concurrent", q.max_concurrent ?? 1],
+    ];
+  } catch {}
   const cards = [
     ["Members active", data.members_active],
     ["Members total", data.members_total],
     ["Admins", data.admins],
+    ...queueBits,
     ["Signups", data.signups_count],
     ["Payments", data.payments_count],
     ["Refunds", data.refunds_count],

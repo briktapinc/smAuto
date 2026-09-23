@@ -189,10 +189,12 @@
       </section>
 
       <section id="view-jobs" class="view">
+        <p class="meta" id="jobs-queue-line" hidden></p>
         <div class="list-toolbar" id="jobs-toolbar">
           <input type="search" id="jobs-search" placeholder="Search jobs…" aria-label="Search jobs" />
           <div class="filter-pills" id="jobs-filters" role="group" aria-label="Job filters">
             <button type="button" data-jobs-filter="all" class="on">All</button>
+            <button type="button" data-jobs-filter="queued">Queued</button>
             <button type="button" data-jobs-filter="running">Running</button>
             <button type="button" data-jobs-filter="paused">Paused / stopped</button>
             <button type="button" data-jobs-filter="ready">Ready</button>
@@ -797,7 +799,7 @@
                   <input type="checkbox" id="auto-scheduler" name="auto_scheduler" checked />
                   Auto-run due topics
                 </label>
-                <p class="hint">Only applies while Hands-off is on. Then Studio checks about every 30 seconds and starts the next due queued topic — one pipeline at a time. With Hands-off off, use Run now.</p>
+                <p class="hint">Only applies while Hands-off is on. Then Studio checks about every 30 seconds and starts due queued topics into free pipeline slots (up to Max concurrent jobs). With Hands-off off, use Run now.</p>
               </div>
               <div class="field-group">
                 <div class="row settings-row">
@@ -807,8 +809,12 @@
                   <label>Keep at least (drafts + queued)
                     <input name="hands_off_min_queue" id="hands-off-min-queue" type="number" min="1" max="20" step="1" value="5" />
                   </label>
+                  <label>Max concurrent jobs
+                    <input name="max_concurrent_jobs" id="max-concurrent-jobs" type="number" min="1" max="32" step="1" value="1" />
+                  </label>
                 </div>
                 <p class="hint">Hands-off generates topics when the queue is low (openai / LM Studio only), auto-schedules drafts, runs the pipeline, and uploads each job to YouTube as <strong>private</strong> without changing your default privacy. 0 hours = due now (FIFO).</p>
+                <p class="hint">Max concurrent jobs controls how many pipelines run at once (default 1). Raise when the server has more CPU/RAM (2, 4, 8…). Env <code>BUBBLEPOD_MAX_CONCURRENT_JOBS</code> / <code>STICKMAN_MAX_CONCURRENT_JOBS</code> overrides this field when set. <span id="max-concurrent-effective"></span></p>
                 <p class="hint bad" id="hands-off-warn" hidden></p>
               </div>
             </div>

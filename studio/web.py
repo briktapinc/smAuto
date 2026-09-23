@@ -249,6 +249,7 @@ class SettingsBody(BaseModel):
     hands_off: bool | None = None
     hands_off_interval_hours: float | None = None
     hands_off_min_queue: int | None = None
+    max_concurrent_jobs: int | None = None
     port: int | None = None
     ngrok_url: str | None = None
     ngrok_local_port: int | None = None
@@ -836,6 +837,12 @@ def create_app() -> FastAPI:
         except Exception:
             pass
         try:
+            from studio.job_queue import ensure_queue_boot
+
+            threading.Thread(target=ensure_queue_boot, daemon=True, name="job-queue-boot").start()
+        except Exception:
+            pass
+        try:
             yield
         finally:
             try:
@@ -1336,6 +1343,12 @@ def create_app() -> FastAPI:
             "desktop_mode": studio_auth.is_desktop_mode(),
             "auth_required": not studio_auth.is_desktop_mode(),
         }
+        try:
+            from studio.job_queue import public_status
+
+            out["job_queue"] = public_status()
+        except Exception:
+            out["job_queue"] = None
         if full:
             ngrok = None
             try:
@@ -1353,6 +1366,45 @@ def create_app() -> FastAPI:
         from studio.gpu_lock import snapshot
 
         return snapshot()
+
+    @app.get("/api/queue")
+    def get_job_queue(request: Request, history: bool = Query(False)):
+        """Multi-user pipeline queue: user's jobs, or global view for admins."""
+        from studio.job_queue import list_queue
+
+        user = studio_auth.require_session(request)
+        is_admin = (user.get("role") or "") == "admin"
+        return list_queue(
+            owner_id=None if is_admin else user.get("id"),
+            is_admin=is_admin,
+            include_history=history,
+        )
+
+    @app.post("/api/queue/{project_id}/cancel")
+    def cancel_queued_job(project_id: str, request: Request):
+        from studio.job_queue import cancel
+        from studio.tenant import require_project_access
+
+        user, _meta = require_project_access(request, project_id)
+        try:
+            return cancel(
+                project_id,
+                owner_id=str(user.get("id") or "") or None,
+                is_admin=(user.get("role") or "") == "admin",
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc))
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc))
+        except Exception as exc:
+            raise _err(exc)
+
+    @app.post("/api/admin/queue/pump")
+    def admin_pump_queue(request: Request):
+        studio_auth.require_admin(request)
+        from studio.job_queue import pump
+
+        return pump()
 
     @app.post("/api/admin/email/test")
     def admin_email_test(body: EmailTestBody, request: Request):
@@ -1557,6 +1609,8 @@ def create_app() -> FastAPI:
             updates["hands_off_interval_hours"] = body.hands_off_interval_hours
         if body.hands_off_min_queue is not None:
             updates["hands_off_min_queue"] = body.hands_off_min_queue
+        if body.max_concurrent_jobs is not None:
+            updates["max_concurrent_jobs"] = body.max_concurrent_jobs
         if body.ngrok_url is not None:
             updates["ngrok_url"] = body.ngrok_url
         if body.ngrok_local_port is not None:
@@ -2541,22 +2595,34 @@ def create_app() -> FastAPI:
             raise _err(exc)
 
     @app.post("/api/projects/{project_id}/resume")
-    def resume(project_id: str):
+    def resume(project_id: str, request: Request):
         try:
-            if not is_listed_project(project_id):
-                raise FileNotFoundError(f"Unknown project: {project_id}")
-            return resume_project(project_id)
+            from studio.tenant import require_project_access
+            from studio.job_queue import request_run
+
+            user, _meta = require_project_access(request, project_id)
+            return request_run(
+                project_id,
+                kind="resume",
+                owner_id=str(user.get("id") or "") or None,
+            )
         except FileNotFoundError as exc:
             raise HTTPException(404, str(exc))
         except Exception as exc:
             raise _err(exc)
 
     @app.post("/api/projects/{project_id}/start")
-    def start(project_id: str):
+    def start(project_id: str, request: Request):
         try:
-            if not is_listed_project(project_id):
-                raise FileNotFoundError(f"Unknown project: {project_id}")
-            return start_project(project_id)
+            from studio.tenant import require_project_access
+            from studio.job_queue import request_run
+
+            user, _meta = require_project_access(request, project_id)
+            return request_run(
+                project_id,
+                kind="start",
+                owner_id=str(user.get("id") or "") or None,
+            )
         except FileNotFoundError as exc:
             raise HTTPException(404, str(exc))
         except Exception as exc:

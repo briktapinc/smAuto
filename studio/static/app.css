@@ -768,6 +768,7 @@ body.desktop-mode .member-only {
   box-shadow: 6px 8px 0 #ead9c2;
 }
 .job-card.running { border-color: var(--yellow); }
+.job-card.queued { border-color: var(--sky); }
 .job-card-main {
   display: flex; gap: 12px; align-items: flex-start;
   text-align: left; width: 100%; border: 0; border-radius: 10px;
@@ -780,6 +781,7 @@ body.desktop-mode .member-only {
   background: #6e6256;
 }
 .job-card.running .dot { background: var(--yellow); box-shadow: 0 0 0 4px rgba(224,163,26,.25); }
+.job-card.queued .dot { background: var(--sky); box-shadow: 0 0 0 4px rgba(90,156,196,.25); }
 .job-card.paused .dot, .job-card.stopped .dot { background: var(--coral); }
 .job-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .job-actions button {

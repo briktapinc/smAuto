@@ -225,9 +225,9 @@ def _public(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _pipeline_busy() -> bool:
-    from studio.pipeline import scheduler_blocked_reason
+    from studio.pipeline import any_pipeline_busy
 
-    return bool(scheduler_blocked_reason())
+    return bool(any_pipeline_busy())
 
 
 def _queue_hold_reason(data: dict[str, Any] | None = None) -> str | None:
@@ -236,12 +236,6 @@ def _queue_hold_reason(data: dict[str, Any] | None = None) -> str | None:
     blocked = scheduler_blocked_reason()
     if blocked:
         return blocked
-    blob = data
-    if blob is None:
-        blob = _load()
-    for topic in blob.get("topics") or []:
-        if topic.get("status") == "running":
-            return "busy"
     return None
 
 
@@ -792,19 +786,24 @@ def _requeue(topic_id: str, front: bool) -> None:
 
 
 def kick_queue(*, force: bool = False) -> dict[str, Any]:
-    """Start the next due queued topic if no pipeline worker is live or paused.
+    """Start due queued topics into free pipeline slots (up to max concurrent).
 
     Automatic kicks (force=False) require Hands-off. Run now passes force=True.
+    When capacity is full, due topics stay queued (no schedule bump) until a slot frees.
     """
-    from studio.pipeline import scheduler_blocked_reason, start_project
+    from studio.job_queue import max_concurrent_jobs, public_status, request_run, slots_free
+    from studio.pipeline import scheduler_blocked_reason
     from studio.settings import is_native_text_provider, text_provider_label
 
     if not force and not hands_off_enabled():
         return {"started": False, "reason": "hands_off_off"}
     if not force and not auto_scheduler_enabled():
         return {"started": False, "reason": "auto_scheduler_off"}
-    started: dict[str, Any] | None = None
-    while True:
+
+    started_list: list[dict[str, Any]] = []
+    last_result: dict[str, Any] | None = None
+
+    while slots_free() > 0:
         hold = scheduler_blocked_reason()
         with _lock:
             data = _load()
@@ -814,39 +813,35 @@ def kick_queue(*, force: bool = False) -> dict[str, Any]:
             topic = due[0] if due else None
             if not topic:
                 _save(data)
+                if started_list:
+                    break
                 if topic_hold or hold:
-                    return started or {"started": False, "reason": topic_hold or hold}
+                    return {"started": False, "reason": topic_hold or hold, **public_status()}
                 waiting = _next_waiting(data)
                 if waiting:
-                    return started or {
+                    return {
                         "started": False,
                         "reason": "waiting",
                         "next_due_at": waiting.get("scheduled_at"),
                         "topic_id": waiting.get("id"),
+                        **public_status(),
                     }
-                return started or {"started": False, "reason": "empty"}
+                return {"started": False, "reason": "empty", **public_status()}
 
             block = hold or topic_hold
-            # Due but GPU / another pipeline owns the machine: bump 1–2h, do not start.
-            if block in ("busy", "gpu"):
-                tid = str(topic["id"])
-                bump = _bump_topic_scheduled_at(
-                    topic,
-                    reason="gpu_busy" if block == "gpu" else "pipeline_busy",
-                )
+            if block == "busy":
                 _save(data)
-                return started or {
+                # Stay queued — multi-user capacity will free a slot later.
+                return last_result or {
                     "started": False,
-                    "reason": "rescheduled_gpu_busy" if block == "gpu" else "rescheduled_busy",
-                    "topic_id": tid,
+                    "reason": "waiting_for_slot",
+                    "topic_id": str(topic.get("id")),
                     "job_id": topic.get("job_id"),
-                    "scheduled_at": bump["scheduled_at"],
-                    "delay_minutes": bump["delay_minutes"],
-                    "detail": bump["detail"],
+                    **public_status(),
                 }
             if block:
                 _save(data)
-                return started or {"started": False, "reason": block}
+                return last_result or {"started": False, "reason": block, **public_status()}
 
             tid = str(topic["id"])
             data["queue"] = [x for x in data["queue"] if x != tid]
@@ -867,43 +862,21 @@ def kick_queue(*, force: bool = False) -> dict[str, Any]:
                 if tid not in data["queue"]:
                     data["queue"].insert(0, tid)
                 _save(data)
-                return started or {
+                return last_result or {
                     "started": False,
                     "reason": "needs_script",
                     "topic_id": tid,
                     "job_id": job_id,
                     "notes": notes,
+                    **public_status(),
                 }
             topic["status"] = "running"
             topic["error"] = None
             topic_id = tid
+            owner_id = str(topic.get("owner_id") or "") or None
             _save(data)
-        hold = scheduler_blocked_reason()
-        if hold in ("busy", "gpu"):
-            with _lock:
-                data = _load()
-                item = _find(data, topic_id)
-                if item:
-                    item["status"] = "queued"
-                    bump = _bump_topic_scheduled_at(
-                        item,
-                        reason="gpu_busy" if hold == "gpu" else "pipeline_busy",
-                    )
-                    data["queue"] = [x for x in data["queue"] if x != topic_id]
-                    data["queue"].insert(0, topic_id)
-                    _save(data)
-                    return started or {
-                        "started": False,
-                        "reason": "rescheduled_gpu_busy" if hold == "gpu" else "rescheduled_busy",
-                        "topic_id": topic_id,
-                        "job_id": job_id,
-                        "scheduled_at": bump["scheduled_at"],
-                        "delay_minutes": bump["delay_minutes"],
-                        "detail": bump["detail"],
-                    }
-            _requeue(topic_id, front=True)
-            return started or {"started": False, "reason": hold}
-        if hold:
+
+        if scheduler_blocked_reason() == "busy":
             _requeue(topic_id, front=True)
             with _lock:
                 data = _load()
@@ -911,9 +884,22 @@ def kick_queue(*, force: bool = False) -> dict[str, Any]:
                 if item and item.get("status") == "running":
                     item["status"] = "queued"
                     _save(data)
-            return started or {"started": False, "reason": hold}
+            return last_result or {
+                "started": False,
+                "reason": "waiting_for_slot",
+                "topic_id": topic_id,
+                "job_id": job_id,
+                **public_status(),
+            }
+
         try:
-            st = start_project(job_id, wait_gpu=False)
+            st = request_run(
+                job_id,
+                kind="start",
+                owner_id=owner_id,
+                wait_gpu=False,
+                topic_id=topic_id,
+            )
         except Exception as exc:
             with _lock:
                 data = _load()
@@ -923,38 +909,62 @@ def kick_queue(*, force: bool = False) -> dict[str, Any]:
                     item["error"] = str(exc)
                     _save(data)
             continue
-        if st.get("gpu_lock"):
+
+        if st.get("queued") and not (st.get("running") or st.get("busy")):
             with _lock:
                 data = _load()
                 item = _find(data, topic_id)
                 if item:
                     item["status"] = "queued"
-                    bump = _bump_topic_scheduled_at(item, reason="gpu_busy")
-                    data["queue"] = [x for x in data["queue"] if x != topic_id]
-                    data["queue"].insert(0, topic_id)
+                    if topic_id not in data["queue"]:
+                        data["queue"].insert(0, topic_id)
                     _save(data)
-                    return started or {
-                        "started": False,
-                        "reason": "rescheduled_gpu_busy",
-                        "topic_id": topic_id,
-                        "job_id": job_id,
-                        "scheduled_at": bump["scheduled_at"],
-                        "delay_minutes": bump["delay_minutes"],
-                        "detail": bump["detail"] or st.get("detail"),
-                    }
+            last_result = {
+                "started": False,
+                "reason": "waiting_for_slot",
+                "topic_id": topic_id,
+                "job_id": job_id,
+                "queue_position": st.get("queue_position"),
+                **public_status(),
+            }
+            break
+
+        if st.get("gpu_lock") and not (st.get("running") or st.get("busy")):
+            # Leave due — retry next tick / when GPU frees; do not bump schedule.
             _requeue(topic_id, front=True)
-            return started or {"started": False, "reason": "gpu", "detail": st.get("detail")}
-        live = bool(st.get("running") or st.get("busy"))
+            with _lock:
+                data = _load()
+                item = _find(data, topic_id)
+                if item:
+                    item["status"] = "queued"
+                    _save(data)
+            last_result = {
+                "started": False,
+                "reason": "gpu",
+                "topic_id": topic_id,
+                "job_id": job_id,
+                "detail": st.get("detail"),
+                **public_status(),
+            }
+            break
+
+        live = bool(st.get("running") or st.get("busy") or st.get("started"))
         step = (st.get("job") or {}).get("step") or st.get("step")
         if live:
-            started = {
+            entry = {
                 "started": True,
                 "reason": "started",
                 "topic_id": topic_id,
                 "job_id": job_id,
                 "job": st,
             }
-            return started
+            started_list.append(entry)
+            last_result = entry
+            # Fill remaining slots when max concurrent > 1.
+            if slots_free() <= 0:
+                break
+            continue
+
         with _lock:
             data = _load()
             item = _find(data, topic_id)
@@ -967,7 +977,7 @@ def kick_queue(*, force: bool = False) -> dict[str, Any]:
                     if step == "error":
                         item["error"] = st.get("error") or (st.get("job") or {}).get("error")
                 _save(data)
-        started = {
+        last_result = {
             "started": step == "done",
             "reason": "already_done" if step == "done" else "finished",
             "topic_id": topic_id,
@@ -977,6 +987,17 @@ def kick_queue(*, force: bool = False) -> dict[str, Any]:
         if step == "done":
             continue
         continue
+
+    if started_list:
+        first = started_list[0]
+        out = dict(first)
+        out["started"] = True
+        out["started_count"] = len(started_list)
+        out["started_jobs"] = started_list
+        out["max_concurrent"] = max_concurrent_jobs()
+        out.update({k: v for k, v in public_status().items() if k not in out})
+        return out
+    return last_result or {"started": False, "reason": "empty", **public_status()}
 
 
 def _pool_count(data: dict[str, Any]) -> int:
@@ -1170,7 +1191,7 @@ def schedule_topic(
             "Job created. Call save_script on this job_id (chatgpt/claude cannot auto-generate), "
             "then the due picker will run pictures → audio → render."
         )
-    elif payload.get("busy") or kicked.get("reason") in ("busy", "paused", "gpu"):
+    elif payload.get("busy") or kicked.get("reason") in ("busy", "paused", "gpu", "waiting_for_slot"):
         payload["started"] = False
         when = payload["topic"].get("scheduled_at_local") or due_iso
         if kicked.get("reason") == "gpu":
@@ -1182,8 +1203,11 @@ def schedule_topic(
                 + (f" (due {when})." if when else ".")
             )
         else:
+            pos = kicked.get("queue_position")
+            pos_bit = f" (queue position {pos})" if pos else ""
+            payload["queue_position"] = pos
             payload["message"] = (
-                "A job is already running or paused. This topic is queued and will start when it finishes"
+                f"Pipeline slots are full{pos_bit}. This topic is queued and will start when a slot frees"
                 + (f" (due {when})." if when else ".")
             )
     elif kicked.get("reason") == "hands_off_off":
@@ -1396,4 +1420,10 @@ def on_pipeline_finished(project_id: str, outcome: str, detail: str = "") -> Non
             _save(data)
     if outcome != "paused":
         kick_queue()
+        try:
+            from studio.job_queue import pump
+
+            pump()
+        except Exception:
+            pass
 

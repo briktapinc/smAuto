@@ -176,28 +176,36 @@ def is_busy(project_id: str) -> bool:
 
 
 def any_pipeline_busy() -> bool:
-    """True if any Studio job still has a live worker (GPU / fal / TTS / render)."""
-    with _lock:
-        return any(bool(job.get("_alive")) for job in _jobs.values())
+    """True when no free pipeline slots remain (capacity full).
+
+    Historically meant "any live worker". With multi-user queueing this is
+    capacity-aware: up to ``max_concurrent_jobs`` workers may run at once.
+    """
+    try:
+        from studio.job_queue import capacity_full
+
+        return capacity_full()
+    except Exception:
+        with _lock:
+            return any(bool(job.get("_alive")) for job in _jobs.values())
 
 
 def scheduler_blocked_reason() -> str | None:
-    """Why the topic due-picker must not start another pipeline (live worker, paused, or GPU)."""
-    if any_pipeline_busy():
-        return "busy"
-    with _lock:
-        for job in _jobs.values():
-            if job.get("_alive") or job.get("running"):
-                return "busy"
-            if job.get("paused") or job.get("step") == "paused":
-                return "paused"
-    try:
-        from studio.gpu_lock import is_busy
+    """Why the topic due-picker must not start another pipeline.
 
-        if is_busy():
-            return "gpu"
+    Blocks only when concurrent capacity is full. GPU contention is handled
+    inside workers (gpu_lock); paused jobs do not occupy a live slot once the
+    worker has exited, so they no longer starve other users' queues.
+    """
+    try:
+        from studio.job_queue import capacity_full
+
+        if capacity_full():
+            return "busy"
     except Exception:
-        pass
+        with _lock:
+            if any(bool(job.get("_alive")) for job in _jobs.values()):
+                return "busy"
     return None
 
 
@@ -205,6 +213,23 @@ def running_project_ids() -> list[str]:
     with _lock:
         return [pid for pid, job in _jobs.items() if job.get("_alive")]
 
+
+def pipeline_capacity() -> dict:
+    """Public snapshot of concurrent pipeline slots."""
+    try:
+        from studio.job_queue import public_status
+
+        return public_status()
+    except Exception:
+        running = running_project_ids()
+        return {
+            "max_concurrent": 1,
+            "running_count": len(running),
+            "queued_count": 0,
+            "slots_free": 0 if running else 1,
+            "running_project_ids": running,
+            "fairness": "round_robin",
+        }
 
 def _live_job(project_id: str) -> dict:
     with _lock:
@@ -311,10 +336,21 @@ def job_status(project_id: str) -> dict:
         pct = estimate_progress_pct(job.get("step"), job.get("detail"), running=running)
         if pct is not None:
             job["progress_pct"] = pct
+    queue_info = None
+    try:
+        from studio.job_queue import queue_info_for_project
+
+        queue_info = queue_info_for_project(project_id)
+    except Exception:
+        queue_info = None
+    queued = bool(queue_info and queue_info.get("status") == "queued")
     return {
         "id": project_id,
         "running": running,
         "busy": busy,
+        "queued": queued,
+        "queue": queue_info,
+        "queue_position": (queue_info or {}).get("queue_position") if queued else None,
         "paused": bool(job.get("paused") or job.get("step") == "paused"),
         "stopping": bool(stop_mode),
         "status": meta.get("status"),
@@ -326,10 +362,10 @@ def job_status(project_id: str) -> dict:
         "error": job.get("error"),
         "resume_from": nxt,
         "resumed_from": job.get("resumed_from") or nxt,
-        "can_start": not busy,
+        "can_start": not busy and not queued,
         "can_stop": bool(running or (busy and not stop_mode)),
         "can_pause": bool(running or (busy and not stop_mode)),
-        "can_resume": can_resume,
+        "can_resume": can_resume and not queued,
         "artifacts": _slim_artifacts(arts),
         "attached": False,
     }
@@ -424,11 +460,22 @@ def list_library_items(*, owner_id: str | None = None, is_admin: bool = False) -
             or halted
             or bool(stop_mode)
         )
+        queue_info = None
+        try:
+            from studio.job_queue import queue_info_for_project
+
+            queue_info = queue_info_for_project(pid)
+        except Exception:
+            queue_info = None
+        queued = bool(queue_info and queue_info.get("status") == "queued")
         row = dict(item)
         row.update(
             {
                 "running": running,
                 "busy": busy,
+                "queued": queued,
+                "queue": queue_info,
+                "queue_position": (queue_info or {}).get("queue_position") if queued else None,
                 "paused": bool(job.get("paused") or job.get("step") == "paused"),
                 "stopping": bool(stop_mode),
                 "job": job,
@@ -446,7 +493,7 @@ def list_library_items(*, owner_id: str | None = None, is_admin: bool = False) -
                 "renders": renders,
                 "last_render_aspect": item.get("last_render_aspect"),
                 "resume_from": job.get("resumed_from") or job.get("step") or ("video" if not has_video else "done"),
-                "can_start": not busy,
+                "can_start": not busy and not queued,
                 "can_stop": bool(running or (busy and not stop_mode)),
                 "can_pause": bool(running or (busy and not stop_mode)),
                 "can_resume": can_resume,
@@ -1070,6 +1117,12 @@ def start_task(
                     job["_alive"] = False
                     owned = True
             if owned:
+                try:
+                    from studio.job_queue import on_pipeline_finished as queue_on_finished
+
+                    queue_on_finished(project_id, outcome, detail)
+                except Exception:
+                    pass
                 try:
                     from studio.topics import on_pipeline_finished
 

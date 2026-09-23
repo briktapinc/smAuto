@@ -138,6 +138,7 @@ DEFAULTS = {
     "hands_off": False,
     "hands_off_interval_hours": 0.0,
     "hands_off_min_queue": 5,
+    "max_concurrent_jobs": 1,
     "ngrok_url": "",
     "ngrok_local_port": DEFAULT_LISTEN_PORT,
     "ngrok_autostart": False,
@@ -461,6 +462,17 @@ def normalize_hands_off_min_queue(value: Any, default: int = 5) -> int:
     return max(1, min(20, n))
 
 
+def normalize_max_concurrent_jobs(value: Any, default: int = 1) -> int:
+    """Pipeline workers that may run at once (1–32). Env overrides when set."""
+    if value is None or value == "":
+        return int(default)
+    try:
+        n = int(round(float(value)))
+    except (TypeError, ValueError):
+        return int(default)
+    return max(1, min(32, n))
+
+
 def normalize_bool(value: Any, default: bool = False) -> bool:
     return normalize_youtube_auto_upload(value, default=default)
 
@@ -714,6 +726,7 @@ def load_settings() -> dict[str, Any]:
     data["hands_off"] = normalize_hands_off(data.get("hands_off"))
     data["hands_off_interval_hours"] = normalize_hands_off_interval_hours(data.get("hands_off_interval_hours"))
     data["hands_off_min_queue"] = normalize_hands_off_min_queue(data.get("hands_off_min_queue"))
+    data["max_concurrent_jobs"] = normalize_max_concurrent_jobs(data.get("max_concurrent_jobs"))
     try:
         data["youtube_privacy"] = normalize_youtube_privacy(data.get("youtube_privacy"))
     except RuntimeError:
@@ -819,6 +832,8 @@ def save_settings(updates: dict[str, Any]) -> dict[str, Any]:
                 data[key] = normalize_hands_off_interval_hours(value)
             elif key == "hands_off_min_queue":
                 data[key] = normalize_hands_off_min_queue(value)
+            elif key == "max_concurrent_jobs":
+                data[key] = normalize_max_concurrent_jobs(value)
             elif key == "ngrok_url":
                 from studio.ngrok_tunnel import normalize_public_url
 
@@ -945,6 +960,16 @@ def public_settings() -> dict[str, Any]:
     data["hands_off"] = normalize_hands_off(data.get("hands_off"))
     data["hands_off_interval_hours"] = normalize_hands_off_interval_hours(data.get("hands_off_interval_hours"))
     data["hands_off_min_queue"] = normalize_hands_off_min_queue(data.get("hands_off_min_queue"))
+    data["max_concurrent_jobs"] = normalize_max_concurrent_jobs(data.get("max_concurrent_jobs"))
+    try:
+        from studio.job_queue import max_concurrent_jobs as effective_max_concurrent
+        from studio.job_queue import _env_max_concurrent
+
+        data["max_concurrent_jobs_effective"] = effective_max_concurrent()
+        data["max_concurrent_jobs_env_override"] = _env_max_concurrent() is not None
+    except Exception:
+        data["max_concurrent_jobs_effective"] = data["max_concurrent_jobs"]
+        data["max_concurrent_jobs_env_override"] = False
     data["scheduler_interval_sec"] = 30
     data["flux_model"] = FLUX_MODEL
     data["image_providers"] = list(IMAGE_PROVIDERS)

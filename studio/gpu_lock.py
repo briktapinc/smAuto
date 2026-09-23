@@ -37,6 +37,16 @@ _heartbeat_thread: threading.Thread | None = None
 _atexit_registered = False
 
 
+def max_gpu_holders() -> int:
+    """How many Studio GPU lock holders may coexist (matches pipeline concurrency)."""
+    try:
+        from studio.job_queue import max_concurrent_jobs
+
+        return max(1, int(max_concurrent_jobs()))
+    except Exception:
+        return 1
+
+
 class GpuLockTimeout(RuntimeError):
     """Timed out waiting for the GPU lock."""
 
@@ -241,15 +251,16 @@ def _public_waiters(waiters: Any) -> list[dict[str, Any]]:
 
 def _studio_state_unlocked() -> dict[str, Any]:
     data = _read_json(GPU_LOCK_PATH) or {}
-    holder = data.get("holder") if isinstance(data.get("holder"), dict) else None
-    if holder and _is_stale_holder(holder):
-        data["holder"] = None
-        waiters = data.get("waiters") if isinstance(data.get("waiters"), list) else []
-        data["waiters"] = waiters
-        _write_json(GPU_LOCK_PATH, {"holder": None, "waiters": waiters})
-        holder = None
+    # Backward compat: single ``holder`` → ``holders`` list.
+    holders_raw = data.get("holders")
+    holders: list[dict[str, Any]] = []
+    if isinstance(holders_raw, list):
+        holders = [h for h in holders_raw if isinstance(h, dict)]
+    elif isinstance(data.get("holder"), dict):
+        holders = [data["holder"]]
+    live_holders = [h for h in holders if not _is_stale_holder(h)]
     waiters = data.get("waiters") if isinstance(data.get("waiters"), list) else []
-    live = []
+    live_waiters = []
     for item in waiters:
         if not isinstance(item, dict):
             continue
@@ -258,12 +269,10 @@ def _studio_state_unlocked() -> dict[str, Any]:
         except (TypeError, ValueError):
             pid = 0
         if pid and _pid_alive(pid):
-            live.append(item)
-    if len(live) != len(waiters):
-        data["waiters"] = live
-        data["holder"] = holder
-        _write_json(GPU_LOCK_PATH, {"holder": holder, "waiters": live})
-    return {"holder": holder, "waiters": live}
+            live_waiters.append(item)
+    if live_holders != holders or len(live_waiters) != len(waiters) or "holders" not in data:
+        _write_json(GPU_LOCK_PATH, {"holders": live_holders, "holder": live_holders[0] if live_holders else None, "waiters": live_waiters})
+    return {"holders": live_holders, "holder": live_holders[0] if live_holders else None, "waiters": live_waiters}
 
 
 def _voicesync_holder_unlocked() -> dict[str, Any] | None:
@@ -380,11 +389,22 @@ def _heartbeat_files() -> None:
     now = _now_iso()
     with _file_mutex(GPU_LOCK_MUTEX_PATH):
         data = _studio_state_unlocked()
-        holder = data.get("holder")
-        if holder and _is_our_studio_holder(holder):
-            holder["heartbeat_at"] = now
-            holder["pid"] = os.getpid()
-            _write_json(GPU_LOCK_PATH, {"holder": holder, "waiters": data.get("waiters") or []})
+        holders = list(data.get("holders") or [])
+        changed = False
+        for holder in holders:
+            if holder and _is_our_studio_holder(holder):
+                holder["heartbeat_at"] = now
+                holder["pid"] = os.getpid()
+                changed = True
+        if changed:
+            _write_json(
+                GPU_LOCK_PATH,
+                {
+                    "holders": holders,
+                    "holder": holders[0] if holders else None,
+                    "waiters": data.get("waiters") or [],
+                },
+            )
     try:
         with _file_mutex(_voicesync_mutex_path()):
             holder = _read_json(voicesync_lock_path())
@@ -440,16 +460,6 @@ def _atexit_release() -> None:
         pass
 
 
-def _release_files() -> None:
-    with _file_mutex(GPU_LOCK_MUTEX_PATH):
-        data = _studio_state_unlocked()
-        holder = data.get("holder")
-        if holder and _is_our_studio_holder(holder):
-            _write_json(GPU_LOCK_PATH, {"holder": None, "waiters": data.get("waiters") or []})
-    _release_voicesync()
-    _stop_heartbeat()
-
-
 def _add_waiter(name: str, kind: str, project_id: str) -> str:
     wid = uuid.uuid4().hex[:12]
     ensure_dirs()
@@ -466,7 +476,14 @@ def _add_waiter(name: str, kind: str, project_id: str) -> str:
                 "since": _now_iso(),
             }
         )
-        _write_json(GPU_LOCK_PATH, {"holder": data.get("holder"), "waiters": waiters})
+        _write_json(
+            GPU_LOCK_PATH,
+            {
+                "holders": data.get("holders") or ([data["holder"]] if data.get("holder") else []),
+                "holder": data.get("holder"),
+                "waiters": waiters,
+            },
+        )
     return wid
 
 
@@ -477,7 +494,15 @@ def _remove_waiter(wid: str) -> None:
         with _file_mutex(GPU_LOCK_MUTEX_PATH):
             data = _studio_state_unlocked()
             waiters = [w for w in (data.get("waiters") or []) if not (isinstance(w, dict) and w.get("id") == wid)]
-            _write_json(GPU_LOCK_PATH, {"holder": data.get("holder"), "waiters": waiters})
+            holders = list(data.get("holders") or [])
+            _write_json(
+                GPU_LOCK_PATH,
+                {
+                    "holders": holders,
+                    "holder": holders[0] if holders else None,
+                    "waiters": waiters,
+                },
+            )
     except OSError:
         pass
 
@@ -494,15 +519,18 @@ def snapshot() -> dict[str, Any]:
     except OSError:
         vs_holder = _voicesync_holder_unlocked()
 
-    studio_holder = studio.get("holder")
+    holders = [h for h in (studio.get("holders") or []) if isinstance(h, dict) and not _is_stale_holder(h)]
+    studio_holder = holders[0] if holders else studio.get("holder")
     waiters = _public_waiters(studio.get("waiters"))
     with _local:
         ours = bool(_owns_files) or int(getattr(_tls, "depth", 0) or 0) > 0
 
+    max_n = max_gpu_holders()
     holder = None
     busy = False
-    if studio_holder and not _is_stale_holder(studio_holder):
-        busy = True
+    if holders:
+        # Full when at capacity; still expose primary holder for UI.
+        busy = len(holders) >= max_n
         holder = _public_holder(studio_holder)
     elif vs_holder and not _is_our_voicesync_holder(vs_holder):
         busy = True
@@ -528,11 +556,14 @@ def snapshot() -> dict[str, Any]:
     return {
         "busy": bool(busy),
         "holder": holder,
+        "holders": [_public_holder(h) for h in holders],
+        "holders_count": len(holders),
+        "max_holders": max_n,
         "waiters": waiters,
         "path": str(GPU_LOCK_PATH),
         "voicesync_path": str(voicesync_lock_path()),
         "voicesync_state": vs_state,
-        "held_by_self": bool(ours or (studio_holder and _is_our_studio_holder(studio_holder))),
+        "held_by_self": bool(ours or any(_is_our_studio_holder(h) for h in holders)),
         "stale_after_sec": STALE_AFTER_SEC,
         "timeout_sec": DEFAULT_TIMEOUT_SEC,
     }
@@ -543,6 +574,9 @@ def gpu_lock_public() -> dict[str, Any]:
     return {
         "busy": snap["busy"],
         "holder": snap["holder"],
+        "holders": snap.get("holders") or [],
+        "holders_count": snap.get("holders_count") or 0,
+        "max_holders": snap.get("max_holders") or 1,
         "waiters": snap["waiters"],
         "path": snap["path"],
         "voicesync_path": snap.get("voicesync_path"),
@@ -591,10 +625,16 @@ def release_on_studio_restart(
 
     with _file_mutex(GPU_LOCK_MUTEX_PATH):
         data = _read_json(GPU_LOCK_PATH) or {}
-        holder = data.get("holder") if isinstance(data.get("holder"), dict) else None
+        holders_raw = data.get("holders")
+        holders: list[dict[str, Any]] = []
+        if isinstance(holders_raw, list):
+            holders = [h for h in holders_raw if isinstance(h, dict)]
+        elif isinstance(data.get("holder"), dict):
+            holders = [data["holder"]]
         waiters = data.get("waiters") if isinstance(data.get("waiters"), list) else []
-        drop = False
-        if holder:
+        kept: list[dict[str, Any]] = []
+        drop_any = False
+        for holder in holders:
             try:
                 hpid = int(holder.get("pid") or 0)
             except (TypeError, ValueError):
@@ -605,6 +645,7 @@ def release_on_studio_restart(
                 hport = 0
             app = str(holder.get("app") or "")
             is_ours = app.startswith("bubble") or str(holder.get("install_root") or "") == str(REPO_ROOT)
+            drop = False
             if force and is_ours and (hport in (0, port) or not hport):
                 drop = True
                 reason = "force_bubblepod_restart"
@@ -617,7 +658,11 @@ def release_on_studio_restart(
             elif _is_stale_holder(holder):
                 drop = True
                 reason = "stale"
-        if drop:
+            if drop:
+                drop_any = True
+            else:
+                kept.append(holder)
+        if drop_any or len(kept) != len(holders):
             live_waiters = []
             for item in waiters:
                 if not isinstance(item, dict):
@@ -628,7 +673,14 @@ def release_on_studio_restart(
                     wpid = 0
                 if wpid and _pid_alive(wpid) and (not killed_pid or wpid != int(killed_pid)):
                     live_waiters.append(item)
-            _write_json(GPU_LOCK_PATH, {"holder": None, "waiters": live_waiters})
+            _write_json(
+                GPU_LOCK_PATH,
+                {
+                    "holders": kept,
+                    "holder": kept[0] if kept else None,
+                    "waiters": live_waiters,
+                },
+            )
             cleared = True
 
     # Also drop our VoiceSync cross-lock file if we held it under the killed pid.
@@ -720,7 +772,7 @@ def wait_for_gpu(
 
 
 def _try_acquire_files(name: str, kind: str, project_id: str) -> bool:
-    """Claim studio + VoiceSync lock files. Same-PID other thread is treated as busy."""
+    """Claim a Studio GPU holder slot (up to max_gpu_holders) + VoiceSync when first."""
     ensure_dirs()
     vs_holder = None
     try:
@@ -732,18 +784,52 @@ def _try_acquire_files(name: str, kind: str, project_id: str) -> bool:
         return False
     with _file_mutex(GPU_LOCK_MUTEX_PATH):
         data = _studio_state_unlocked()
-        holder = data.get("holder")
-        if holder:
+        holders = list(data.get("holders") or [])
+        if len(holders) >= max_gpu_holders():
             return False
         payload = _studio_holder_payload(name, kind, project_id)
-        _write_json(GPU_LOCK_PATH, {"holder": payload, "waiters": data.get("waiters") or []})
-    if not _try_claim_voicesync(name, kind, project_id):
-        with _file_mutex(GPU_LOCK_MUTEX_PATH):
-            data = _studio_state_unlocked()
-            holder = data.get("holder")
-            if holder and _is_our_studio_holder(holder):
-                _write_json(GPU_LOCK_PATH, {"holder": None, "waiters": data.get("waiters") or []})
-        return False
+        holders.append(payload)
+        _write_json(
+            GPU_LOCK_PATH,
+            {
+                "holders": holders,
+                "holder": holders[0],
+                "waiters": data.get("waiters") or [],
+            },
+        )
+        first_slot = len(holders) == 1
+    if first_slot:
+        if not _try_claim_voicesync(name, kind, project_id):
+            with _file_mutex(GPU_LOCK_MUTEX_PATH):
+                data = _studio_state_unlocked()
+                holders = [
+                    h
+                    for h in (data.get("holders") or [])
+                    if not (
+                        _is_our_studio_holder(h)
+                        and str(h.get("project_id") or "") == str(project_id or "")
+                        and str(h.get("name") or "") == name
+                    )
+                ]
+                # If exact match missing, drop the last ours we just added.
+                if len(holders) == len(data.get("holders") or []):
+                    dropped = False
+                    kept = []
+                    for h in reversed(list(data.get("holders") or [])):
+                        if not dropped and _is_our_studio_holder(h):
+                            dropped = True
+                            continue
+                        kept.append(h)
+                    holders = list(reversed(kept))
+                _write_json(
+                    GPU_LOCK_PATH,
+                    {
+                        "holders": holders,
+                        "holder": holders[0] if holders else None,
+                        "waiters": data.get("waiters") or [],
+                    },
+                )
+            return False
     return True
 
 
@@ -754,7 +840,7 @@ def acquire(
     project_id: str = "",
     timeout: float | int | None = None,
 ) -> None:
-    """Acquire the GPU lock, waiting up to ``timeout`` seconds."""
+    """Acquire a GPU holder slot, waiting up to ``timeout`` seconds."""
     global _owns_files, _holder_name
     depth = int(getattr(_tls, "depth", 0) or 0)
     if depth > 0:
@@ -767,6 +853,7 @@ def acquire(
         while True:
             if _try_acquire_files(name, kind, project_id):
                 _tls.depth = 1
+                _tls.holder_key = f"{project_id}:{name}:{kind}"
                 with _local:
                     _owns_files = True
                     _holder_name = name
@@ -789,11 +876,82 @@ def release() -> None:
     if depth > 1:
         _tls.depth = depth - 1
         return
+    key = str(getattr(_tls, "holder_key", "") or "")
     _tls.depth = 0
+    _tls.holder_key = ""
     with _local:
-        _owns_files = False
-        _holder_name = ""
-    _release_files()
+        # Only clear process-level flag when no other thread still holds.
+        pass
+    _release_our_holder(key)
+    with _local:
+        # Recompute owns_files from remaining holders for this instance.
+        try:
+            with _file_mutex(GPU_LOCK_MUTEX_PATH):
+                data = _studio_state_unlocked()
+                still = any(_is_our_studio_holder(h) for h in (data.get("holders") or []))
+        except Exception:
+            still = False
+        _owns_files = still
+        if not still:
+            _holder_name = ""
+            _stop_heartbeat()
+
+
+def _release_our_holder(holder_key: str = "") -> None:
+    """Drop this thread's Studio holder slot (and VoiceSync if we were last)."""
+    with _file_mutex(GPU_LOCK_MUTEX_PATH):
+        data = _studio_state_unlocked()
+        holders = list(data.get("holders") or [])
+        removed = None
+        kept: list[dict[str, Any]] = []
+        # Prefer exact key match (project_id:name:kind); else drop one of ours.
+        target_project = holder_key.split(":", 1)[0] if holder_key else ""
+        for h in holders:
+            if removed is None and _is_our_studio_holder(h):
+                if not target_project or str(h.get("project_id") or "") == target_project or not h.get("project_id"):
+                    removed = h
+                    continue
+            kept.append(h)
+        if removed is None:
+            # Fallback: drop any of ours.
+            kept = []
+            for h in holders:
+                if removed is None and _is_our_studio_holder(h):
+                    removed = h
+                    continue
+                kept.append(h)
+        _write_json(
+            GPU_LOCK_PATH,
+            {
+                "holders": kept,
+                "holder": kept[0] if kept else None,
+                "waiters": data.get("waiters") or [],
+            },
+        )
+        last_ours = removed is not None and not any(_is_our_studio_holder(h) for h in kept)
+    if last_ours:
+        _release_voicesync()
+
+
+def _release_files() -> None:
+    """atexit: drop every Studio holder owned by this process."""
+    with _file_mutex(GPU_LOCK_MUTEX_PATH):
+        data = _studio_state_unlocked()
+        holders = [
+            h
+            for h in (data.get("holders") or [])
+            if isinstance(h, dict) and not _is_our_studio_holder(h)
+        ]
+        _write_json(
+            GPU_LOCK_PATH,
+            {
+                "holders": holders,
+                "holder": holders[0] if holders else None,
+                "waiters": data.get("waiters") or [],
+            },
+        )
+    _release_voicesync()
+    _stop_heartbeat()
 
 
 @contextmanager
