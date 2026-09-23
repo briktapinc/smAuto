@@ -122,6 +122,21 @@ def _studio_base_url() -> str:
 
 def public_billing_config() -> dict[str, Any]:
     settings = load_settings()
+    from studio.plans import plan_tiers
+
+    tiers = {
+        k: {
+            "label": v.get("label"),
+            "price_cents": v.get("price_cents"),
+            "images_generated": v.get("images_generated"),
+            "render_minutes": v.get("render_minutes"),
+            "fal_spend_cents": v.get("fal_spend_cents"),
+            "retention_days": v.get("retention_days"),
+            "unlimited": bool(v.get("unlimited")),
+        }
+        for k, v in plan_tiers().items()
+        if k != "admin"
+    }
     return {
         "configured": stripe_configured(),
         "publishable_key": (settings.get("stripe_publishable_key") or "").strip(),
@@ -132,7 +147,12 @@ def public_billing_config() -> dict[str, Any]:
         "amount_cents": int(settings.get("stripe_price_amount_cents") or DEFAULT_PRICE_CENTS),
         "currency": (settings.get("stripe_price_currency") or DEFAULT_CURRENCY).lower(),
         "interval": (settings.get("stripe_price_interval") or DEFAULT_INTERVAL),
-        "note": "All members have equal Studio access privileges.",
+        "plan_tiers": tiers,
+        "default_paid_plan_tier": (settings.get("default_paid_plan_tier") or "creator"),
+        "note": (
+            "Paying members get equal Studio feature access; plan tiers meter "
+            "images, render minutes, and FAL spend. Admins are unlimited."
+        ),
     }
 
 
@@ -375,7 +395,8 @@ def create_refund(*, payment_intent: str = "", charge_id: str = "", amount_cents
 
 
 def _apply_subscription_to_user(user_id: str, sub: Any) -> None:
-    from studio.members import update_user
+    from studio.members import get_user_by_id, update_user
+    from studio.plans import normalize_plan_tier, price_id_to_tier
 
     status = str(_obj_get(sub, "status") or "none")
     price_id = ""
@@ -390,9 +411,21 @@ def _apply_subscription_to_user(user_id: str, sub: Any) -> None:
             period_end = datetime.fromtimestamp(int(period_end), tz=timezone.utc).isoformat()
         except Exception:
             period_end = str(period_end)
+    user = get_user_by_id(user_id)
+    is_admin = bool(user) and (user.get("role") or "") == "admin"
+    tier = price_id_to_tier(price_id) or normalize_plan_tier(
+        (user or {}).get("plan_tier"), is_admin=is_admin
+    )
+    if status in ("active", "trialing") and not is_admin and tier == "starter":
+        # Paid single-price installs default to creator
+        mapped = price_id_to_tier(price_id)
+        tier = mapped or "creator"
+    if is_admin:
+        tier = "admin"
     update_user(
         user_id,
         subscription_status=status,
+        plan_tier=tier,
         stripe_subscription_id=str(_obj_get(sub, "id") or ""),
         stripe_customer_id=str(_obj_get(sub, "customer") or "") or None,
         stripe_price_id=price_id or None,

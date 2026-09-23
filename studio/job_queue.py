@@ -290,12 +290,20 @@ def _owner_cap(owner_id: str | None) -> int:
 
 
 def user_quota_blocks_start(owner_id: str | None) -> str | None:
-    """Return a machine-readable reason if this user cannot start a job yet.
+    """Return a machine-readable reason if this user cannot start a job yet."""
+    oid = (owner_id or "").strip()
+    if not oid:
+        return None
+    try:
+        from studio.members import get_user_by_id
+        from studio.usage import quota_block_reason
 
-    Phase 4 fills metering; until then always allows starts.
-    """
-    _ = owner_id
-    return None
+        user = get_user_by_id(oid)
+        if not user:
+            return None
+        return quota_block_reason(user, metric="render_minutes")
+    except Exception:
+        return None
 
 
 def _empty_store() -> dict[str, Any]:
@@ -403,6 +411,27 @@ def _reconcile(data: dict[str, Any], *, boot: bool = False) -> dict[str, Any]:
                 job["lease_expires_at"] = _lease_expiry_iso()
                 changed = True
     if changed:
+        _write_store(data)
+    # Soft-mark quota-held queued jobs so Studio/API can show why they wait
+    q_changed = False
+    for job in data.get("jobs") or []:
+        if str(job.get("status") or "") != STATUS_QUEUED:
+            continue
+        reason = user_quota_blocks_start(job.get("owner_id"))
+        prev = str(job.get("block_reason") or "")
+        if reason:
+            if prev != reason:
+                job["block_reason"] = reason
+                job["detail"] = f"Held: {reason.replace('_', ' ')}"
+                job["updated_at"] = _now()
+                q_changed = True
+        elif prev in ("quota_exhausted", "subscription_inactive"):
+            job.pop("block_reason", None)
+            if str(job.get("detail") or "").startswith("Held:"):
+                job["detail"] = "Waiting for a free pipeline slot."
+            job["updated_at"] = _now()
+            q_changed = True
+    if q_changed:
         _write_store(data)
     return data
 
@@ -1087,6 +1116,26 @@ def on_pipeline_finished(project_id: str, outcome: str, detail: str = "") -> Non
         mark_finished(project_id, outcome=outcome, detail=detail, error=detail if outcome == "error" else "")
     except Exception:
         pass
+    if outcome == "done":
+        try:
+            from studio.projects import load_meta
+            from studio.usage import record_usage
+
+            meta = load_meta(project_id)
+            oid = str(meta.get("owner_id") or "").strip()
+            if oid:
+                # Approximate render wall minutes from duration_seconds or 8 min default
+                sec = float(meta.get("duration_seconds") or 0) or 480.0
+                record_usage(
+                    oid,
+                    "render_minutes",
+                    max(1.0, sec / 60.0),
+                    job_id=None,
+                    project_id=project_id,
+                    idempotency_key=f"render:{project_id}:{meta.get('updated_at') or ''}",
+                )
+        except Exception:
+            pass
     try:
         pump()
     except Exception:

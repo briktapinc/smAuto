@@ -227,7 +227,7 @@ def _consume_confirm_id(spend_confirm_id: str | None, action: str) -> bool:
         return True
 
 
-def _check_caps(action: str, units: int) -> None:
+def _check_caps(action: str, units: int, *, user_id: str | None = None) -> None:
     flags = _settings_flags()
     c = load_counters()
     openai_n = int(c.get("openai_calls") or 0)
@@ -237,18 +237,48 @@ def _check_caps(action: str, units: int) -> None:
             raise SpendBlocked(
                 f"Daily OpenAI call cap reached ({flags['max_openai']}/day). "
                 f"Used {openai_n} today (UTC).",
-                payload={"code": "daily_cap", "kind": "openai", **public_spend_status()},
+                payload={"code": "daily_cap", "kind": "openai", "error_code": "quota_exhausted", **public_spend_status()},
             )
     if action.startswith("flux") and flags["max_flux"] > 0:
         if flux_n + units > flags["max_flux"]:
             raise SpendBlocked(
                 f"Daily Flux image cap reached ({flags['max_flux']}/day). "
                 f"Used {flux_n} today (UTC).",
-                payload={"code": "daily_cap", "kind": "flux", **public_spend_status()},
+                payload={"code": "daily_cap", "kind": "flux", "error_code": "quota_exhausted", **public_spend_status()},
             )
+    # Per-user FAL spend / image quotas (plan tier)
+    uid = (user_id or "").strip()
+    if uid and action.startswith("flux"):
+        try:
+            from studio.costs import FLUX_USD_PER_IMAGE
+            from studio.members import get_user_by_id
+            from studio.plans import plan_for_user
+            from studio.usage import sum_usage
+
+            user = get_user_by_id(uid)
+            if user and (user.get("role") or "") != "admin":
+                plan = plan_for_user(user)
+                img_cap = plan.get("images_generated")
+                if img_cap is not None and sum_usage(uid, "images_generated") + units > float(img_cap):
+                    raise SpendBlocked(
+                        f"Plan image quota reached ({img_cap}/period).",
+                        payload={"code": "quota_exhausted", "kind": "images_generated", "error_code": "quota_exhausted"},
+                    )
+                fal_cap = plan.get("fal_spend_cents")
+                if fal_cap is not None:
+                    add_cents = int(round(units * FLUX_USD_PER_IMAGE * 100))
+                    if sum_usage(uid, "fal_spend_cents") + add_cents > float(fal_cap):
+                        raise SpendBlocked(
+                            f"Plan FAL spend cap reached (${float(fal_cap)/100:.2f}/period).",
+                            payload={"code": "quota_exhausted", "kind": "fal_spend_cents", "error_code": "quota_exhausted"},
+                        )
+        except SpendBlocked:
+            raise
+        except Exception:
+            pass
 
 
-def record_spend(action: str, units: int = 1) -> dict[str, Any]:
+def record_spend(action: str, units: int = 1, *, user_id: str | None = None, project_id: str | None = None) -> dict[str, Any]:
     """Increment daily counters after a billed call succeeds (or is started)."""
     units = max(1, int(units or 1))
     with _lock:
@@ -258,6 +288,29 @@ def record_spend(action: str, units: int = 1) -> dict[str, Any]:
         elif action.startswith("flux"):
             c["flux_images"] = int(c.get("flux_images") or 0) + units
         _write_counters(c)
+    uid = (user_id or "").strip()
+    if uid and action.startswith("flux"):
+        try:
+            from studio.costs import FLUX_USD_PER_IMAGE
+            from studio.usage import record_usage
+
+            cents = int(round(units * FLUX_USD_PER_IMAGE * 100))
+            record_usage(
+                uid,
+                "images_generated",
+                units,
+                cost_cents=0,
+                project_id=project_id,
+            )
+            record_usage(
+                uid,
+                "fal_spend_cents",
+                cents,
+                cost_cents=cents,
+                project_id=project_id,
+            )
+        except Exception:
+            pass
     return public_spend_status()
 
 
@@ -283,7 +336,8 @@ def require_spend(
         return {"ok": True, "billed": False, "action": action, "status": public_spend_status()}
 
     flags = _settings_flags()
-    _check_caps(action, units)
+    user_id = str(ctx.get("user_id") or ctx.get("owner_id") or "").strip() or None
+    _check_caps(action, units, user_id=user_id)
 
     confirmed = _truthy(confirm_spend, False) or _consume_confirm_id(spend_confirm_id, action)
     if source in ("hands_off", "scheduler") and flags["hands_off"]:
@@ -311,7 +365,12 @@ def require_spend(
         )
 
     # Reserve counters now so concurrent calls cannot overrun the daily cap.
-    record_spend(action, units)
+    record_spend(
+        action,
+        units,
+        user_id=user_id,
+        project_id=str(ctx.get("project_id") or "") or None,
+    )
     return {
         "ok": True,
         "billed": True,

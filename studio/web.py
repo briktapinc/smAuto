@@ -1245,6 +1245,14 @@ def create_app() -> FastAPI:
         out["auth_required"] = not studio_auth.is_desktop_mode()
         return out
 
+    @app.get("/api/me/usage")
+    def me_usage(request: Request):
+        """Current-period usage vs plan quotas for the signed-in user."""
+        user = studio_auth.require_session(request)
+        from studio.usage import usage_snapshot
+
+        return {"ok": True, **usage_snapshot(user)}
+
     @app.post("/api/auth/change-password")
     def auth_change_password(body: ChangePasswordBody, request: Request, response: Response):
         _reject_desktop_saas("Account password")

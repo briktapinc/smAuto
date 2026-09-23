@@ -175,6 +175,9 @@ DEFAULTS = {
     # Registration: open | invite_only | disabled (default invite-only for SaaS)
     "registration_mode": "invite_only",
     "registration_invite_code": "",
+    "default_paid_plan_tier": "creator",
+    "stripe_price_tiers": {},
+    "plan_tiers": {},
     # Email / SMTP (Admin → Email)
     "email_enabled": False,
     "smtp_host": "",

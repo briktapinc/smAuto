@@ -76,6 +76,7 @@ def _public_user(user: dict[str, Any]) -> dict[str, Any]:
         "email": user.get("email") or "",
         "role": user.get("role") or "member",
         "subscription_status": user.get("subscription_status") or "none",
+        "plan_tier": user.get("plan_tier") or ("admin" if (user.get("role") or "") == "admin" else "starter"),
         "stripe_customer_id": user.get("stripe_customer_id") or "",
         "stripe_subscription_id": user.get("stripe_subscription_id") or "",
         "stripe_price_id": user.get("stripe_price_id") or "",
@@ -289,6 +290,7 @@ def create_user(
         "password_hash": hash_password(pw),
         "role": role_n,
         "subscription_status": subscription_status if subscription_status in MEMBERSHIP_STATUSES else "none",
+        "plan_tier": "admin" if role_n == "admin" else "starter",
         "stripe_customer_id": "",
         "stripe_subscription_id": "",
         "stripe_price_id": "",
@@ -367,6 +369,7 @@ def update_user(user_id: str, **fields: Any) -> dict[str, Any]:
             target["must_change_password"] = False
         for key in (
             "subscription_status",
+            "plan_tier",
             "stripe_customer_id",
             "stripe_subscription_id",
             "stripe_price_id",
@@ -391,6 +394,13 @@ def update_user(user_id: str, **fields: Any) -> dict[str, Any]:
                     from studio.settings import normalize_hands_off_min_queue
 
                     target[key] = normalize_hands_off_min_queue(fields[key])
+                elif key == "plan_tier":
+                    from studio.plans import normalize_plan_tier
+
+                    target[key] = normalize_plan_tier(
+                        str(fields[key]),
+                        is_admin=(target.get("role") or "") == "admin",
+                    )
                 else:
                     target[key] = fields[key]
         target["updated_at"] = _now()

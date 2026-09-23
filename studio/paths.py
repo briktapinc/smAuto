@@ -78,6 +78,7 @@ YOUTUBE_TOKEN_PATH = USER_DATA / "youtube_token.json"
 YOUTUBE_ACCOUNTS_PATH = USER_DATA / "youtube_accounts.json"
 MEMBERS_PATH = USER_DATA / "members.json"
 BILLING_LEDGER_PATH = USER_DATA / "billing_ledger.json"
+USAGE_LEDGER_PATH = USER_DATA / "usage_ledger.json"
 ASSETS_DIR = STUDIO_DIR / "assets"
 FALLBACK_BG = ASSETS_DIR / "fallback_bg.png"
 FALLBACK_COLORS = [
