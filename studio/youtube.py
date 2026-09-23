@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
+import shutil
 import threading
 import time
 import webbrowser
@@ -20,13 +22,16 @@ from studio.projects import (
     collect_renders,
     cover_path,
     final_video_path,
+    frames_dir,
     hashtags_to_text,
+    input_prefix,
     last_video_path,
     load_meta,
     normalize_youtube_hashtags,
     normalize_youtube_keywords,
     project_dir,
     save_meta,
+    shorts_input_prefix,
 )
 from studio.settings import (
     YOUTUBE_PRIVACY,
@@ -36,6 +41,8 @@ from studio.settings import (
     save_settings,
 )
 from studio.thumbs import THUMB_NAME
+
+_log = logging.getLogger("studio.youtube")
 
 SCOPES = (
     # force-ssl covers upload + videos.update (title rename). Reconnect after scope changes.
@@ -528,31 +535,79 @@ def _file_ok(path: Path, min_bytes: int = 1000) -> bool:
 
 
 def delete_file_after_upload_enabled() -> bool:
-    """Global setting: remove local mp4 after a successful YouTube upload. Default True."""
+    """Global setting: remove local mp4 + render assets after a successful YouTube upload. Default True."""
     return normalize_bool(load_settings().get("youtube_delete_file_after_upload"), True)
 
 
-def _maybe_delete_local_video(video: Path) -> dict[str, Any]:
-    """Delete the uploaded local mp4 when youtube_delete_file_after_upload is on."""
+def _maybe_cleanup_after_upload(project_id: str, uploaded_video: Path | None = None) -> dict[str, Any]:
+    """Delete local mp4s, frames, schedules, and temp YouTube thumb when setting is on.
+
+    Keeps meta/scripts/covers/wav so the library can still show the YouTube listing.
+    """
     if not delete_file_after_upload_enabled():
         return {"deleted": False, "skipped": True, "reason": "delete_after_upload_off"}
-    import logging
-
-    log = logging.getLogger("studio.youtube")
-    try:
-        if not video.is_file():
-            return {"deleted": False, "skipped": True, "reason": "missing", "file": video.name}
-        video.unlink()
-        return {"deleted": True, "file": video.name, "path": str(video)}
-    except Exception as exc:
-        log.warning("Failed to delete local video after YouTube upload (%s): %s", video, exc)
-        return {
-            "deleted": False,
-            "skipped": False,
-            "error": str(exc),
-            "file": video.name,
-            "path": str(video),
-        }
+    deleted_files: list[str] = []
+    deleted_dirs: list[str] = []
+    errors: list[str] = []
+    prefix = Path(input_prefix(project_id))
+    shorts = Path(shorts_input_prefix(project_id))
+    file_targets: list[Path] = [
+        last_video_path(project_id),
+        project_dir(project_id) / "_yt_thumb_upload.jpg",
+        prefix.with_name(prefix.name + "_schedule.csv"),
+        shorts.with_name(shorts.name + "_schedule.csv"),
+    ]
+    for asp in ALL_ASPECTS:
+        file_targets.append(final_video_path(project_id, asp))
+    if uploaded_video is not None:
+        file_targets.append(uploaded_video)
+    seen_files: set[Path] = set()
+    for path in file_targets:
+        try:
+            key = path.resolve()
+        except OSError:
+            key = path
+        if key in seen_files:
+            continue
+        seen_files.add(key)
+        try:
+            if path.is_file():
+                path.unlink()
+                deleted_files.append(path.name)
+        except OSError as exc:
+            errors.append(f"{path.name}: {exc}")
+            _log.warning("Failed to delete local file after YouTube upload (%s): %s", path, exc)
+    dir_targets: list[Path] = [
+        Path(str(prefix) + "_frames"),
+        Path(str(shorts) + "_frames"),
+    ]
+    for asp in ALL_ASPECTS:
+        dir_targets.append(frames_dir(project_id, asp))
+    seen_dirs: set[Path] = set()
+    for folder in dir_targets:
+        try:
+            key = folder.resolve()
+        except OSError:
+            key = folder
+        if key in seen_dirs:
+            continue
+        seen_dirs.add(key)
+        if not folder.is_dir():
+            continue
+        try:
+            shutil.rmtree(folder, ignore_errors=False)
+            deleted_dirs.append(folder.name)
+        except OSError as exc:
+            errors.append(f"{folder.name}/: {exc}")
+            _log.warning("Failed to delete frames after YouTube upload (%s): %s", folder, exc)
+    return {
+        "deleted": bool(deleted_files or deleted_dirs),
+        "skipped": False,
+        "files": deleted_files,
+        "dirs": deleted_dirs,
+        "error": "; ".join(errors) if errors else "",
+        "clear_render_meta": True,
+    }
 
 
 def _video_path(project_id: str, aspect: str | None = None) -> Path:
@@ -863,13 +918,21 @@ def upload_project_video(
     stored["youtube"] = result
     stored["youtube_error"] = None
     stored["youtube_pending"] = False
-    cleanup = _maybe_delete_local_video(video)
-    result["local_file_deleted"] = bool(cleanup.get("deleted"))
-    if cleanup.get("deleted"):
-        result["local_file_deleted_name"] = cleanup.get("file") or video.name
-        stored["youtube"] = result
-    elif cleanup.get("error"):
-        result["local_file_delete_error"] = cleanup.get("error")
+    # Only free disk after a real YouTube id exists.
+    if video_id:
+        cleanup = _maybe_cleanup_after_upload(project_id, uploaded_video=video)
+        result["local_file_deleted"] = bool(cleanup.get("deleted"))
+        if cleanup.get("deleted"):
+            result["local_files_deleted"] = cleanup.get("files") or []
+            result["local_dirs_deleted"] = cleanup.get("dirs") or []
+            if cleanup.get("clear_render_meta"):
+                stored["renders"] = {}
+                stored["last_render_aspect"] = None
+        elif cleanup.get("skipped"):
+            result["local_file_deleted"] = False
+            result["local_file_delete_skipped"] = cleanup.get("reason") or "skipped"
+        if cleanup.get("error"):
+            result["local_file_delete_error"] = cleanup.get("error")
         stored["youtube"] = result
     save_meta(project_id, stored)
     return result
