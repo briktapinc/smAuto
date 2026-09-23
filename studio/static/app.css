@@ -796,8 +796,8 @@ body.desktop-mode .member-only {
 .job-actions [data-start]:hover:not(:disabled) { background: var(--sky); color: #fff; border-color: #2b7a96; }
 .job-actions [data-stop]:hover:not(:disabled) { background: var(--coral); color: #fff; border-color: #a33d32; }
 .job-actions [data-resume]:hover:not(:disabled) { background: var(--mint); color: #fff; border-color: #2d6a4f; }
-.job-actions [data-delete] { border-color: #a33d32; color: #a33d32; }
-.job-actions [data-delete]:hover { background: var(--coral); color: #fff; border-color: #a33d32; }
+.job-actions [data-delete] { background: var(--coral); border-color: #a33d32; color: #fff; }
+.job-actions [data-delete]:hover { background: #a33d32; color: #fff; border-color: #8a3229; }
 .run-status {
   position: relative;
   overflow: hidden;
