@@ -533,7 +533,23 @@ def enforce_mcp_tool_membership(tool_name: str, request: Request | None = None) 
 
 
 def clear_auth_cookie(response: Response) -> None:
-    response.delete_cookie(key=COOKIE_NAME, path=_cookie_path())
+    """Expire the auth cookie with attributes matching set_auth_cookie.
+
+    Chromium ignores delete Set-Cookie unless Path/Secure/SameSite match the
+    original cookie. Login sets Secure on HTTPS; delete_cookie defaults to
+    secure=False, which left sessions alive after Logout under /app.
+    Also clear path=/ in case an older cookie predates ROOT_PATH=/app.
+    """
+    secure = _cookie_secure()
+    paths = {_cookie_path(), "/"}
+    for path in paths:
+        response.delete_cookie(
+            key=COOKIE_NAME,
+            path=path,
+            secure=secure,
+            httponly=True,
+            samesite="lax",
+        )
 
 
 def looks_like_jwt(token: str) -> bool:
