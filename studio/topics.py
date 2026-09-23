@@ -255,6 +255,7 @@ def _script_ready(job_id: str) -> bool:
 def _prepare_unsupervised_job(job_id: str) -> list[str]:
     """Fail chatgpt pictures (or fall back to flux). Native text needs save_script first."""
     from studio.comfyui import workflow_public_status
+    from studio.illustrations import unsupervised_image_provider_gate_skip_message
     from studio.projects import project_image_provider, set_image_provider
     from studio.settings import is_native_text_provider, load_settings, text_provider_label
 
@@ -262,7 +263,11 @@ def _prepare_unsupervised_job(job_id: str) -> list[str]:
     settings = load_settings()
     provider = project_image_provider(job_id)
     fal_key = bool((settings.get("fal_key") or "").strip())
-    if provider == "chatgpt":
+    skip_msg = unsupervised_image_provider_gate_skip_message(job_id)
+    if skip_msg:
+        _log.info(skip_msg)
+        notes.append(skip_msg)
+    elif provider == "chatgpt":
         if fal_key:
             set_image_provider(job_id, "flux")
             notes.append(

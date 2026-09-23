@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -63,9 +64,11 @@ from studio.illustrations import (
     prune_stale_billboards,
     regenerate_illustration,
     resolve_illustration_slot,
+    unsupervised_image_provider_gate_skip_message,
 )
 from studio.tts import generate_audio, generate_project_audio
 
+_log = logging.getLogger("bubblepod.pipeline")
 _lock = threading.Lock()
 _jobs: dict[str, dict] = {}
 _PERSIST = (
@@ -726,17 +729,22 @@ def _run_resume(project_id: str) -> None:
     arts = inspect_artifacts(project_id)
     provider = project_image_provider(project_id)
     if provider == "chatgpt":
-        from studio.projects import set_image_provider
-        from studio.settings import load_settings
-
-        if (load_settings().get("fal_key") or "").strip():
-            set_image_provider(project_id, "flux")
-            provider = "flux"
+        skip_msg = unsupervised_image_provider_gate_skip_message(project_id)
+        if skip_msg:
+            _log.info(skip_msg)
+            print(skip_msg)
         else:
-            raise RuntimeError(
-                "image_provider is chatgpt, which cannot generate pictures unsupervised. "
-                "Set image_provider to flux (fal_key) or comfyui."
-            )
+            from studio.projects import set_image_provider
+            from studio.settings import load_settings
+
+            if (load_settings().get("fal_key") or "").strip():
+                set_image_provider(project_id, "flux")
+                provider = "flux"
+            else:
+                raise RuntimeError(
+                    "image_provider is chatgpt, which cannot generate pictures unsupervised. "
+                    "Set image_provider to flux (fal_key) or comfyui."
+                )
     need_images = (not arts["cover"]) or (is_studio_image_provider(provider) and not arts["illustrations"])
     need_audio = not arts["audio"]
     need_video = not arts["video"]

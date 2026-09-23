@@ -1358,6 +1358,38 @@ def illustration_jobs(project_id: str) -> dict:
     }
 
 
+def illustration_slot_inventory(project_id: str) -> dict[str, int]:
+    """total/missing/filled from the same jobs list as list_illustration_jobs."""
+    try:
+        info = illustration_jobs(project_id)
+    except Exception:
+        return {"total": 0, "missing": 0, "filled": 0}
+    jobs = info.get("jobs") or []
+    total = len(jobs)
+    missing = sum(1 for job in jobs if not job.get("has_image"))
+    return {"total": total, "missing": int(missing), "filled": max(0, total - int(missing))}
+
+
+def all_illustration_slots_filled(project_id: str) -> bool:
+    """True when the project has at least one slot and none are missing images."""
+    inv = illustration_slot_inventory(project_id)
+    return inv["total"] > 0 and inv["missing"] == 0
+
+
+def unsupervised_image_provider_gate_skip_message(project_id: str) -> str | None:
+    """If every illustration slot is filled, return the skip log line; else None.
+
+    Unsupervised entry points (start_job / resume_job / schedule / hands-off) use this
+    before requiring flux+fal or comfyui when image_provider is chatgpt.
+    """
+    inv = illustration_slot_inventory(project_id)
+    if inv["total"] > 0 and inv["missing"] == 0:
+        return (
+            f"image provider gate skipped: all {inv['total']} illustration slots already filled"
+        )
+    return None
+
+
 def _decode_image_bytes(image: str, image_url: str | None = None) -> bytes:
     if image_url:
         response = httpx.get(image_url, timeout=120, follow_redirects=True)
