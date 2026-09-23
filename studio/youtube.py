@@ -17,7 +17,7 @@ from typing import Any, Iterator
 from urllib.parse import parse_qs, urlparse
 
 from studio.aspect import ALL_ASPECTS, normalize_aspect
-from studio.paths import YOUTUBE_TOKEN_PATH, ensure_dirs
+from studio.paths import YOUTUBE_ACCOUNTS_PATH, YOUTUBE_TOKEN_PATH, ensure_dirs
 from studio.projects import (
     collect_renders,
     cover_path,
@@ -54,6 +54,249 @@ SCOPES = (
 _lock = threading.Lock()
 _pending: dict[str, Any] | None = None
 _PENDING_TTL = 15 * 60
+
+
+_pending_creds: dict[str, Any] | None = None
+_pending_channels: list[dict[str, Any]] = []
+
+
+def _cred_payload_from_creds(creds: Any) -> dict[str, Any]:
+    cid, secret = client_id_secret()
+    return {
+        "token": creds.token,
+        "refresh_token": creds.refresh_token,
+        "token_uri": getattr(creds, "token_uri", None) or "https://oauth2.googleapis.com/token",
+        "client_id": cid or getattr(creds, "client_id", None),
+        "client_secret": secret or getattr(creds, "client_secret", None),
+        "scopes": list(creds.scopes or SCOPES),
+        "expiry": creds.expiry.isoformat() if getattr(creds, "expiry", None) else None,
+    }
+
+
+def _public_account(entry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": entry.get("id") or entry.get("channel_id") or "",
+        "channel_id": entry.get("channel_id") or entry.get("id") or "",
+        "title": entry.get("channel_title") or entry.get("title") or "",
+        "channel_title": entry.get("channel_title") or entry.get("title") or "",
+        "custom_url": entry.get("custom_url") or "",
+        "thumbnail": entry.get("thumbnail") or "",
+        "is_default": bool(entry.get("is_default")),
+        "connected_at": entry.get("connected_at") or "",
+    }
+
+
+def _empty_store() -> dict[str, Any]:
+    return {"version": 1, "default_id": "", "accounts": []}
+
+
+def _migrate_legacy_token_locked() -> dict[str, Any]:
+    """One-time: single youtube_token.json + settings channel → accounts store."""
+    store = _empty_store()
+    if not YOUTUBE_TOKEN_PATH.is_file():
+        return store
+    try:
+        creds = json.loads(YOUTUBE_TOKEN_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return store
+    if not isinstance(creds, dict) or not (creds.get("refresh_token") or creds.get("token")):
+        return store
+    settings = load_settings()
+    channel_id = (settings.get("youtube_channel_id") or "").strip()
+    channel_title = (settings.get("youtube_channel_title") or "").strip()
+    account_id = channel_id or "legacy"
+    entry = {
+        "id": account_id,
+        "channel_id": channel_id,
+        "channel_title": channel_title,
+        "custom_url": "",
+        "thumbnail": "",
+        "is_default": True,
+        "credentials": creds,
+        "connected_at": _now(),
+    }
+    store["accounts"] = [entry]
+    store["default_id"] = account_id
+    YOUTUBE_ACCOUNTS_PATH.write_text(json.dumps(store, indent=2), encoding="utf-8")
+    return store
+
+
+def _load_accounts_store() -> dict[str, Any]:
+    ensure_dirs()
+    if YOUTUBE_ACCOUNTS_PATH.is_file():
+        try:
+            data = json.loads(YOUTUBE_ACCOUNTS_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            data = None
+        if isinstance(data, dict) and isinstance(data.get("accounts"), list):
+            return data
+    return _migrate_legacy_token_locked()
+
+
+def _sync_default_settings(store: dict[str, Any]) -> None:
+    default_id = (store.get("default_id") or "").strip()
+    match = None
+    for item in store.get("accounts") or []:
+        if not isinstance(item, dict):
+            continue
+        cid = (item.get("channel_id") or item.get("id") or "").strip()
+        if default_id and cid == default_id:
+            match = item
+            break
+        if item.get("is_default") and match is None:
+            match = item
+    if match is None and (store.get("accounts") or []):
+        match = next((a for a in store["accounts"] if isinstance(a, dict)), None)
+    if match is None:
+        save_settings({"youtube_channel_id": "", "youtube_channel_title": ""})
+        return
+    save_settings(
+        {
+            "youtube_channel_id": (match.get("channel_id") or match.get("id") or "").strip(),
+            "youtube_channel_title": (match.get("channel_title") or "").strip(),
+        }
+    )
+
+
+def _mirror_default_token(store: dict[str, Any]) -> None:
+    """Keep legacy youtube_token.json as a copy of the default account credentials."""
+    default_id = (store.get("default_id") or "").strip()
+    entry = None
+    for item in store.get("accounts") or []:
+        if not isinstance(item, dict):
+            continue
+        cid = (item.get("channel_id") or item.get("id") or "").strip()
+        if default_id and cid == default_id:
+            entry = item
+            break
+        if item.get("is_default") and entry is None:
+            entry = item
+    if entry is None and (store.get("accounts") or []):
+        entry = next((a for a in store["accounts"] if isinstance(a, dict)), None)
+    creds = (entry or {}).get("credentials") if entry else None
+    if isinstance(creds, dict) and (creds.get("refresh_token") or creds.get("token")):
+        YOUTUBE_TOKEN_PATH.write_text(json.dumps(creds, indent=2), encoding="utf-8")
+    elif YOUTUBE_TOKEN_PATH.is_file():
+        try:
+            YOUTUBE_TOKEN_PATH.unlink()
+        except OSError:
+            pass
+
+
+def _save_accounts_store(store: dict[str, Any]) -> dict[str, Any]:
+    ensure_dirs()
+    accounts: list[dict[str, Any]] = []
+    default_id = (store.get("default_id") or "").strip()
+    raw_accounts = [a for a in (store.get("accounts") or []) if isinstance(a, dict)]
+    if not default_id and raw_accounts:
+        default_id = (raw_accounts[0].get("channel_id") or raw_accounts[0].get("id") or "").strip()
+    if default_id and not any(
+        (a.get("channel_id") or a.get("id") or "").strip() == default_id for a in raw_accounts
+    ):
+        default_id = (raw_accounts[0].get("channel_id") or raw_accounts[0].get("id") or "").strip() if raw_accounts else ""
+    for item in raw_accounts:
+        cid = (item.get("channel_id") or item.get("id") or "").strip()
+        entry = dict(item)
+        entry["id"] = cid or entry.get("id") or secrets.token_hex(8)
+        entry["channel_id"] = cid
+        entry["is_default"] = bool(cid and cid == default_id)
+        accounts.append(entry)
+    if accounts and not any(a.get("is_default") for a in accounts):
+        accounts[0]["is_default"] = True
+        default_id = (accounts[0].get("channel_id") or accounts[0].get("id") or "").strip()
+    out = {"version": 1, "default_id": default_id, "accounts": accounts}
+    YOUTUBE_ACCOUNTS_PATH.write_text(json.dumps(out, indent=2), encoding="utf-8")
+    _mirror_default_token(out)
+    try:
+        _sync_default_settings(out)
+    except Exception:
+        pass
+    return out
+
+
+def connected_accounts() -> list[dict[str, Any]]:
+    store = _load_accounts_store()
+    return [_public_account(a) for a in (store.get("accounts") or []) if isinstance(a, dict)]
+
+
+def _find_account_entry(channel_id: str = "", *, prefer_default: bool = True) -> dict[str, Any] | None:
+    store = _load_accounts_store()
+    accounts = [a for a in (store.get("accounts") or []) if isinstance(a, dict)]
+    if not accounts:
+        return None
+    wanted = (channel_id or "").strip()
+    if wanted:
+        for item in accounts:
+            cid = (item.get("channel_id") or item.get("id") or "").strip()
+            if cid == wanted:
+                return item
+        return None
+    if not prefer_default:
+        return None
+    default_id = (store.get("default_id") or "").strip()
+    if default_id:
+        for item in accounts:
+            cid = (item.get("channel_id") or item.get("id") or "").strip()
+            if cid == default_id:
+                return item
+    for item in accounts:
+        if item.get("is_default"):
+            return item
+    return accounts[0]
+
+
+def _upsert_account(
+    *,
+    channel_id: str,
+    channel_title: str = "",
+    credentials: dict[str, Any],
+    custom_url: str = "",
+    thumbnail: str = "",
+    make_default: bool | None = None,
+) -> dict[str, Any]:
+    store = _load_accounts_store()
+    accounts = [a for a in (store.get("accounts") or []) if isinstance(a, dict)]
+    cid = (channel_id or "").strip()
+    if not cid:
+        raise RuntimeError("channel_id is required to save a YouTube account.")
+    if not isinstance(credentials, dict) or not (credentials.get("refresh_token") or credentials.get("token")):
+        raise RuntimeError("Missing YouTube credentials for this channel.")
+    existing = None
+    for item in accounts:
+        if (item.get("channel_id") or item.get("id") or "").strip() == cid:
+            existing = item
+            break
+    entry = {
+        "id": cid,
+        "channel_id": cid,
+        "channel_title": (channel_title or "").strip() or ((existing or {}).get("channel_title") or ""),
+        "custom_url": custom_url or ((existing or {}).get("custom_url") or ""),
+        "thumbnail": thumbnail or ((existing or {}).get("thumbnail") or ""),
+        "is_default": False,
+        "credentials": credentials,
+        "connected_at": _now(),
+    }
+    if existing is None:
+        accounts.append(entry)
+    else:
+        accounts = [
+            entry if (a.get("channel_id") or a.get("id") or "").strip() == cid else a
+            for a in accounts
+        ]
+    become_default = make_default
+    if become_default is None:
+        become_default = not any(
+            (a.get("channel_id") or a.get("id") or "").strip() != cid and a.get("is_default")
+            for a in accounts
+        ) or len(accounts) == 1
+    default_id = cid if become_default else (store.get("default_id") or "").strip()
+    if become_default:
+        default_id = cid
+    elif not default_id:
+        default_id = cid
+    return _save_accounts_store({"version": 1, "default_id": default_id, "accounts": accounts})
+
+
 
 _CALLBACK_OK_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><title>YouTube connected</title>
@@ -162,14 +405,21 @@ def has_client() -> bool:
 
 
 def is_connected() -> bool:
-    path = YOUTUBE_TOKEN_PATH
-    if not path.is_file():
-        return False
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return False
-    return bool(data.get("refresh_token") or data.get("token"))
+    store = _load_accounts_store()
+    for item in store.get("accounts") or []:
+        if not isinstance(item, dict):
+            continue
+        creds = item.get("credentials") or {}
+        if isinstance(creds, dict) and (creds.get("refresh_token") or creds.get("token")):
+            return True
+    # Legacy single-token file (pre-migration callers / race before first load).
+    if YOUTUBE_TOKEN_PATH.is_file():
+        try:
+            data = json.loads(YOUTUBE_TOKEN_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return False
+        return bool(data.get("refresh_token") or data.get("token"))
+    return False
 
 
 def _client_config(redirect_uri: str) -> dict[str, Any]:
@@ -189,49 +439,74 @@ def _client_config(redirect_uri: str) -> dict[str, Any]:
     return {"installed": body}
 
 
-def _save_credentials(creds: Any) -> None:
+def _save_credentials(creds: Any, *, channel_id: str = "") -> None:
+    """Persist credentials onto the matching account (or default / legacy mirror)."""
+    payload = _cred_payload_from_creds(creds)
+    store = _load_accounts_store()
+    accounts = [a for a in (store.get("accounts") or []) if isinstance(a, dict)]
+    wanted = (channel_id or "").strip()
+    target = None
+    if wanted:
+        for item in accounts:
+            if (item.get("channel_id") or item.get("id") or "").strip() == wanted:
+                target = item
+                break
+    if target is None:
+        target = _find_account_entry(wanted, prefer_default=True)
+    if target is not None:
+        cid = (target.get("channel_id") or target.get("id") or "").strip()
+        _upsert_account(
+            channel_id=cid or wanted or "legacy",
+            channel_title=target.get("channel_title") or "",
+            credentials=payload,
+            custom_url=target.get("custom_url") or "",
+            thumbnail=target.get("thumbnail") or "",
+            make_default=bool(target.get("is_default")),
+        )
+        return
+    # No accounts yet — keep legacy file so migration/connect can pick it up.
     ensure_dirs()
-    cid, secret = client_id_secret()
-    payload = {
-        "token": creds.token,
-        "refresh_token": creds.refresh_token,
-        "token_uri": getattr(creds, "token_uri", None) or "https://oauth2.googleapis.com/token",
-        "client_id": cid or getattr(creds, "client_id", None),
-        "client_secret": secret or getattr(creds, "client_secret", None),
-        "scopes": list(creds.scopes or SCOPES),
-        "expiry": creds.expiry.isoformat() if getattr(creds, "expiry", None) else None,
-    }
     YOUTUBE_TOKEN_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def _load_credentials() -> Any:
+def _credentials_from_info(info: dict[str, Any], *, channel_id: str = "") -> Any:
     _require_google()
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
 
-    if not YOUTUBE_TOKEN_PATH.is_file():
-        return None
-    try:
-        info = json.loads(YOUTUBE_TOKEN_PATH.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
+    data = dict(info)
     cid, secret = client_id_secret()
     if cid:
-        info["client_id"] = cid
+        data["client_id"] = cid
     if secret:
-        info["client_secret"] = secret
-    creds = Credentials.from_authorized_user_info(info, SCOPES)
+        data["client_secret"] = secret
+    creds = Credentials.from_authorized_user_info(data, SCOPES)
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
-        _save_credentials(creds)
+        _save_credentials(creds, channel_id=channel_id)
     return creds
 
 
-def _youtube_service(creds: Any | None = None):
+def _load_credentials(channel_id: str = "") -> Any:
+    entry = _find_account_entry(channel_id, prefer_default=True)
+    if entry and isinstance(entry.get("credentials"), dict):
+        cid = (entry.get("channel_id") or entry.get("id") or "").strip()
+        return _credentials_from_info(entry["credentials"], channel_id=cid)
+    if YOUTUBE_TOKEN_PATH.is_file():
+        try:
+            info = json.loads(YOUTUBE_TOKEN_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        if isinstance(info, dict) and (info.get("refresh_token") or info.get("token")):
+            return _credentials_from_info(info, channel_id=channel_id)
+    return None
+
+
+def _youtube_service(creds: Any | None = None, *, channel_id: str = ""):
     _require_google()
     from googleapiclient.discovery import build
 
-    creds = creds or _load_credentials()
+    creds = creds or _load_credentials(channel_id)
     if creds is None:
         raise RuntimeError(
             "YouTube is not connected. Open the Studio Connect URL in your system browser "
@@ -342,6 +617,25 @@ def _pending_flow():
     return pending
 
 
+def _channels_for_creds(creds: Any) -> list[dict[str, Any]]:
+    youtube = _youtube_service(creds)
+    resp = youtube.channels().list(part="id,snippet", mine=True, maxResults=50).execute()
+    channels = []
+    for item in resp.get("items") or []:
+        snippet = item.get("snippet") or {}
+        thumbs = snippet.get("thumbnails") or {}
+        thumb = (thumbs.get("default") or thumbs.get("medium") or {}).get("url") or ""
+        channels.append(
+            {
+                "id": item.get("id") or "",
+                "title": snippet.get("title") or "",
+                "custom_url": snippet.get("customUrl") or "",
+                "thumbnail": thumb,
+            }
+        )
+    return channels
+
+
 def finish_oauth(*, code: str = "", state: str = "", authorization_response: str = "") -> dict[str, Any]:
     pending = _pending_flow()
     if not pending:
@@ -374,29 +668,51 @@ def finish_oauth(*, code: str = "", state: str = "", authorization_response: str
     if not creds or not creds.refresh_token:
         # Still store; user may need to reconnect with prompt=consent.
         pass
-    _save_credentials(creds)
+    payload = _cred_payload_from_creds(creds)
     with _lock:
-        global _pending
+        global _pending, _pending_creds, _pending_channels
         _pending = None
+        _pending_creds = payload
+        _pending_channels = []
     try:
-        channels = list_channels(force=True)
-        items = channels.get("channels") or []
-        settings = load_settings()
-        current_id = (settings.get("youtube_channel_id") or "").strip()
-        if len(items) == 1:
-            save_settings(
-                {
-                    "youtube_channel_id": items[0]["id"],
-                    "youtube_channel_title": items[0].get("title") or "",
-                }
-            )
-        elif current_id and any(c.get("id") == current_id for c in items):
-            match = next(c for c in items if c.get("id") == current_id)
-            save_settings({"youtube_channel_title": match.get("title") or ""})
-        elif items and not current_id:
-            save_settings({"youtube_channel_id": "", "youtube_channel_title": ""})
-    except Exception:
-        pass
+        items = _channels_for_creds(creds)
+    except Exception as exc:
+        # Keep pending creds so the user can retry channel pick / reconnect.
+        with _lock:
+            _pending_channels = []
+        raise RuntimeError(f"Signed in, but could not list YouTube channels: {exc}") from exc
+    with _lock:
+        _pending_channels = list(items)
+    existing = connected_accounts()
+    make_default = len(existing) == 0
+    if not items:
+        with _lock:
+            _pending_creds = None
+            _pending_channels = []
+        raise RuntimeError(
+            "This Google account has no YouTube channel. Create a channel on YouTube, then reconnect."
+        )
+    connected_ids = {(a.get("channel_id") or a.get("id") or "") for a in existing}
+    fresh = [c for c in items if (c.get("id") or "") and c.get("id") not in connected_ids]
+    # Auto-bind when Google returns a single channel, or exactly one new channel on this account.
+    auto = None
+    if len(items) == 1:
+        auto = items[0]
+    elif len(fresh) == 1:
+        auto = fresh[0]
+    if auto and auto.get("id"):
+        _upsert_account(
+            channel_id=auto["id"],
+            channel_title=auto.get("title") or "",
+            credentials=payload,
+            custom_url=auto.get("custom_url") or "",
+            thumbnail=auto.get("thumbnail") or "",
+            make_default=True if make_default else False,
+        )
+        with _lock:
+            _pending_creds = None
+            _pending_channels = []
+    # else: leave _pending_creds so set_channel can finish adding from pending_channels
     return status()
 
 
@@ -428,87 +744,186 @@ def finish_oauth_paste(code_or_url: str) -> dict[str, Any]:
     return finish_oauth(code=raw)
 
 
-def disconnect() -> dict[str, Any]:
-    if YOUTUBE_TOKEN_PATH.is_file():
-        try:
-            YOUTUBE_TOKEN_PATH.unlink()
-        except OSError:
-            pass
+def disconnect(channel_id: str = "") -> dict[str, Any]:
+    """Remove one connected channel, or all when channel_id is empty."""
+    wanted = (channel_id or "").strip()
+    store = _load_accounts_store()
+    accounts = [a for a in (store.get("accounts") or []) if isinstance(a, dict)]
+    if wanted:
+        accounts = [
+            a for a in accounts
+            if (a.get("channel_id") or a.get("id") or "").strip() != wanted
+        ]
+        default_id = (store.get("default_id") or "").strip()
+        if default_id == wanted:
+            default_id = (accounts[0].get("channel_id") or accounts[0].get("id") or "").strip() if accounts else ""
+        _save_accounts_store({"version": 1, "default_id": default_id, "accounts": accounts})
+    else:
+        _save_accounts_store(_empty_store())
+        if YOUTUBE_TOKEN_PATH.is_file():
+            try:
+                YOUTUBE_TOKEN_PATH.unlink()
+            except OSError:
+                pass
+        if YOUTUBE_ACCOUNTS_PATH.is_file():
+            try:
+                # rewritten empty by _save_accounts_store already
+                pass
+            except OSError:
+                pass
     with _lock:
-        global _pending
-        _pending = None
+        global _pending, _pending_creds, _pending_channels
+        if not wanted:
+            _pending = None
+            _pending_creds = None
+            _pending_channels = []
     return status()
 
 
 def set_channel(channel_id: str, title: str = "") -> dict[str, Any]:
+    """Set the default upload channel, or finish adding a pending OAuth channel."""
+    global _pending_creds, _pending_channels
     cid = (channel_id or "").strip()
     label = (title or "").strip()
-    if cid and not label:
-        try:
-            for item in list_channels().get("channels") or []:
-                if item.get("id") == cid:
-                    label = item.get("title") or ""
-                    break
-        except Exception:
-            pass
-    save_settings({"youtube_channel_id": cid, "youtube_channel_title": label})
+    with _lock:
+        pending_creds = _pending_creds
+        pending_channels = list(_pending_channels or [])
+    if pending_creds and cid:
+        match = next((c for c in pending_channels if c.get("id") == cid), None)
+        if match is None and pending_channels:
+            raise RuntimeError(
+                "That channel is not on the Google account you just signed in with. "
+                "Pick one from the list, or Connect again."
+            )
+        if not label and match:
+            label = match.get("title") or ""
+        existing = connected_accounts()
+        _upsert_account(
+            channel_id=cid,
+            channel_title=label,
+            credentials=pending_creds,
+            custom_url=(match or {}).get("custom_url") or "",
+            thumbnail=(match or {}).get("thumbnail") or "",
+            make_default=len(existing) == 0,
+        )
+        with _lock:
+            _pending_creds = None
+            _pending_channels = []
+        return status()
+    if not cid:
+        raise RuntimeError("Select a YouTube channel id.")
+    store = _load_accounts_store()
+    accounts = [a for a in (store.get("accounts") or []) if isinstance(a, dict)]
+    match_entry = None
+    for item in accounts:
+        if (item.get("channel_id") or item.get("id") or "").strip() == cid:
+            match_entry = item
+            break
+    if match_entry is None:
+        raise RuntimeError(
+            "That YouTube channel is not connected. Click Add YouTube channel / Connect "
+            "and sign in with the Google account for that channel."
+        )
+    if label:
+        match_entry = dict(match_entry)
+        match_entry["channel_title"] = label
+        accounts = [
+            match_entry if (a.get("channel_id") or a.get("id") or "").strip() == cid else a
+            for a in accounts
+        ]
+    _save_accounts_store({"version": 1, "default_id": cid, "accounts": accounts})
     return status()
 
 
 def list_channels(*, force: bool = False) -> dict[str, Any]:
-    if not is_connected() and not force:
-        return {"ok": False, "connected": False, "channels": []}
-    try:
-        youtube = _youtube_service()
-        resp = youtube.channels().list(part="id,snippet", mine=True, maxResults=50).execute()
-    except Exception as exc:
-        from googleapiclient.errors import HttpError
-
-        if isinstance(exc, HttpError):
-            raise RuntimeError(_format_http_error(exc)) from exc
-        raise
-    channels = []
-    for item in resp.get("items") or []:
-        snippet = item.get("snippet") or {}
-        thumbs = snippet.get("thumbnails") or {}
-        thumb = (thumbs.get("default") or thumbs.get("medium") or {}).get("url") or ""
-        channels.append(
-            {
-                "id": item.get("id") or "",
-                "title": snippet.get("title") or "",
-                "custom_url": snippet.get("customUrl") or "",
-                "thumbnail": thumb,
-            }
-        )
-    return {"ok": True, "connected": True, "channels": channels}
+    """Return connected channels (multi-account store). force kept for API compat."""
+    del force  # connected store does not need a live Google round-trip
+    accounts = connected_accounts()
+    with _lock:
+        pending_channels = list(_pending_channels or [])
+        has_pending = _pending_creds is not None
+    channels = [
+        {
+            "id": a.get("channel_id") or a.get("id") or "",
+            "title": a.get("title") or a.get("channel_title") or "",
+            "custom_url": a.get("custom_url") or "",
+            "thumbnail": a.get("thumbnail") or "",
+            "is_default": bool(a.get("is_default")),
+        }
+        for a in accounts
+    ]
+    return {
+        "ok": True,
+        "connected": bool(accounts) or has_pending,
+        "channels": channels,
+        "accounts": accounts,
+        "pending_channel_pick": bool(has_pending and pending_channels),
+        "pending_channels": pending_channels if has_pending else [],
+    }
 
 
 def status() -> dict[str, Any]:
     settings = load_settings()
-    connected = is_connected()
+    # Ensure legacy token migrates before we report connection state.
+    store = _load_accounts_store()
+    accounts = connected_accounts()
+    connected = bool(accounts)
     pending = _pending_flow() is not None
-    channels: list[dict[str, Any]] = []
+    with _lock:
+        pending_pick = _pending_creds is not None and bool(_pending_channels)
+        pending_channels = list(_pending_channels or []) if pending_pick else []
     error = ""
-    if connected:
-        try:
-            channels = list_channels().get("channels") or []
-        except Exception as exc:
-            error = str(exc)
-    channel_id = (settings.get("youtube_channel_id") or "").strip()
-    channel_title = (settings.get("youtube_channel_title") or "").strip()
-    if channel_id and not channel_title:
-        for item in channels:
-            if item.get("id") == channel_id:
-                channel_title = item.get("title") or ""
-                break
+    default = _find_account_entry("", prefer_default=True)
+    channel_id = ((default or {}).get("channel_id") or (default or {}).get("id") or "").strip()
+    channel_title = ((default or {}).get("channel_title") or "").strip()
+    if not channel_id:
+        channel_id = (settings.get("youtube_channel_id") or "").strip()
+        channel_title = channel_title or (settings.get("youtube_channel_title") or "").strip()
+    channels = [
+        {
+            "id": a.get("channel_id") or a.get("id") or "",
+            "title": a.get("title") or a.get("channel_title") or "",
+            "custom_url": a.get("custom_url") or "",
+            "thumbnail": a.get("thumbnail") or "",
+            "is_default": bool(a.get("is_default")),
+        }
+        for a in accounts
+    ]
+    if pending_pick:
+        # Offer channels from the in-progress Google sign-in so the user can finish add.
+        for item in pending_channels:
+            if not any(c.get("id") == item.get("id") for c in channels):
+                channels.append(
+                    {
+                        "id": item.get("id") or "",
+                        "title": item.get("title") or "",
+                        "custom_url": item.get("custom_url") or "",
+                        "thumbnail": item.get("thumbnail") or "",
+                        "is_default": False,
+                        "pending": True,
+                    }
+                )
+    msg = "YouTube connected."
+    if not connected and pending_pick:
+        msg = "Signed in — pick which channel to add, then it becomes available for uploads."
+    elif not connected:
+        msg = (
+            "Open studio_connect_url in your system browser to sign in. "
+            "Do not use an in-app popup."
+        )
+    elif pending_pick:
+        msg = "Add another channel: pick it from the list to finish connecting."
     return {
         "ok": True,
         "connected": connected,
         "has_client": has_client(),
         "pending": pending,
+        "pending_channel_pick": pending_pick,
         "channel_id": channel_id,
         "channel_title": channel_title,
+        "default_channel_id": channel_id,
         "channels": channels,
+        "accounts": accounts,
         "auto_upload": bool(settings.get("youtube_auto_upload")),
         "delete_file_after_upload": normalize_bool(
             settings.get("youtube_delete_file_after_upload"), True
@@ -519,14 +934,9 @@ def status() -> dict[str, Any]:
         "redirect_uri": oauth_redirect_uri(),
         "error": error,
         "token_path": str(YOUTUBE_TOKEN_PATH),
-        "message": (
-            "YouTube connected."
-            if connected
-            else (
-                "Open studio_connect_url in your system browser to sign in. "
-                "Do not use an in-app popup."
-            )
-        ),
+        "accounts_path": str(YOUTUBE_ACCOUNTS_PATH),
+        "message": msg,
+        "account_count": len(accounts),
     }
 
 
@@ -709,26 +1119,71 @@ def job_auto_upload(project_id: str) -> bool:
     return bool(load_settings().get("youtube_auto_upload"))
 
 
-def _picked_channel(project_id: str, channels: list[dict[str, Any]]) -> dict[str, str]:
-    meta = load_meta(project_id)
-    wanted = (meta.get("youtube_channel_id") or load_settings().get("youtube_channel_id") or "").strip()
-    if not channels:
+def _picked_channel(
+    project_id: str,
+    *,
+    channel_id: str | None = None,
+    require_channel: bool = False,
+) -> dict[str, str]:
+    """Resolve which connected channel to upload to (explicit → project → default)."""
+    accounts = connected_accounts()
+    if not accounts:
         raise RuntimeError(
-            "This Google account has no YouTube channel. Create one on YouTube, then reconnect."
+            "No YouTube channel connected. Open Connect YouTube in Settings (system browser), "
+            f"or {connect_page_url()} — MCP cannot show a popup."
+        )
+    meta = load_meta(project_id)
+    wanted = (
+        (channel_id or "").strip()
+        or (meta.get("youtube_channel_id") or "").strip()
+        or (load_settings().get("youtube_channel_id") or "").strip()
+    )
+    if require_channel and len(accounts) > 1 and not (channel_id or "").strip() and not (meta.get("youtube_channel_id") or "").strip():
+        listing = ", ".join(
+            f"{a.get('title') or a.get('channel_title') or a.get('channel_id')} [{a.get('channel_id') or a.get('id')}]"
+            + (" (default)" if a.get("is_default") else "")
+            for a in accounts
+        )
+        raise RuntimeError(
+            "Multiple YouTube channels are connected. Ask the user which channel/account to "
+            f"publish to, then pass channel_id. Connected: {listing}"
         )
     if wanted:
-        match = next((c for c in channels if c.get("id") == wanted), None)
+        match = next(
+            (
+                a
+                for a in accounts
+                if (a.get("channel_id") or a.get("id") or "") == wanted
+            ),
+            None,
+        )
         if not match:
             raise RuntimeError(
-                "Selected YouTube channel is not available on this Google account. "
-                "Reconnect in Settings and pick that channel in the browser."
+                "Selected YouTube channel is not connected. Add it in Settings "
+                "(Add YouTube channel), or pick another channel_id from list_youtube_channels."
             )
-        return {"id": match["id"], "title": match.get("title") or ""}
-    if len(channels) == 1:
-        only = channels[0]
-        save_settings({"youtube_channel_id": only["id"], "youtube_channel_title": only.get("title") or ""})
-        return {"id": only["id"], "title": only.get("title") or ""}
-    raise RuntimeError("Select a YouTube channel in Settings before uploading.")
+        return {
+            "id": match.get("channel_id") or match.get("id") or "",
+            "title": match.get("title") or match.get("channel_title") or "",
+        }
+    if len(accounts) == 1:
+        only = accounts[0]
+        cid = only.get("channel_id") or only.get("id") or ""
+        title = only.get("title") or only.get("channel_title") or ""
+        store = _load_accounts_store()
+        _save_accounts_store(
+            {
+                "version": 1,
+                "default_id": cid,
+                "accounts": store.get("accounts") or [],
+            }
+        )
+        return {"id": cid, "title": title}
+    default = next((a for a in accounts if a.get("is_default")), accounts[0])
+    return {
+        "id": default.get("channel_id") or default.get("id") or "",
+        "title": default.get("title") or default.get("channel_title") or "",
+    }
 
 
 def _prepare_youtube_thumbnail(src: Path, project_id: str) -> Path:
@@ -813,9 +1268,17 @@ def upload_project_video(
     description: str | None = None,
     tags: Any = None,
     aspect: str | None = None,
+    channel_id: str | None = None,
+    *,
+    require_channel: bool = False,
     progress=None,
 ) -> dict[str, Any]:
-    """Upload a finished mp4 (preferred aspect, else last render / script_final.mp4). Raises on failure."""
+    """Upload a finished mp4 (preferred aspect, else last render / script_final.mp4). Raises on failure.
+
+    channel_id selects which connected YouTube account/channel receives the upload.
+    When omitted, uses the job override, then the workspace default channel.
+    require_channel=True (MCP) refuses ambiguous multi-channel uploads without an explicit id.
+    """
     _require_google()
     from googleapiclient.errors import HttpError
     from googleapiclient.http import MediaFileUpload
@@ -836,12 +1299,16 @@ def upload_project_video(
     title_text = (title or meta.get("title") or meta.get("topic") or project_id).strip()[:100]
     desc_text = _compose_description(meta, description)
     tag_list = _resolve_tags(meta, tags)
+    channel = _picked_channel(
+        project_id,
+        channel_id=channel_id,
+        require_channel=require_channel,
+    )
     if progress:
-        progress(f"Uploading to YouTube as {privacy}…")
+        ch_label = channel.get("title") or channel.get("id") or "YouTube"
+        progress(f"Uploading to {ch_label} as {privacy}…")
     try:
-        channels = list_channels().get("channels") or []
-        channel = _picked_channel(project_id, channels)
-        youtube = _youtube_service()
+        youtube = _youtube_service(channel_id=channel.get("id") or "")
         snippet: dict[str, Any] = {
             "title": title_text,
             "description": desc_text,
@@ -863,7 +1330,8 @@ def upload_project_video(
             status_obj, response = request.next_chunk()
             if status_obj and progress:
                 pct = int(status_obj.progress() * 100)
-                progress(f"Uploading to YouTube as {privacy}… {pct}%")
+                ch_label = channel.get("title") or channel.get("id") or "YouTube"
+                progress(f"Uploading to {ch_label} as {privacy}… {pct}%")
     except Exception as exc:
         from googleapiclient.errors import HttpError as _HttpError
 

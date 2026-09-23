@@ -338,11 +338,12 @@ def handshake_instructions() -> str:
         "comfyui_workflow_loaded. delete_comfyui_workflow removes the uploaded JSON. "
         "If image_provider is comfyui, call generate_illustrations "
         "or generate_illustrations_with_flux — Studio POSTs to ComfyUI and does not fal. "
-        "YouTube: youtube_connect returns a URL to open in the SYSTEM browser (no popup). "
-        "youtube_status, list_youtube_channels, set_youtube_channel, youtube_disconnect, "
-        "youtube_finish_oauth, set_project_youtube, "
+        "YouTube: youtube_connect returns a URL to open in the SYSTEM browser (no popup) and ADDS a channel "
+        "(existing channels stay). youtube_status, list_youtube_channels, set_youtube_channel (default), "
+        "youtube_disconnect(channel_id?), youtube_finish_oauth, set_project_youtube, "
         "upload_to_youtube(project_id, privacy_status=private|unlisted|public, aspect?, "
-        "title?, description?, tags?) — uses stored youtube_description / youtube_keywords / "
+        "title?, description?, tags?, channel_id?) — when multiple channels are connected, ASK the user "
+        "which channel and pass channel_id (required). Uses stored youtube_description / youtube_keywords / "
         "youtube_hashtags from meta when description/tags omitted. "
         "rename_video(project_id, title, update_youtube=true, rename_folder=false) updates "
         "Studio meta title and, when uploaded, the live YouTube title. "
@@ -1621,17 +1622,17 @@ def build_mcp() -> "FastMCP":
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def youtube_status() -> dict:
-        """YouTube connection status: connected, selected channel, auto-upload default, privacy default, and the browser connect URL. No popup."""
+        """YouTube connection status: connected accounts/channels, default channel, auto-upload, privacy, and the browser connect URL. No popup. Use list_youtube_channels before upload_to_youtube when multiple channels may be connected."""
         return yt.status()
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def list_youtube_channels() -> dict:
-        """List YouTube channels on the connected Google account. Connect first via youtube_connect (open the URL in a system browser)."""
+        """List connected YouTube channels/accounts (each may have its own OAuth token). Includes is_default. Call before upload_to_youtube when more than one channel may be connected, then ask the user which channel_id to publish to."""
         return yt.list_channels()
 
     @mcp.tool
     def youtube_connect() -> dict:
-        """Start YouTube OAuth. Open the returned auth_url or studio_connect_url in your SYSTEM/default browser — MCP cannot show a popup or Electron window. Studio receives the 127.0.0.1 loopback callback. After sign-in, call list_youtube_channels then set_youtube_channel(channel_id). If the browser shows a code or redirect URL instead of auto-callback, call youtube_finish_oauth."""
+        """Start YouTube OAuth to ADD another channel (or the first). Open the returned auth_url or studio_connect_url in your SYSTEM/default browser — MCP cannot show a popup. After sign-in, Studio adds that channel; if Google returns several, call set_youtube_channel to finish. Existing channels stay connected. If the browser shows a code/redirect instead of auto-callback, call youtube_finish_oauth."""
         return yt.start_connect(open_browser=True)
 
     @mcp.tool
@@ -1643,13 +1644,13 @@ def build_mcp() -> "FastMCP":
         return yt.finish_oauth_paste(blob)
 
     @mcp.tool
-    def youtube_disconnect() -> dict:
-        """Disconnect YouTube: delete the stored Google token. Does not change client id/secret."""
-        return yt.disconnect()
+    def youtube_disconnect(channel_id: str = "") -> dict:
+        """Disconnect YouTube. Pass channel_id to remove one connected channel; omit to disconnect all. Does not change client id/secret."""
+        return yt.disconnect(channel_id=channel_id)
 
     @mcp.tool
     def set_youtube_channel(channel_id: str, title: str = "") -> dict:
-        """Select which YouTube channel uploads go to after youtube_connect. channel_id from list_youtube_channels. Same as PUT /api/youtube/channel."""
+        """Set the default YouTube channel for uploads (and finish adding a channel after OAuth when Google listed several). channel_id from list_youtube_channels. Same as PUT /api/youtube/channel."""
         return yt.set_channel(channel_id, title=title)
 
     @mcp.tool
@@ -1659,7 +1660,7 @@ def build_mcp() -> "FastMCP":
         youtube_privacy: str = "",
         youtube_channel_id: str = "",
     ) -> dict:
-        """Per-job YouTube override (same as PATCH /api/projects/{id}). youtube_auto_upload true|false, youtube_privacy private|unlisted|public, optional youtube_channel_id. Empty strings leave that field unchanged."""
+        """Per-job YouTube override (same as PATCH /api/projects/{id}). youtube_auto_upload true|false, youtube_privacy private|unlisted|public, optional youtube_channel_id (which connected channel this job uploads to). Empty strings leave that field unchanged."""
         return write_project_youtube(
             project_id,
             auto_upload=youtube_auto_upload if youtube_auto_upload != "" else None,
@@ -1675,8 +1676,13 @@ def build_mcp() -> "FastMCP":
         description: str = "",
         tags: str | list[str] = "",
         aspect: str = "",
+        channel_id: str = "",
     ) -> dict:
-        """Upload this job's finished mp4 to the selected YouTube channel. Prefer aspect 16:9 or 9:16 when both exist; otherwise last render / script_final.mp4. privacy_status must be private, unlisted, or public (default unlisted). Title defaults to the job topic/title. Description defaults to meta youtube_description (then summary/topic); tags default to meta youtube_keywords (API tags). Hashtags from meta youtube_hashtags are appended to the description when missing. Pass description/tags to override. Does not re-render. Requires youtube_connect first."""
+        """Upload this job's finished mp4 to a connected YouTube channel.
+
+        IMPORTANT: When more than one YouTube channel/account is connected, you MUST ask the user which channel to publish to, then pass channel_id from list_youtube_channels (or set youtube_channel_id via set_project_youtube first). Omitting channel_id with multiple channels and no per-job override raises an error — do not guess the channel.
+
+        Prefer aspect 16:9 or 9:16 when both exist; otherwise last render / script_final.mp4. privacy_status must be private, unlisted, or public (default unlisted). Title defaults to the job topic/title. Description defaults to meta youtube_description; tags default to meta youtube_keywords. Requires youtube_connect first."""
         return yt.upload_project_video(
             project_id,
             privacy_status=privacy_status or None,
@@ -1684,6 +1690,8 @@ def build_mcp() -> "FastMCP":
             description=description or None,
             tags=tags if tags != "" else None,
             aspect=aspect or None,
+            channel_id=channel_id or None,
+            require_channel=True,
         )
 
     @mcp.tool

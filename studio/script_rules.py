@@ -537,31 +537,29 @@ MUSIC
 - shuffle_job_music(project_id) re-rolls the track; it does not re-render.
 - Volume is Settings music_volume_pct, not per-track.
 
-YOUTUBE (system browser OAuth, no popup)
+YOUTUBE (system browser OAuth, no popup; multiple channels supported)
 - Google Cloud OAuth redirect URI must include exactly:
   http://127.0.0.1:7878/api/youtube/oauth/callback
   (Desktop app client, or Web client with that Authorized redirect URI).
-- youtube_connect: starts OAuth and returns auth_url + studio_connect_url. OPEN THAT URL
-  in the system/default browser. MCP cannot show a popup or in-app window. Studio
-  listens on 127.0.0.1 for the callback. webbrowser.open is used; never an Electron popup.
+- youtube_connect: ADDS a YouTube channel (existing stay). Returns auth_url + studio_connect_url.
+  OPEN THAT URL in the system/default browser. MCP cannot show a popup. Studio listens for the
+  callback. If Google lists several channels for that sign-in, finish with set_youtube_channel.
 - youtube_finish_oauth(code= or url=): if the browser shows a code/redirect URL instead of
   auto-callback, paste it here (same as POST /api/youtube/oauth/code).
-- youtube_status / list_youtube_channels: after connect, list channels and pick one with
-  set_youtube_channel(channel_id) or update_studio_settings(youtube_channel_id=...).
-- youtube_disconnect: drop the stored Google token.
+- youtube_status / list_youtube_channels: lists connected channels (each with its own token) and
+  which is_default. set_youtube_channel(channel_id) sets the workspace default.
+- youtube_disconnect(channel_id?): remove one channel, or all when omitted.
 - update_studio_settings(youtube_auto_upload=true|false, youtube_privacy=private|unlisted|public,
   hands_off=true|false, hands_off_interval_hours=)
   sets Studio defaults. Auto-upload default privacy is unlisted. Hands-off does not change that
   default — it overrides youtube_privacy=private on hands-off jobs only.
 - set_project_youtube(project_id, youtube_auto_upload?, youtube_privacy?, youtube_channel_id?)
-  overrides auto-upload for ONE job (same as GUI PATCH).
-- upload_to_youtube(project_id, privacy_status="private"|"unlisted"|"public", title?, description?,
-  tags?, aspect?)
-  uploads a finished mp4. Prefer aspect 16:9 or 9:16 when both renders exist; otherwise last
-  render / script_final.mp4. Default privacy is unlisted (job override or Settings; hands-off
-  jobs are private). Uses stored meta youtube_description / youtube_keywords / youtube_hashtags
-  when description/tags are omitted (falls back to summary/topic). ChatGPT Desktop must pass
-  privacy_status explicitly when the user wants private, unlisted, or public.
+  overrides auto-upload / channel for ONE job (same as GUI PATCH).
+- upload_to_youtube(project_id, privacy_status=..., title?, description?, tags?, aspect?, channel_id?)
+  uploads a finished mp4. When multiple channels are connected, ASK the user which account/channel
+  and pass channel_id (required unless the job already has youtube_channel_id). Prefer aspect
+  16:9 or 9:16 when both renders exist. Default privacy is unlisted. Uses stored meta
+  youtube_description / youtube_keywords / youtube_hashtags when description/tags are omitted.
 
 PROMPTS PAGE KEYS (list_prompts / get_prompts / update_prompt / save_prompts / reset_prompt)
 Overrides live in user_data/prompts.json and apply on the next generate — no restart

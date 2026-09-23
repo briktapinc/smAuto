@@ -12,6 +12,7 @@ const FORBIDDEN_NAMES = new Set([
   "auth.json",
   "members.json",
   "youtube_token.json",
+  "youtube_accounts.json",
   "ngrok.pid",
   "ngrok_traffic_policy.json",
   "gpu.lock",

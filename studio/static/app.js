@@ -3556,6 +3556,8 @@ function applyLocalTtsStatus(data) {
 
 let ytPollTimer = null;
 let ytConnected = false;
+let ytChannelsCache = [];
+let ytDefaultChannelId = "";
 
 function youtubePrivacyForUpload() {
   return (
@@ -3734,6 +3736,27 @@ function fillWatchYoutube() {
   }
 }
 
+function fillJobYoutubeChannelSelect() {
+  const sel = $("#job-yt-channel");
+  if (!sel) return;
+  const channels = ytChannelsCache || [];
+  const selected =
+    (current?.youtube_channel_id || "").trim()
+    || ytDefaultChannelId
+    || "";
+  if (!channels.length) {
+    sel.innerHTML = `<option value="">${ytConnected ? "No channels connected" : "Connect in Settings"}</option>`;
+    return;
+  }
+  sel.innerHTML = channels.map((c) => {
+    const id = c.id || c.channel_id || "";
+    const title = c.title || c.channel_title || id;
+    const def = c.is_default || id === ytDefaultChannelId ? " (default)" : "";
+    const pending = c.pending ? " (pick to add)" : "";
+    return `<option value="${esc(id)}"${id === selected ? " selected" : ""}>${esc(title)}${def}${pending}</option>`;
+  }).join("");
+}
+
 function fillJobYoutube() {
   const auto = $("#job-yt-auto");
   const priv = $("#job-yt-privacy");
@@ -3741,6 +3764,7 @@ function fillJobYoutube() {
   if (!current) return;
   if (auto) auto.checked = !!current.youtube_auto_upload;
   if (priv && current.youtube_privacy) priv.value = current.youtube_privacy;
+  fillJobYoutubeChannelSelect();
   fillYoutubeMetaFields(current);
   syncYoutubeUploadButtons();
   fillWatchYoutube();
@@ -3760,37 +3784,63 @@ function fillJobYoutube() {
 }
 
 function renderYoutube(data) {
-  ytConnected = !!data?.connected;
+  ytConnected = !!(data?.accounts?.length || (data?.connected && (data.channels || []).some((c) => !c.pending)));
+  ytChannelsCache = data.channels || data.accounts || [];
+  ytDefaultChannelId = data.default_channel_id || data.channel_id || "";
   syncYoutubeUploadButtons();
   fillWatchYoutube();
+  fillJobYoutubeChannelSelect();
   const status = $("#yt-status");
   if (status) {
-    if (data.connected) {
+    const n = data.account_count ?? (data.accounts || []).length;
+    if (data.pending_channel_pick) {
+      status.textContent = "Signed in — pick a channel below to finish adding it.";
+    } else if (n > 0 || data.connected) {
       const ch = data.channel_title || data.channel_id || "";
       status.textContent = data.error
         ? `Connected, but listing channels failed: ${data.error}`
-        : (ch ? `Connected · ${ch}` : "Connected. Pick a channel.");
+        : (n > 1
+          ? `Connected · ${n} channels · default: ${ch || "pick one"}`
+          : (ch ? `Connected · ${ch}` : "Connected. Pick a default channel."));
     } else if (data.pending) {
       status.textContent = "Waiting for Google sign-in in your system browser…";
     } else {
       status.textContent = data.has_client
-        ? "Not connected. Click Connect YouTube (opens your browser)."
+        ? "Not connected. Click Add YouTube channel (opens your browser)."
         : "Add a Google Cloud client ID and secret, save settings, then Connect.";
     }
   }
   const sel = $("#yt-channel");
   if (sel) {
     const channels = data.channels || [];
-    const currentId = data.channel_id || "";
+    const currentId = data.channel_id || data.default_channel_id || "";
     if (!channels.length) {
-      sel.innerHTML = `<option value="">${data.connected ? "No channels on this account" : "Connect first, then pick a channel"}</option>`;
+      sel.innerHTML = `<option value="">${data.connected || data.pending_channel_pick ? "No channels yet — finish sign-in" : "Connect first, then pick a channel"}</option>`;
     } else {
-      sel.innerHTML = channels.map((c) => (
-        `<option value="${esc(c.id)}"${c.id === currentId ? " selected" : ""}>${esc(c.title || c.id)}</option>`
-      )).join("");
-      if (currentId && !channels.some((c) => c.id === currentId)) {
+      sel.innerHTML = channels.map((c) => {
+        const id = c.id || c.channel_id || "";
+        const title = c.title || c.channel_title || id;
+        const mark = c.is_default || id === currentId ? " (default)" : "";
+        const pending = c.pending ? " — finish add" : "";
+        return `<option value="${esc(id)}"${id === currentId ? " selected" : ""}>${esc(title)}${mark}${pending}</option>`;
+      }).join("");
+      if (currentId && !channels.some((c) => (c.id || c.channel_id) === currentId)) {
         sel.insertAdjacentHTML("afterbegin", `<option value="${esc(currentId)}" selected>${esc(data.channel_title || currentId)}</option>`);
       }
+    }
+  }
+  const list = $("#yt-account-list");
+  if (list) {
+    const accounts = data.accounts || [];
+    if (!accounts.length) {
+      list.innerHTML = "";
+    } else {
+      list.innerHTML = accounts.map((a) => {
+        const id = a.channel_id || a.id || "";
+        const title = a.title || a.channel_title || id;
+        const def = a.is_default ? " · default" : "";
+        return `<li>${esc(title)}${def}</li>`;
+      }).join("");
     }
   }
   const auto = $("#yt-auto");
@@ -4010,15 +4060,24 @@ $("#yt-connect")?.addEventListener("click", async () => {
         ? `Browser opened. If nothing happened, copy this URL: ${data.auth_url}`
         : `Open this URL in your system browser: ${data.auth_url}`;
     }
-    toast(data.browser_opened ? "Opened your system browser. Sign in to YouTube." : "Copy the connect URL into your browser.");
+    toast(data.browser_opened ? "Opened your system browser. Sign in to add a YouTube channel." : "Copy the connect URL into your browser.");
     startYtPoll();
   } catch (err) { toast(err.message, true); }
 });
 
 $("#yt-disconnect")?.addEventListener("click", async () => {
+  const channelId = ($("#yt-channel")?.value || "").trim();
+  if (!channelId) return toast("Select a channel to remove, or use Disconnect all.", true);
+  try {
+    renderYoutube(await api("/api/youtube/disconnect", { method: "POST", body: { channel_id: channelId } }));
+    toast("Channel removed.");
+  } catch (err) { toast(err.message, true); }
+});
+
+$("#yt-disconnect-all")?.addEventListener("click", async () => {
   try {
     renderYoutube(await api("/api/youtube/disconnect", { method: "POST", body: {} }));
-    toast("YouTube disconnected.");
+    toast("All YouTube channels disconnected.");
   } catch (err) { toast(err.message, true); }
 });
 
@@ -4027,7 +4086,21 @@ $("#yt-channel")?.addEventListener("change", async (e) => {
   const title = e.target.selectedOptions?.[0]?.textContent || "";
   try {
     renderYoutube(await api("/api/youtube/channel", { method: "PUT", body: { channel_id: channelId, title } }));
-    toast(channelId ? `Uploads will go to ${title}` : "Channel cleared.");
+    toast(channelId ? `Default uploads go to ${title.replace(/\s*\(default\)\s*$/, "").replace(/\s*— finish add\s*$/, "")}` : "Channel cleared.");
+  } catch (err) { toast(err.message, true); }
+});
+
+$("#job-yt-channel")?.addEventListener("change", async (e) => {
+  if (!current) return;
+  const channelId = e.target.value || "";
+  try {
+    current = await api(`/api/projects/${current.id}`, {
+      method: "PATCH",
+      body: { youtube_channel_id: channelId },
+    });
+    fillJobYoutube();
+    const label = e.target.selectedOptions?.[0]?.textContent || channelId || "default";
+    toast(`This job will upload to ${label}.`);
   } catch (err) { toast(err.message, true); }
 });
 
@@ -4094,6 +4167,7 @@ async function sendToYoutube(source) {
   if (!ytConnected) return toast("Connect YouTube in Settings first.", true);
   const aspect = uploadAspectForSource(source);
   const privacy = youtubePrivacyForUpload();
+  const channelId = ($("#job-yt-channel")?.value || current?.youtube_channel_id || ytDefaultChannelId || "").trim();
   const ytMeta = readYoutubeMetaFromDom(source === "watch" ? "job" : "job");
   try {
     await persistYoutubeMeta("job");
@@ -4115,6 +4189,7 @@ async function sendToYoutube(source) {
         aspect: aspect || "",
         description: ytMeta.youtube_description || "",
         tags: ytMeta.youtube_keywords || "",
+        channel_id: channelId || "",
       },
     });
     await loadJob(current.id, { poll: false });

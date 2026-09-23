@@ -43,6 +43,7 @@ _REFUSED_NAMES = frozenset(
         "auth.json",
         "settings.json",
         "youtube_token.json",
+        "youtube_accounts.json",
         ".env",
         ".env.local",
         "credentials.json",

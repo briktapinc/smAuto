@@ -4,6 +4,7 @@
 !macro customInstall
   Delete "$APPDATA\Stickman Automation\user_data\settings.json"
   Delete "$APPDATA\Stickman Automation\user_data\youtube_token.json"
+  Delete "$APPDATA\Stickman Automation\user_data\youtube_accounts.json"
   Delete "$APPDATA\Stickman Automation\user_data\auth.json"
   Delete "$APPDATA\Stickman Automation\user_data\members.json"
   Delete "$APPDATA\Stickman Automation\user_data\ngrok.pid"

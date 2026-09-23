@@ -543,6 +543,11 @@
                 <input type="checkbox" id="job-yt-auto" />
                 Auto-upload when video completes
               </label>
+              <label class="field-compact">Channel
+                <select id="job-yt-channel">
+                  <option value="">Default channel</option>
+                </select>
+              </label>
               <label class="field-compact">Privacy
                 <select id="job-yt-privacy">
                   <option value="private">private</option>
@@ -1039,7 +1044,7 @@
         <details class="card settings-card" id="youtube-card">
           <summary class="lib-heading settings-card-summary">YouTube</summary>
           <div class="settings-fields">
-            <p class="hint settings-lead">Connect opens your <strong>system browser</strong> (not a popup). Add a Google Cloud OAuth client (Desktop app, or Web with redirect <code id="yt-oauth-callback-hint">http://127.0.0.1:7878/api/youtube/oauth/callback</code>). Client id/secret can also come from env <code>YOUTUBE_CLIENT_ID</code> / <code>YOUTUBE_CLIENT_SECRET</code>. Tokens stay in <code>user_data/youtube_token.json</code>.</p>
+            <p class="hint settings-lead">Connect opens your <strong>system browser</strong> (not a popup) and <strong>adds</strong> a YouTube channel — you can connect several accounts/channels. One is the default for auto-upload. Add a Google Cloud OAuth client (Desktop app, or Web with redirect <code id="yt-oauth-callback-hint">http://127.0.0.1:7878/api/youtube/oauth/callback</code>). Client id/secret can also come from env <code>YOUTUBE_CLIENT_ID</code> / <code>YOUTUBE_CLIENT_SECRET</code>. Tokens stay in <code>user_data/youtube_accounts.json</code> (legacy <code>youtube_token.json</code> migrates automatically).</p>
             <div class="field-group">
               <label>YouTube client ID
                 <input name="youtube_client_id" form="settings-form" autocomplete="off" />
@@ -1048,18 +1053,20 @@
                 <input name="youtube_client_secret" form="settings-form" type="password" placeholder="••••" autocomplete="off" />
               </label>
               <div class="row settings-actions">
-                <button type="button" id="yt-connect" class="primary">Connect YouTube</button>
-                <button type="button" id="yt-disconnect">Disconnect</button>
+                <button type="button" id="yt-connect" class="primary">Add YouTube channel</button>
+                <button type="button" id="yt-disconnect">Remove selected</button>
+                <button type="button" id="yt-disconnect-all">Disconnect all</button>
               </div>
               <p id="yt-status" class="meta">Not connected.</p>
               <p class="hint" id="yt-auth-url" hidden></p>
             </div>
             <div class="field-group">
-              <label>Channel
+              <label>Default channel
                 <select id="yt-channel">
                   <option value="">Connect first, then pick a channel</option>
                 </select>
               </label>
+              <ul id="yt-account-list" class="hint" style="margin:.4rem 0 0;padding-left:1.1rem"></ul>
               <label class="check">
                 <input type="checkbox" id="yt-auto" name="youtube_auto_upload" form="settings-form" />
                 Auto-upload when video completes

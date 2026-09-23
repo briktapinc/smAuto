@@ -66,6 +66,7 @@
           "!**/auth.json",
           "!**/members.json",
           "!**/youtube_token.json",
+          "!**/youtube_accounts.json",
           "!**/audit.log",
           "!**/prompts.json",
           "!**/topics.json",

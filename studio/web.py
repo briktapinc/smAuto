@@ -363,6 +363,10 @@ class YoutubeChannelBody(BaseModel):
     title: str = ""
 
 
+class YoutubeDisconnectBody(BaseModel):
+    channel_id: str = ""
+
+
 class YoutubeUploadBody(BaseModel):
     privacy_status: str = ""
     title: str = ""
@@ -370,6 +374,7 @@ class YoutubeUploadBody(BaseModel):
     tags: str | list[str] | None = None
     keywords: str | list[str] | None = None
     aspect: str = ""
+    channel_id: str = ""
 
 
 class PromptResetBody(BaseModel):
@@ -1909,8 +1914,8 @@ def create_app() -> FastAPI:
             raise _err(exc)
 
     @app.post("/api/youtube/disconnect")
-    def youtube_disconnect():
-        return yt.disconnect()
+    def youtube_disconnect(body: YoutubeDisconnectBody = YoutubeDisconnectBody()):
+        return yt.disconnect(channel_id=body.channel_id or "")
 
     @app.put("/api/youtube/channel")
     def youtube_channel(body: YoutubeChannelBody):
@@ -1929,6 +1934,7 @@ def create_app() -> FastAPI:
                 description=body.description or None,
                 tags=body.tags if body.tags is not None else body.keywords,
                 aspect=body.aspect or None,
+                channel_id=body.channel_id or None,
             )
         except FileNotFoundError as exc:
             raise HTTPException(404, str(exc))

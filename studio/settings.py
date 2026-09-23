@@ -966,7 +966,15 @@ def public_settings() -> dict[str, Any]:
     data["mcp_pin_set"] = bool(data.get("mcp_pin_hash"))
     data.pop("mcp_pin_hash", None)
     data["mcp_pin"] = ""
-    data["youtube_connected"] = YOUTUBE_TOKEN_PATH.is_file()
+    data["youtube_connected"] = False
+    try:
+        from studio.youtube import is_connected as youtube_is_connected
+
+        data["youtube_connected"] = bool(youtube_is_connected())
+    except Exception:
+        from studio.paths import YOUTUBE_ACCOUNTS_PATH
+
+        data["youtube_connected"] = YOUTUBE_TOKEN_PATH.is_file() or YOUTUBE_ACCOUNTS_PATH.is_file()
     try:
         from studio.auth import get_auth_config
 
