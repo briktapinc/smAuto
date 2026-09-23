@@ -115,15 +115,9 @@ def get_stripe_client():
 
 
 def _studio_base_url() -> str:
-    settings = load_settings()
-    host = (settings.get("host") or "127.0.0.1").strip() or "127.0.0.1"
-    if host in ("0.0.0.0", "::", "[::]"):
-        host = "127.0.0.1"
-    port = int(settings.get("port") or 7878)
-    public = (settings.get("public_base_url") or settings.get("ngrok_url") or "").strip().rstrip("/")
-    if public.startswith("http"):
-        return public
-    return f"http://{host}:{port}"
+    from studio.settings import resolve_public_base_url
+
+    return resolve_public_base_url()
 
 
 def public_billing_config() -> dict[str, Any]:

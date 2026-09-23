@@ -3,5 +3,7 @@ services:
     image: lowerquality/gentle
     container_name: lazykh-gentle
     ports:
-      - "8766:8765"
+      # Localhost only — Studio talks to Gentle; do not expose publicly via nginx.
+      - "127.0.0.1:8766:8765"
     restart: unless-stopped
+

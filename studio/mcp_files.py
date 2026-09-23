@@ -447,24 +447,26 @@ def _resolve_kind_path(
 
 
 def _studio_base_url() -> str:
-    from studio.settings import load_settings
+    from studio.settings import resolve_public_base_url
 
-    settings = load_settings()
-    host = str(settings.get("host") or "127.0.0.1").strip() or "127.0.0.1"
-    if host in {"0.0.0.0", "::"}:
-        host = "127.0.0.1"
-    port = int(settings.get("port") or 7878)
-    local = f"http://{host}:{port}"
+    # Prefer configured PUBLIC_BASE_URL; fall back to live ngrok, then local host:port.
+    base = resolve_public_base_url()
     try:
+        from studio.settings import load_settings, local_base_url
+
+        settings = load_settings()
+        configured = (settings.get("public_base_url") or "").strip()
+        if configured:
+            return base
         from studio.ngrok_tunnel import ngrok_status
 
         status = ngrok_status(reveal_password=False)
         public = str(status.get("public_url") or "").rstrip("/")
         if public and status.get("running"):
             return public
+        return local_base_url(settings)
     except Exception:
-        pass
-    return local
+        return base
 
 
 def _relative_display(path: Path) -> str:

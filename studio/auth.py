@@ -257,9 +257,9 @@ def _cookie_secure() -> bool:
     if flag in ("0", "false", "no", "off"):
         return False
     try:
-        from studio.settings import load_settings
+        from studio.settings import resolve_public_base_url
 
-        base = (load_settings().get("public_base_url") or "").strip().lower()
+        base = resolve_public_base_url().strip().lower()
         if base.startswith("https://"):
             return True
     except Exception:

@@ -130,15 +130,9 @@ def _truthy(value: Any, default: bool = False) -> bool:
 
 
 def _base_url(settings: dict[str, Any] | None = None) -> str:
-    data = settings or _settings()
-    base = (data.get("public_base_url") or data.get("ngrok_url") or "").strip().rstrip("/")
-    if base:
-        return base
-    host = data.get("host") or "127.0.0.1"
-    if host in ("0.0.0.0", "::", "[::]"):
-        host = "127.0.0.1"
-    port = int(data.get("port") or 7878)
-    return f"http://{host}:{port}"
+    from studio.settings import resolve_public_base_url
+
+    return resolve_public_base_url(settings)
 
 
 def _render(template: str, context: dict[str, Any]) -> str:

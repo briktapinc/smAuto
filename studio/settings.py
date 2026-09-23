@@ -4,7 +4,10 @@ import json
 import os
 from typing import Any
 
-from studio.paths import SETTINGS_PATH, YOUTUBE_TOKEN_PATH, ensure_dirs
+from studio.paths import SETTINGS_PATH, YOUTUBE_TOKEN_PATH, ensure_dirs, load_repo_dotenv
+
+DEFAULT_LISTEN_HOST = "127.0.0.1"
+DEFAULT_LISTEN_PORT = 7878
 
 # Secrets never returned raw from public_settings / MCP get_studio_settings.
 SECRET_KEYS = frozenset({
@@ -121,8 +124,8 @@ DEFAULTS = {
     "character_size": "large",
     "stickman_head_color": "#FAE02E",
     "music_volume_pct": 15,
-    "host": "127.0.0.1",
-    "port": 7878,
+    "host": DEFAULT_LISTEN_HOST,
+    "port": DEFAULT_LISTEN_PORT,
     "default_aspect": "16:9",
     "youtube_client_id": "",
     "youtube_client_secret": "",
@@ -135,7 +138,7 @@ DEFAULTS = {
     "hands_off_interval_hours": 0.0,
     "hands_off_min_queue": 5,
     "ngrok_url": "",
-    "ngrok_local_port": 7878,
+    "ngrok_local_port": DEFAULT_LISTEN_PORT,
     "ngrok_autostart": False,
     "ngrok_basic_auth_user": "bubblepod",
     "ngrok_basic_auth_password": "",
@@ -519,7 +522,93 @@ def character_size_scale(value: str | None, default: str = "large") -> float:
     return CHARACTER_SIZE_SCALES[normalize_character_size(value, default=default)]
 
 
+def app_env() -> str:
+    """Deployment mode: production | local | development | … (from BUBBLEPOD_ENV or APP_ENV)."""
+    load_repo_dotenv()
+    raw = (
+        os.environ.get("BUBBLEPOD_ENV")
+        or os.environ.get("APP_ENV")
+        or os.environ.get("LAZYKH_ENV")
+        or ""
+    ).strip().lower()
+    return raw or "local"
+
+
+def is_production() -> bool:
+    return app_env() in ("production", "prod")
+
+
+def _first_env(*names: str) -> str:
+    for name in names:
+        val = (os.environ.get(name) or "").strip()
+        if val:
+            return val
+    return ""
+
+
+def normalize_listen_host(value: str | None, default: str = DEFAULT_LISTEN_HOST) -> str:
+    host = str(value or "").strip() or default
+    return host
+
+
+def normalize_listen_port(value: Any, default: int = DEFAULT_LISTEN_PORT) -> int:
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        port = default
+    if port < 1 or port > 65535:
+        return default
+    return port
+
+
+def loopback_display_host(host: str | None) -> str:
+    """Host used in absolute local URLs (never 0.0.0.0 / ::)."""
+    h = str(host or DEFAULT_LISTEN_HOST).strip() or DEFAULT_LISTEN_HOST
+    if h in ("0.0.0.0", "::", "[::]"):
+        return DEFAULT_LISTEN_HOST
+    return h
+
+
+def local_base_url(settings: dict[str, Any] | None = None) -> str:
+    """http://HOST:PORT for this Studio process (port is not hardcoded)."""
+    data = settings if settings is not None else {}
+    if settings is None:
+        # Avoid recursion through load_settings(); callers usually pass settings.
+        host = _first_env("BUBBLEPOD_HOST", "LAZYKH_HOST", "HOST") or DEFAULT_LISTEN_HOST
+        port_raw = _first_env("BUBBLEPOD_PORT", "LAZYKH_PORT", "PORT")
+        port = normalize_listen_port(port_raw or DEFAULT_LISTEN_PORT)
+        return f"http://{loopback_display_host(host)}:{port}"
+    host = loopback_display_host(data.get("host"))
+    port = normalize_listen_port(data.get("port"), DEFAULT_LISTEN_PORT)
+    return f"http://{host}:{port}"
+
+
+def resolve_public_base_url(settings: dict[str, Any] | None = None) -> str:
+    """Single source for absolute public URLs (Stripe, email, OAuth, CORS).
+
+    Priority:
+      1. PUBLIC_BASE_URL / BUBBLEPOD_PUBLIC_BASE_URL / LAZYKH_PUBLIC_BASE_URL (env)
+      2. settings.public_base_url
+      3. settings.ngrok_url (optional tunnel)
+      4. local http://HOST:PORT
+    """
+    load_repo_dotenv()
+    data = settings
+    if data is None:
+        data = load_settings()
+    for candidate in (
+        _first_env("PUBLIC_BASE_URL", "BUBBLEPOD_PUBLIC_BASE_URL", "LAZYKH_PUBLIC_BASE_URL"),
+        str(data.get("public_base_url") or "").strip(),
+        str(data.get("ngrok_url") or "").strip(),
+    ):
+        base = candidate.rstrip("/")
+        if base.lower().startswith("http://") or base.lower().startswith("https://"):
+            return base
+    return local_base_url(data)
+
+
 def _env_overrides() -> dict[str, Any]:
+    load_repo_dotenv()
     mapping = {
         "openai_api_key": "OPENAI_API_KEY",
         "elevenlabs_api_key": "ELEVENLABS_API_KEY",
@@ -531,7 +620,6 @@ def _env_overrides() -> dict[str, Any]:
         "stripe_publishable_key": "STRIPE_PUBLISHABLE_KEY",
         "stripe_webhook_secret": "STRIPE_WEBHOOK_SECRET",
         "stripe_price_id": "STRIPE_PRICE_ID",
-        "public_base_url": "BUBBLEPOD_PUBLIC_BASE_URL",
         "smtp_host": "SMTP_HOST",
         "smtp_user": "SMTP_USER",
         "smtp_password": "SMTP_PASSWORD",
@@ -539,11 +627,23 @@ def _env_overrides() -> dict[str, Any]:
         "email_from_name": "EMAIL_FROM_NAME",
         "email_reply_to": "EMAIL_REPLY_TO",
     }
-    out = {}
+    out: dict[str, Any] = {}
     for key, env in mapping.items():
         val = os.environ.get(env, "").strip()
         if val:
             out[key] = val
+    public = _first_env("PUBLIC_BASE_URL", "BUBBLEPOD_PUBLIC_BASE_URL", "LAZYKH_PUBLIC_BASE_URL")
+    if public:
+        out["public_base_url"] = public.rstrip("/")
+    host = _first_env("BUBBLEPOD_HOST", "LAZYKH_HOST", "HOST")
+    if host:
+        out["host"] = host
+    port_raw = _first_env("BUBBLEPOD_PORT", "LAZYKH_PORT", "PORT")
+    if port_raw:
+        try:
+            out["port"] = normalize_listen_port(port_raw)
+        except Exception:
+            pass
     fal = os.environ.get("FAL_KEY", "").strip() or os.environ.get("FAL_API_KEY", "").strip()
     if fal:
         out["fal_key"] = fal
@@ -556,6 +656,7 @@ def _env_overrides() -> dict[str, Any]:
 
 
 def load_settings() -> dict[str, Any]:
+    load_repo_dotenv()
     ensure_dirs()
     data = dict(DEFAULTS)
     if SETTINGS_PATH.is_file():
@@ -619,13 +720,14 @@ def load_settings() -> dict[str, Any]:
         normalize_public_url,
     )
 
-    data["port"] = normalize_local_port(data.get("port"), 7878)
-    data["host"] = str(data.get("host") or "127.0.0.1").strip() or "127.0.0.1"
+    data["port"] = normalize_local_port(data.get("port"), DEFAULT_LISTEN_PORT)
+    data["host"] = normalize_listen_host(data.get("host"), DEFAULT_LISTEN_HOST)
     data["ngrok_url"] = normalize_public_url(data.get("ngrok_url"))
     data["ngrok_local_port"] = normalize_local_port(
         data.get("ngrok_local_port"),
-        default=normalize_local_port(data.get("port"), 7878),
+        default=normalize_local_port(data.get("port"), DEFAULT_LISTEN_PORT),
     )
+    data["public_base_url"] = str(data.get("public_base_url") or "").strip().rstrip("/")
     data["ngrok_autostart"] = normalize_autostart(data.get("ngrok_autostart"))
     data["ngrok_basic_auth_user"] = str(data.get("ngrok_basic_auth_user") or "bubblepod").strip() or "bubblepod"
     data["ngrok_basic_auth_password"] = str(data.get("ngrok_basic_auth_password") or "")
@@ -718,7 +820,7 @@ def save_settings(updates: dict[str, Any]) -> dict[str, Any]:
             elif key == "port":
                 from studio.ngrok_tunnel import normalize_local_port
 
-                data[key] = normalize_local_port(value, 7878)
+                data[key] = normalize_local_port(value, DEFAULT_LISTEN_PORT)
             elif key == "ngrok_local_port":
                 from studio.ngrok_tunnel import normalize_local_port
 
@@ -756,6 +858,10 @@ def save_settings(updates: dict[str, Any]) -> dict[str, Any]:
             else:
                 data[key] = value
     # Do not persist env-only secrets over a blank form field unless provided.
+    # Drop ephemeral computed keys so they never land in settings.json.
+    data.pop("resolved_public_base_url", None)
+    data.pop("app_env", None)
+    data.pop("local_base_url", None)
     SETTINGS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return load_settings()
 
@@ -779,6 +885,8 @@ def public_settings() -> dict[str, Any]:
     data["stripe_price_currency"] = str(data.get("stripe_price_currency") or "usd")
     data["stripe_price_interval"] = str(data.get("stripe_price_interval") or "month")
     data["public_base_url"] = str(data.get("public_base_url") or "")
+    data["resolved_public_base_url"] = resolve_public_base_url(data)
+    data["app_env"] = app_env()
     data["membership_required"] = normalize_bool(data.get("membership_required"), True)
     data["membership_equal"] = True
     data["email_enabled"] = normalize_bool(data.get("email_enabled"), False)
@@ -816,14 +924,16 @@ def public_settings() -> dict[str, Any]:
         data["auth_username"] = get_auth_config().get("username") or "admin"
     except Exception:
         data["auth_username"] = "admin"
-    host = data.get("host") or "127.0.0.1"
-    if host in ("0.0.0.0", "::", "[::]"):
-        host = "127.0.0.1"
-    port = int(data.get("port") or 7878)
+    host = loopback_display_host(data.get("host"))
+    port = normalize_listen_port(data.get("port"), DEFAULT_LISTEN_PORT)
+    data["host"] = data.get("host") or DEFAULT_LISTEN_HOST
     data["port"] = port
-    data["admin_url"] = f"http://{host}:{port}/admin"
-    data["youtube_connect_url"] = f"http://{host}:{port}/api/youtube/connect"
-    data["youtube_oauth_callback"] = f"http://{host}:{port}/api/youtube/oauth/callback"
+    public = resolve_public_base_url(data)
+    data["resolved_public_base_url"] = public
+    data["admin_url"] = f"{public}/admin"
+    data["youtube_connect_url"] = f"{public}/api/youtube/connect"
+    data["youtube_oauth_callback"] = f"{public}/api/youtube/oauth/callback"
+    data["local_base_url"] = local_base_url(data)
     data["youtube_privacy_options"] = list(YOUTUBE_PRIVACY)
     data["auto_scheduler"] = normalize_auto_scheduler(data.get("auto_scheduler", True))
     data["hands_off"] = normalize_hands_off(data.get("hands_off"))
@@ -905,7 +1015,10 @@ def public_settings() -> dict[str, Any]:
             "running": False,
             "ngrok_found": False,
             "detail": "ngrok status unavailable",
-            "command": f'ngrok http {int(data.get("ngrok_local_port") or 7878)} --url {data.get("ngrok_url")}',
+            "command": (
+                f'ngrok http {int(data.get("ngrok_local_port") or data.get("port") or DEFAULT_LISTEN_PORT)} '
+                f'--url {data.get("ngrok_url")}'
+            ),
         }
         data["ngrok_command"] = data["ngrok"]["command"]
     try:

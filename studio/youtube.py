@@ -97,12 +97,10 @@ def _require_google():
 
 
 def studio_base_url() -> str:
-    settings = load_settings()
-    host = (settings.get("host") or "127.0.0.1").strip()
-    if host in ("0.0.0.0", "::", "[::]"):
-        host = "127.0.0.1"
-    port = int(settings.get("port") or 7878)
-    return f"http://{host}:{port}"
+    """Public base URL for OAuth redirects and absolute links (env/settings or local host:port)."""
+    from studio.settings import resolve_public_base_url
+
+    return resolve_public_base_url()
 
 
 def oauth_redirect_uri() -> str:

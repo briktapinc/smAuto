@@ -18,7 +18,18 @@ pip install -r requirements.txt
 python run_studio.py
 ```
 
-Studio opens at http://127.0.0.1:7878. Docker is optional: if `lowerquality/gentle` is already healthy on port 8766, Studio uses it; otherwise it starts a **local Gentle-compatible aligner** on that port so lip-sync still works.
+Studio opens at `http://127.0.0.1:$PORT` (default port **7878**, overridable via `BUBBLEPOD_PORT` / `PORT`). Docker is optional: if `lowerquality/gentle` is already healthy on port 8766, Studio uses it; otherwise it starts a **local Gentle-compatible aligner** on that port so lip-sync still works.
+
+### Public URL (local vs production)
+
+Copy `.env.example` → `.env` (gitignored). Absolute URLs (Stripe callbacks, email links, YouTube OAuth, CORS) use one resolver:
+
+| Mode | How |
+|------|-----|
+| **Local** | Leave `PUBLIC_BASE_URL` unset → `http://127.0.0.1:${BUBBLEPOD_PORT}` (or set `PUBLIC_BASE_URL=http://127.0.0.1:$PORT` explicitly). Electron always `loadURL`s loopback on that port. |
+| **Production** | `BUBBLEPOD_ENV=production` and `PUBLIC_BASE_URL=https://stickmanautomation.com` (no port). systemd `stickman-studio` loads the repo `.env`. |
+
+Aliases: `BUBBLEPOD_PUBLIC_BASE_URL`, `APP_ENV`, `BUBBLEPOD_HOST` / `HOST`, `BUBBLEPOD_PORT` / `PORT`.
 
 ### Desktop app (Electron)
 
@@ -29,7 +40,7 @@ npm install
 npm start
 ```
 
-`npm start` and `npm run electron` both launch a window on http://127.0.0.1:7878. If Studio is not already up, Electron starts `run_studio.py` as a child process. Closing the window stops **that** child; it will not kill a Studio you started yourself (it detects an existing `/api/health`).
+`npm start` and `npm run electron` both launch a window on `http://127.0.0.1:$PORT` (same `BUBBLEPOD_PORT` / `PORT` / settings as Studio). If Studio is not already up, Electron starts `run_studio.py` as a child process. Closing the window stops **that** child; it will not kill a Studio you started yourself (it detects an existing `/api/health`).
 
 Launch: `npm start` (or `npm run electron`). Build Windows NSIS: `npm run dist`. Build macOS `.dmg` / `.zip` **on a Mac**: `npm run dist:mac` (or `npm run dist:mac:unsigned` to skip code-signing discovery).
 

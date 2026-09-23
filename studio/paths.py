@@ -8,6 +8,39 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CODE_DIR = REPO_ROOT / "code"
 STUDIO_DIR = REPO_ROOT / "studio"
+_DOTENV_LOADED = False
+
+
+def load_repo_dotenv(*, override: bool = False) -> None:
+    """Load REPO_ROOT/.env into os.environ (does not override existing vars by default)."""
+    global _DOTENV_LOADED
+    if _DOTENV_LOADED and not override:
+        return
+    path = REPO_ROOT / ".env"
+    if not path.is_file():
+        _DOTENV_LOADED = True
+        return
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        _DOTENV_LOADED = True
+        return
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if override or key not in os.environ:
+            os.environ[key] = value
+    _DOTENV_LOADED = True
 
 
 def _resolve_user_data() -> Path:

@@ -662,26 +662,34 @@ class McpAuthASGIMiddleware:
 
 
 def _cors_origins() -> list[str]:
-    """Tight CORS for production; localhost retained for desktop/dev."""
+    """Tight CORS for production; localhost retained for desktop/dev (port from settings/env)."""
     import os
 
     raw = (os.environ.get("BUBBLEPOD_CORS_ORIGINS") or os.environ.get("LAZYKH_CORS_ORIGINS") or "").strip()
     if raw:
         return [o.strip() for o in raw.split(",") if o.strip()]
     origins = [
-        "http://127.0.0.1:7878",
-        "http://localhost:7878",
         "http://127.0.0.1:3000",
         "http://localhost:3000",
     ]
     try:
-        from studio.settings import load_settings
+        from studio.settings import load_settings, local_base_url, resolve_public_base_url
 
-        base = (load_settings().get("public_base_url") or "").strip().rstrip("/")
-        if base:
-            origins.append(base)
+        settings = load_settings()
+        local = local_base_url(settings)
+        origins.extend([local, local.replace("127.0.0.1", "localhost")])
+        public = resolve_public_base_url(settings)
+        if public:
+            origins.append(public)
     except Exception:
-        pass
+        from studio.settings import DEFAULT_LISTEN_PORT
+
+        origins.extend(
+            [
+                f"http://127.0.0.1:{DEFAULT_LISTEN_PORT}",
+                f"http://localhost:{DEFAULT_LISTEN_PORT}",
+            ]
+        )
     # Dedupe preserving order
     seen = set()
     out = []
@@ -1288,18 +1296,31 @@ def create_app() -> FastAPI:
         app feel stuck under frequent health checks. Pass ?full=1 for richer status.
         """
         from studio.gpu_lock import gpu_lock_public
-        from studio.settings import load_settings, normalize_auto_scheduler, normalize_hands_off
+        from studio.settings import (
+            DEFAULT_LISTEN_PORT,
+            app_env,
+            load_settings,
+            local_base_url,
+            loopback_display_host,
+            normalize_auto_scheduler,
+            normalize_hands_off,
+            normalize_listen_port,
+            resolve_public_base_url,
+        )
 
         settings = load_settings()
-        host = settings.get("host") or "127.0.0.1"
-        if host in ("0.0.0.0", "::", "[::]"):
-            host = "127.0.0.1"
-        port = int(settings.get("port") or 7878)
+        host = loopback_display_host(settings.get("host"))
+        port = normalize_listen_port(settings.get("port"), DEFAULT_LISTEN_PORT)
+        local = local_base_url(settings)
+        public = resolve_public_base_url(settings)
         out = {
             "ok": True,
             "host": host,
             "port": port,
-            "url": f"http://{host}:{port}/",
+            "url": f"{local}/",
+            "local_url": f"{local}/",
+            "public_base_url": public,
+            "app_env": app_env(),
             "gentle": gentle_status(),
             "mcp": "/mcp" if mcp_app is not None else None,
             "mcp_build": mcp_build,
@@ -2687,13 +2708,16 @@ def run() -> None:
         pass
 
     settings = load_settings()
-    host = (os.environ.get("BUBBLEPOD_HOST") or os.environ.get("LAZYKH_HOST") or "").strip() or (
+    host = (os.environ.get("BUBBLEPOD_HOST") or os.environ.get("LAZYKH_HOST") or os.environ.get("HOST") or "").strip() or (
         settings.get("host") or "127.0.0.1"
     )
     try:
-        port = int(os.environ.get("BUBBLEPOD_PORT") or os.environ.get("LAZYKH_PORT") or 0) or int(
-            settings.get("port") or 7878
-        )
+        port = int(
+            os.environ.get("BUBBLEPOD_PORT")
+            or os.environ.get("LAZYKH_PORT")
+            or os.environ.get("PORT")
+            or 0
+        ) or int(settings.get("port") or 7878)
     except (TypeError, ValueError):
         port = int(settings.get("port") or 7878)
     try:

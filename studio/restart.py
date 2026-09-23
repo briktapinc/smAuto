@@ -39,17 +39,19 @@ def keep_gentle_on_shutdown() -> bool:
 
 
 def studio_bind() -> tuple[str, int]:
-    """Host/port Studio should listen on (from settings, default 127.0.0.1:7878)."""
+    """Host/port Studio should listen on (from env/settings; default 127.0.0.1:7878)."""
     try:
-        from studio.settings import load_settings
+        from studio.settings import (
+            DEFAULT_LISTEN_HOST,
+            DEFAULT_LISTEN_PORT,
+            load_settings,
+            loopback_display_host,
+            normalize_listen_port,
+        )
 
         data = load_settings()
-        host = str(data.get("host") or "127.0.0.1").strip() or "127.0.0.1"
-        if host in ("0.0.0.0", "::", "[::]"):
-            host = "127.0.0.1"
-        port = int(data.get("port") or 7878)
-        if port < 1 or port > 65535:
-            port = 7878
+        host = loopback_display_host(data.get("host") or DEFAULT_LISTEN_HOST)
+        port = normalize_listen_port(data.get("port"), DEFAULT_LISTEN_PORT)
         return host, port
     except Exception:
         return "127.0.0.1", 7878

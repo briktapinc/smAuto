@@ -17,6 +17,7 @@ let healthWatch = null;
 let wasOffline = false;
 let studioPort = DEFAULT_PORT;
 
+/** Desktop always loads loopback; never PUBLIC_BASE_URL (that is for Stripe/email/OAuth). */
 function studioUrl() {
   return `http://${HOST}:${studioPort}`;
 }
@@ -61,6 +62,10 @@ function userDataRoot() {
 }
 
 function readStudioPort() {
+  const envPort = Number(
+    process.env.BUBBLEPOD_PORT || process.env.LAZYKH_PORT || process.env.PORT || 0
+  );
+  if (Number.isFinite(envPort) && envPort >= 1 && envPort <= 65535) return envPort;
   const candidates = [
     path.join(userDataRoot(), "listen_port.json"),
     path.join(userDataRoot(), "settings.json"),
@@ -75,8 +80,6 @@ function readStudioPort() {
       /* ignore */
     }
   }
-  const envPort = Number(process.env.BUBBLEPOD_PORT || process.env.LAZYKH_PORT || 0);
-  if (Number.isFinite(envPort) && envPort >= 1 && envPort <= 65535) return envPort;
   return DEFAULT_PORT;
 }
 
@@ -129,6 +132,10 @@ function studioEnv() {
   // Desktop .exe / Electron: single-user local app — no login, tenants, or Stripe SaaS.
   env.BUBBLEPOD_DESKTOP = "1";
   env.BUBBLEPOD_USER_DATA = userDataRoot();
+  // Keep Python child on the same loopback port Electron loads (never PUBLIC_BASE_URL).
+  env.BUBBLEPOD_HOST = HOST;
+  env.BUBBLEPOD_PORT = String(studioPort);
+  env.PORT = String(studioPort);
   // Packaged installer must not inherit API keys / ngrok / YouTube / Stripe from the host env.
   if (app.isPackaged) {
     for (const key of SECRET_ENV_KEYS) {
