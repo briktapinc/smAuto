@@ -2664,12 +2664,16 @@ function fillMcpSettings(data) {
   if (httpInput && data.http_url) httpInput.value = data.http_url;
   const publicInput = $("#mcp-public-url");
   if (publicInput) {
-    const pub = data.public_mcp_url || data.public_url || (data.ngrok && data.ngrok.running ? data.ngrok.mcp_url : "");
+    const pub = data.public_mcp_url || data.public_url || "";
     publicInput.value = pub || "";
     publicInput.placeholder = pub
       ? ""
-      : "Set PUBLIC_BASE_URL or start ngrok to expose /mcp";
+      : (data.public_tunnel === "tailscale"
+        ? "Start Tailscale Funnel to publish /mcp"
+        : "Start ngrok or select Tailscale");
   }
+  setTunnelRadios(data.public_tunnel || "");
+  if (data.tailscale) applyTailscaleStatus(data.tailscale);
   if (data.ngrok) applyNgrokStatus(data.ngrok);
   const stdioInput = $("#mcp-stdio-line");
   if (stdioInput && data.stdio_line) stdioInput.value = data.stdio_line;
@@ -2735,7 +2739,57 @@ async function copyText(text, label) {
   }
 }
 
+function setTunnelRadios(value) {
+  const want = value === "tailscale" || value === "ngrok" ? value : "";
+  document.querySelectorAll('input[name="public_tunnel"]').forEach((el) => {
+    el.checked = el.value === want;
+  });
+}
+
+function applyTailscaleStatus(data) {
+  const line = $("#tailscale-status-line");
+  if (!line || !data) return;
+  const found = data.tailscale_found ? "installed" : "not installed";
+  line.textContent = data.detail
+    ? `Tailscale: ${found}. ${data.detail}`
+    : `Tailscale: ${found}.`;
+}
+
 $("#mcp-refresh")?.addEventListener("click", () => loadMcpSettings());
+document.querySelectorAll('input[name="public_tunnel"]').forEach((el) => {
+  el.addEventListener("change", async () => {
+    if (!el.checked) return;
+    try {
+      const saved = await api("/api/settings", { method: "PUT", body: { public_tunnel: el.value } });
+      fillSettings(saved);
+      await loadMcpSettings();
+      toast(el.value === "tailscale" ? "Public MCP uses Tailscale." : "Public MCP uses Ngrok.");
+    } catch (err) {
+      toast(err.message || "Could not switch tunnel.", true);
+    }
+  });
+});
+$("#tailscale-start")?.addEventListener("click", async () => {
+  try {
+    const st = await api("/api/tailscale/start", { method: "POST", body: {} });
+    applyTailscaleStatus(st);
+    setTunnelRadios("tailscale");
+    await loadMcpSettings();
+    toast(st.detail || (st.running ? "Tailscale Funnel started." : "Funnel did not start."), !st.running);
+  } catch (err) {
+    toast(err.message || "Tailscale Funnel failed to start.", true);
+  }
+});
+$("#tailscale-stop")?.addEventListener("click", async () => {
+  try {
+    const st = await api("/api/tailscale/stop", { method: "POST", body: {} });
+    applyTailscaleStatus(st);
+    await loadMcpSettings();
+    toast(st.detail || "Tailscale Funnel stopped.", !st.ok && st.running);
+  } catch (err) {
+    toast(err.message || "Could not stop Tailscale Funnel.", true);
+  }
+});
 $("#mcp-copy-http")?.addEventListener("click", () => {
   copyText($("#mcp-http-url")?.value || lastMcpInfo?.http_url, "HTTP URL");
 });
@@ -2850,6 +2904,7 @@ async function startNgrok(extra = {}) {
       body,
     });
     applyNgrokStatus(st);
+    setTunnelRadios("ngrok");
     loadMcpSettings();
     if (st.running || st.ok) {
       const user = st.basic_auth_user || basic_auth_user || "bubblepod";
@@ -3204,6 +3259,8 @@ function fillSettings(data) {
   }
   const ngrokAuto = $("#ngrok-autostart");
   if (ngrokAuto) ngrokAuto.checked = !!data.ngrok_autostart;
+  if (data.tailscale) applyTailscaleStatus(data.tailscale);
+  setTunnelRadios(data.public_tunnel || "");
   if (data.ngrok) applyNgrokStatus(data.ngrok);
   else syncNgrokCommandPreview();
   const pinStatus = $("#mcp-pin-status");

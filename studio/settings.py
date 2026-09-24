@@ -146,6 +146,7 @@ DEFAULTS = {
     "per_user_concurrency": 1,
     "admin_concurrency": 1,
     "owner_priority": True,
+    "public_tunnel": "",
     "ngrok_url": "",
     "ngrok_local_port": DEFAULT_LISTEN_PORT,
     "ngrok_autostart": False,
@@ -655,21 +656,49 @@ def local_base_url(settings: dict[str, Any] | None = None) -> str:
     return f"http://{host}:{port}"
 
 
+def normalize_public_tunnel(value: Any) -> str:
+    """Which optional tunnel supplies the public MCP URL. Empty keeps the legacy order."""
+    raw = str(value or "").strip().lower()
+    if raw in ("ngrok", "tailscale"):
+        return raw
+    return ""
+
+
 def resolve_public_base_url(settings: dict[str, Any] | None = None) -> str:
-    """Single source for absolute public URLs (Stripe, email, OAuth, CORS).
+    """Single source for absolute public URLs (Stripe, email, OAuth, CORS, MCP).
 
     Priority:
       1. PUBLIC_BASE_URL / BUBBLEPOD_PUBLIC_BASE_URL / LAZYKH_PUBLIC_BASE_URL (env)
-      2. settings.public_base_url
-      3. settings.ngrok_url (optional tunnel)
-      4. local http://HOST:PORT
+      2. settings.public_tunnel, when set to ngrok or tailscale
+      3. settings.public_base_url
+      4. settings.ngrok_url (optional tunnel)
+      5. local http://HOST:PORT
     """
     load_repo_dotenv()
     data = settings
     if data is None:
         data = load_settings()
+    env_base = _first_env("PUBLIC_BASE_URL", "BUBBLEPOD_PUBLIC_BASE_URL", "LAZYKH_PUBLIC_BASE_URL")
+    if env_base.lower().startswith("http://") or env_base.lower().startswith("https://"):
+        return env_base.rstrip("/")
+    tunnel = normalize_public_tunnel(data.get("public_tunnel"))
+    if tunnel == "tailscale":
+        try:
+            from studio.tailscale_tunnel import tailscale_status
+
+            status = tailscale_status()
+            public = str(status.get("public_url") or "").strip().rstrip("/")
+            if status.get("running") and public.lower().startswith("https://"):
+                return public
+        except Exception:
+            pass
+        return local_base_url(data)
+    if tunnel == "ngrok":
+        ngrok = str(data.get("ngrok_url") or "").strip().rstrip("/")
+        if ngrok.lower().startswith("http://") or ngrok.lower().startswith("https://"):
+            return ngrok
+        return local_base_url(data)
     for candidate in (
-        _first_env("PUBLIC_BASE_URL", "BUBBLEPOD_PUBLIC_BASE_URL", "LAZYKH_PUBLIC_BASE_URL"),
         str(data.get("public_base_url") or "").strip(),
         str(data.get("ngrok_url") or "").strip(),
     ):
@@ -833,6 +862,7 @@ def load_settings() -> dict[str, Any]:
 
     data["port"] = normalize_local_port(data.get("port"), DEFAULT_LISTEN_PORT)
     data["host"] = normalize_listen_host(data.get("host"), DEFAULT_LISTEN_HOST)
+    data["public_tunnel"] = normalize_public_tunnel(data.get("public_tunnel"))
     data["ngrok_url"] = normalize_public_url(data.get("ngrok_url"))
     data["ngrok_local_port"] = normalize_local_port(
         data.get("ngrok_local_port"),
@@ -934,6 +964,8 @@ def save_settings(updates: dict[str, Any]) -> dict[str, Any]:
                 data[key] = normalize_max_concurrent_jobs(value, 1)
             elif key == "owner_priority":
                 data[key] = normalize_bool(value, True)
+            elif key == "public_tunnel":
+                data[key] = normalize_public_tunnel(value)
             elif key == "ngrok_url":
                 from studio.ngrok_tunnel import normalize_public_url
 
@@ -1173,6 +1205,19 @@ def public_settings() -> dict[str, Any]:
     from studio.gpu_lock import gpu_lock_public
 
     data["gpu_lock"] = gpu_lock_public()
+    try:
+        from studio.tailscale_tunnel import tailscale_status
+
+        data["tailscale"] = tailscale_status()
+    except Exception:
+        data["tailscale"] = {
+            "ok": False,
+            "running": False,
+            "tailscale_found": False,
+            "public_url": "",
+            "mcp_url": "",
+            "detail": "Tailscale status unavailable",
+        }
     try:
         from studio.ngrok_tunnel import ngrok_status
 

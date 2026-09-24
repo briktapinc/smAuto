@@ -858,7 +858,20 @@
           <details class="card settings-card admin-only" id="settings-mcp-card" hidden>
             <summary class="lib-heading settings-card-summary">MCP</summary>
             <div class="settings-fields">
-              <p class="hint settings-lead">Connect ChatGPT Desktop (HTTP), remote agents over ngrok, Claude Desktop / Claude Code (stdio), or Codex. Same tools as the GUI.</p>
+              <p class="hint settings-lead">Connect ChatGPT Desktop (HTTP), remote agents over Ngrok or Tailscale, Claude Desktop / Claude Code (stdio), or Codex. Same tools as the GUI.</p>
+              <div class="field-group">
+                <span class="settings-label">Public tunnel</span>
+                <div class="row">
+                  <label><input type="radio" name="public_tunnel" value="ngrok" /> Ngrok</label>
+                  <label><input type="radio" name="public_tunnel" value="tailscale" /> Tailscale</label>
+                </div>
+                <p class="meta" id="tailscale-status-line">Tailscale: …</p>
+                <div class="row settings-actions">
+                  <button type="button" id="tailscale-start" class="primary">Start Tailscale Funnel</button>
+                  <button type="button" id="tailscale-stop">Stop Funnel</button>
+                </div>
+                <p class="hint" id="tunnel-hint">Ngrok uses the Basic username and password on the Ngrok card. Tailscale Funnel uses the MCP PIN on the public <code>https://…ts.net/mcp</code> URL.</p>
+              </div>
               <div class="field-group">
                 <div class="settings-status mcp-status-row">
                   <div class="settings-pills">
@@ -877,7 +890,7 @@
                 <p class="meta" id="mcp-pin-status">PIN: …</p>
                 <p class="hint" id="mcp-auth-hint">How HTTP <code>/mcp</code> authenticates (pick one):
                   (1) <strong>Ngrok Basic only</strong> — username/password from Settings → Ngrok; do <em>not</em> also send <code>Authorization: Bearer</code> (many clients drop Basic when both are set).
-                  (2) <strong>MCP PIN</strong> — <code>?mcp_pin=…</code> or header <code>X-MCP-Pin</code> (optional even with ngrok).
+                  (2) <strong>MCP PIN</strong> — <code>?mcp_pin=…</code> or header <code>X-MCP-Pin</code> (this is what Tailscale Funnel uses).
                   (3) <strong>Studio JWT</strong> — <code>Authorization: Bearer &lt;jwt&gt;</code> after login (per-member).
                   PIN is hashed after save. Stdio Claude/Codex does not need HTTP auth.</p>
               </div>
@@ -890,11 +903,11 @@
                 </label>
                 <label>Public MCP URL
                   <div class="row mcp-copy-row">
-                    <input id="mcp-public-url" type="text" readonly value="" placeholder="PUBLIC_BASE_URL/mcp or ngrok when running" />
+                    <input id="mcp-public-url" type="text" readonly value="" placeholder="Select Ngrok or Tailscale" />
                     <button type="button" id="mcp-copy-public">Copy</button>
                   </div>
                 </label>
-                <p class="hint" id="mcp-chatgpt-hint">Remote HTTP clients use the <strong>Public MCP URL</strong> (production domain via PUBLIC_BASE_URL, or ngrok when running). Local LAN: loopback HTTP endpoint. After a Studio update: fully quit ChatGPT, reopen, type <code>/mcp</code>, start a new thread.</p>
+                <p class="hint" id="mcp-chatgpt-hint">The Public MCP URL follows the selected tunnel: Ngrok or Tailscale Funnel. Tailscale clients send the MCP PIN. Ngrok clients use Basic auth from the Ngrok card. After a Studio update: fully quit ChatGPT, reopen, type <code>/mcp</code>, start a new thread.</p>
               </div>
               <div class="field-group">
                 <label>Stdio command (Claude / Codex)

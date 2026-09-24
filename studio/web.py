@@ -254,6 +254,7 @@ class SettingsBody(BaseModel):
     admin_concurrency: int | None = None
     owner_priority: bool | None = None
     port: int | None = None
+    public_tunnel: str | None = None
     ngrok_url: str | None = None
     ngrok_local_port: int | None = None
     ngrok_autostart: bool | None = None
@@ -1859,6 +1860,8 @@ def create_app() -> FastAPI:
             updates["admin_concurrency"] = body.admin_concurrency
         if body.owner_priority is not None:
             updates["owner_priority"] = body.owner_priority
+        if body.public_tunnel is not None:
+            updates["public_tunnel"] = body.public_tunnel
         if body.ngrok_url is not None:
             updates["ngrok_url"] = body.ngrok_url
         if body.ngrok_local_port is not None:
@@ -2799,6 +2802,37 @@ def create_app() -> FastAPI:
         except Exception as exc:
             raise _err(exc)
 
+    @app.get("/api/tailscale")
+    def get_tailscale(request: Request):
+        studio_auth.require_admin(request)
+        from studio.tailscale_tunnel import tailscale_status
+
+        return tailscale_status(fresh=True)
+
+    @app.post("/api/tailscale/start")
+    def start_tailscale_route(request: Request):
+        studio_auth.require_admin(request)
+        from studio.settings import load_settings, save_settings
+        from studio.tailscale_tunnel import start_tailscale_funnel
+
+        try:
+            settings = load_settings()
+            port = int(settings.get("port") or 7878)
+            save_settings({"public_tunnel": "tailscale"})
+            return start_tailscale_funnel(port)
+        except Exception as exc:
+            raise _err(exc)
+
+    @app.post("/api/tailscale/stop")
+    def stop_tailscale_route(request: Request):
+        studio_auth.require_admin(request)
+        from studio.tailscale_tunnel import stop_tailscale_funnel
+
+        try:
+            return stop_tailscale_funnel()
+        except Exception as exc:
+            raise _err(exc)
+
     @app.get("/api/ngrok")
     def get_ngrok(request: Request):
         studio_auth.require_admin(request)
@@ -2815,8 +2849,10 @@ def create_app() -> FastAPI:
             save_ngrok_settings,
             start_ngrok,
         )
+        from studio.settings import save_settings
 
         try:
+            save_settings({"public_tunnel": "ngrok"})
             payload = body or NgrokBody()
             if (
                 payload.url is not None
