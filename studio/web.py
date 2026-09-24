@@ -1041,13 +1041,13 @@ def create_app() -> FastAPI:
     def billing_success():
         if studio_auth.is_desktop_mode():
             return _redir("/")
-        return _redir("/pricing?checkout=success")
+        return _redir("/?step=subscription&checkout=success")
 
     @app.get("/billing/cancel", response_class=HTMLResponse)
     def billing_cancel():
         if studio_auth.is_desktop_mode():
             return _redir("/")
-        return _redir("/pricing?checkout=canceled")
+        return _redir("/?step=subscription&checkout=canceled")
 
     @app.post("/api/auth/login")
     def auth_login(body: LoginBody, response: Response, request: Request):
@@ -1315,7 +1315,7 @@ def create_app() -> FastAPI:
                 **public_session(user),
                 "stripe_configured": False,
                 "catalog": {},
-                "pricing_url": "",
+                "pricing_url": "/?step=subscription",
                 "desktop_mode": True,
                 "auth_required": False,
             }
@@ -1323,7 +1323,7 @@ def create_app() -> FastAPI:
             **public_session(user),
             "stripe_configured": stripe_configured(),
             "catalog": public_billing_config(),
-            "pricing_url": "/pricing",
+            "pricing_url": "/?step=subscription",
         }
 
     @app.post("/api/billing/checkout")
@@ -1347,6 +1347,56 @@ def create_app() -> FastAPI:
         user = studio_auth.require_session(request)
         try:
             return create_portal_session(user)
+        except Exception as exc:
+            raise _err(exc)
+
+    class BillingCancelBody(BaseModel):
+        at_period_end: bool = True
+
+    @app.post("/api/billing/cancel")
+    def billing_cancel_sub(body: BillingCancelBody, request: Request):
+        """Unsubscribe: cancel at period end by default (keeps access until then)."""
+        _reject_desktop_saas("Cancel subscription")
+        from studio.members import public_session
+        from studio.stripe_billing import cancel_subscription, public_billing_config, stripe_configured
+
+        user = studio_auth.require_session(request)
+        if (user.get("role") or "") == "admin":
+            return {"ok": True, "skipped": True, "reason": "Admins already have full access."}
+        try:
+            result = cancel_subscription(user, at_period_end=bool(body.at_period_end))
+            # Refresh session fields for the client.
+            from studio.members import get_user_by_id
+
+            fresh = get_user_by_id(user["id"]) or user
+            return {
+                **result,
+                **public_session(fresh),
+                "stripe_configured": stripe_configured(),
+                "catalog": public_billing_config(),
+            }
+        except Exception as exc:
+            raise _err(exc)
+
+    @app.post("/api/billing/reactivate")
+    def billing_reactivate(request: Request):
+        """Undo a pending cancel-at-period-end."""
+        _reject_desktop_saas("Reactivate subscription")
+        from studio.members import get_user_by_id, public_session
+        from studio.stripe_billing import public_billing_config, reactivate_subscription, stripe_configured
+
+        user = studio_auth.require_session(request)
+        if (user.get("role") or "") == "admin":
+            return {"ok": True, "skipped": True, "reason": "Admins already have full access."}
+        try:
+            result = reactivate_subscription(user)
+            fresh = get_user_by_id(user["id"]) or user
+            return {
+                **result,
+                **public_session(fresh),
+                "stripe_configured": stripe_configured(),
+                "catalog": public_billing_config(),
+            }
         except Exception as exc:
             raise _err(exc)
 

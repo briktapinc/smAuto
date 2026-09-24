@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import threading
@@ -990,6 +991,7 @@ def _maybe_cleanup_after_upload(project_id: str, uploaded_video: Path | None = N
     dir_targets: list[Path] = [
         Path(str(prefix) + "_frames"),
         Path(str(shorts) + "_frames"),
+        project_dir(project_id) / "_yt_upload",
     ]
     for asp in ALL_ASPECTS:
         dir_targets.append(frames_dir(project_id, asp))
@@ -1043,6 +1045,103 @@ def _video_path(project_id: str, aspect: str | None = None) -> Path:
         if renders.get(asp, {}).get("ready"):
             return final_video_path(project_id, asp)
     return alias
+
+
+def youtube_seo_stem(
+    title: str,
+    *,
+    tags: list[str] | None = None,
+    aspect: str | None = None,
+    max_len: int = 120,
+) -> str:
+    """Build a human/SEO filename stem from the video title + a few keyword tags.
+
+    Example: \"Why Do We Dream?\" + [\"sleep\", \"brain\"] + 16:9
+    → Why-Do-We-Dream-sleep-brain-16x9
+    """
+    import unicodedata
+
+    tokens: list[str] = []
+    seen: set[str] = set()
+
+    def _ascii_words(raw: str) -> list[str]:
+        # Fold accents so Déjà → Deja, keep searchable ASCII words.
+        folded = unicodedata.normalize("NFKD", raw or "")
+        folded = "".join(ch for ch in folded if not unicodedata.combining(ch))
+        return re.findall(r"[A-Za-z0-9]+", folded)
+
+    def _push(raw: str, *, limit: int | None = None) -> None:
+        for part in _ascii_words(raw):
+            key = part.casefold()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            tokens.append(part[:40])
+            if limit is not None and len(tokens) >= limit:
+                return
+
+    _push(title or "", limit=18)
+    extras = 0
+    for tag in tags or []:
+        before = len(tokens)
+        _push(str(tag), limit=len(tokens) + 4)
+        extras += max(0, len(tokens) - before)
+        if extras >= 4:
+            break
+    if aspect:
+        asp = normalize_aspect(aspect).replace(":", "x")
+        if asp.casefold() not in seen:
+            tokens.append(asp)
+    stem = "-".join(tokens).strip("-")
+    if not stem:
+        stem = "video"
+    if len(stem) > max_len:
+        stem = stem[:max_len].rstrip("-")
+    return stem or "video"
+
+
+def _yt_upload_staging_dir(project_id: str) -> Path:
+    path = project_dir(project_id) / "_yt_upload"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _stage_seo_upload_copy(
+    src: Path,
+    project_id: str,
+    *,
+    title: str,
+    tags: list[str] | None = None,
+    aspect: str | None = None,
+    suffix: str | None = None,
+) -> Path:
+    """Copy src into a SEO-named file so YouTube receives the right words as the upload filename."""
+    ext = suffix if suffix is not None else (src.suffix or ".mp4")
+    if not ext.startswith("."):
+        ext = f".{ext}"
+    stem = youtube_seo_stem(title, tags=tags, aspect=aspect)
+    dest = _yt_upload_staging_dir(project_id) / f"{stem}{ext}"
+    if dest.exists():
+        dest.unlink(missing_ok=True)
+    shutil.copy2(src, dest)
+    return dest
+
+
+def _cleanup_seo_staging(project_id: str, *paths: Path | None) -> None:
+    for path in paths:
+        if path is None:
+            continue
+        try:
+            if path.is_file() and path.parent.name == "_yt_upload":
+                path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    staging = project_dir(project_id) / "_yt_upload"
+    try:
+        if staging.is_dir() and not any(staging.iterdir()):
+            staging.rmdir()
+    except OSError:
+        pass
 
 
 def _thumb_candidates(project_id: str, aspect: str | None = None) -> list[Path]:
@@ -1186,19 +1285,33 @@ def _picked_channel(
     }
 
 
-def _prepare_youtube_thumbnail(src: Path, project_id: str) -> Path:
+def _prepare_youtube_thumbnail(
+    src: Path,
+    project_id: str,
+    *,
+    title: str = "",
+    tags: list[str] | None = None,
+    aspect: str | None = None,
+) -> Path:
     """Ensure a JPEG under YouTube's 2MiB cap. Logs final byte size."""
     import logging
 
     from studio.image_normalize import YT_THUMB_MAX_BYTES, write_jpeg_under
 
     log = logging.getLogger("studio.youtube")
-    dest = project_dir(project_id) / "_yt_thumb_upload.jpg"
+    if (title or "").strip():
+        dest = (
+            _yt_upload_staging_dir(project_id)
+            / f"{youtube_seo_stem(title, tags=tags, aspect=aspect)}.jpg"
+        )
+    else:
+        dest = project_dir(project_id) / "_yt_thumb_upload.jpg"
     meta = write_jpeg_under(src, dest, max_bytes=YT_THUMB_MAX_BYTES)
     log.info(
-        "YouTube thumbnail prepared project=%s src=%s bytes=%s quality=%s size=%sx%s",
+        "YouTube thumbnail prepared project=%s src=%s dest=%s bytes=%s quality=%s size=%sx%s",
         project_id,
         src.name,
+        dest.name,
         meta.get("bytes"),
         meta.get("quality"),
         meta.get("width"),
@@ -1299,6 +1412,9 @@ def upload_project_video(
     title_text = (title or meta.get("title") or meta.get("topic") or project_id).strip()[:100]
     desc_text = _compose_description(meta, description)
     tag_list = _resolve_tags(meta, tags)
+    upload_aspect = wanted_aspect or meta.get("last_render_aspect") or ""
+    staged_video: Path | None = None
+    staged_thumb: Path | None = None
     channel = _picked_channel(
         project_id,
         channel_id=channel_id,
@@ -1308,6 +1424,18 @@ def upload_project_video(
         ch_label = channel.get("title") or channel.get("id") or "YouTube"
         progress(f"Uploading to {ch_label} as {privacy}…")
     try:
+        # Stage a SEO-named copy so YouTube receives title/keyword words as the file name
+        # (canonical on-disk script_final_*.mp4 stays unchanged for Studio).
+        staged_video = _stage_seo_upload_copy(
+            video,
+            project_id,
+            title=title_text,
+            tags=tag_list,
+            aspect=str(upload_aspect or "") or None,
+            suffix=".mp4",
+        )
+        if progress:
+            progress(f"Upload file: {staged_video.name}")
         youtube = _youtube_service(channel_id=channel.get("id") or "")
         snippet: dict[str, Any] = {
             "title": title_text,
@@ -1323,7 +1451,7 @@ def upload_project_video(
                 "selfDeclaredMadeForKids": False,
             },
         }
-        media = MediaFileUpload(str(video), mimetype="video/mp4", resumable=True, chunksize=1024 * 1024)
+        media = MediaFileUpload(str(staged_video), mimetype="video/mp4", resumable=True, chunksize=1024 * 1024)
         request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
         response = None
         while response is None:
@@ -1342,6 +1470,7 @@ def upload_project_video(
             save_meta(project_id, failed)
         except Exception:
             pass
+        _cleanup_seo_staging(project_id, staged_video, staged_thumb)
         raise RuntimeError(message) from exc
     video_id = (response or {}).get("id") or ""
     url = f"https://youtu.be/{video_id}" if video_id else ""
@@ -1352,7 +1481,14 @@ def upload_project_video(
         if progress:
             progress("Setting YouTube thumbnail…")
         try:
-            prepared = _prepare_youtube_thumbnail(thumbs[0], project_id)
+            prepared = _prepare_youtube_thumbnail(
+                thumbs[0],
+                project_id,
+                title=title_text,
+                tags=tag_list,
+                aspect=str(upload_aspect or "") or None,
+            )
+            staged_thumb = prepared if prepared.parent.name == "_yt_upload" else None
             thumb_meta = _set_youtube_thumbnail(youtube, video_id, prepared, progress=progress)
         except Exception as exc:
             # Surface clearly — never silently skip; do not change privacy / stop uploader.
@@ -1375,7 +1511,8 @@ def upload_project_video(
         "description": desc_text,
         "tags": tag_list,
         "file": video.name,
-        "aspect": wanted_aspect or meta.get("last_render_aspect") or "",
+        "upload_filename": staged_video.name if staged_video else video.name,
+        "aspect": upload_aspect,
         "channel_id": channel.get("id") or "",
         "channel_title": channel.get("title") or "",
         "thumbnail_error": thumb_error,
@@ -1403,6 +1540,7 @@ def upload_project_video(
             result["local_file_delete_error"] = cleanup.get("error")
         stored["youtube"] = result
     save_meta(project_id, stored)
+    _cleanup_seo_staging(project_id, staged_video, staged_thumb)
     return result
 
 

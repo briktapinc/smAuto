@@ -298,11 +298,17 @@ $("#btn-manage")?.addEventListener("click", async () => {
 });
 
 $("#btn-cancel")?.addEventListener("click", async () => {
+  if (!confirm("Unsubscribe at the end of the current billing period? You keep access until then.")) {
+    return;
+  }
   setBusy(true);
   try {
-    await openPortal();
+    const data = await api("/api/billing/cancel", { method: "POST", body: { at_period_end: true } });
+    toast(data.message || "Unsubscribed at period end.");
+    await refresh();
   } catch (ex) {
     toast(ex.message, true);
+  } finally {
     setBusy(false);
   }
 });

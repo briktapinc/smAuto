@@ -7,7 +7,7 @@ const STORE_LIB_FILTER = "lazykh.libraryFilter";
 const STORE_TOKEN = "bubblepod.authToken";
 const LIBRARY_PAGE = 12;
 const APP_STEPS = [
-  "library", "archives", "jobs", "topics", "costs", "create", "settings", "prompts",
+  "library", "archives", "jobs", "topics", "costs", "create", "settings", "prompts", "subscription",
   "watch", "script", "pictures", "voice", "backgrounds", "music", "video",
 ];
 
@@ -69,8 +69,7 @@ function applyDesktopModeUi() {
   membershipLocked = false;
   [
     "#login-gate",
-    "#pricing-link",
-    "#admin-link",
+    "#subscription-tab",
     "#logout-btn",
     "#membership-banner",
     "#settings-membership-card",
@@ -573,6 +572,7 @@ function setStep(name) {
     library: ["Library", "Finished videos. Click a ready video to watch. Select videos to archive."],
     archives: ["Archives", "Hidden from Library and Jobs. Restore to bring them back, or delete permanently."],
     jobs: ["Jobs", "Work queue. Start runs when a slot is free, or enqueues (round-robin by user). Shows queue position and N running / M queued. Stop halts after the current step. Resume continues and skips finished artifacts. Delete stops a live/queued run and permanently removes the job and all assets."],
+    subscription: ["Subscription", "Purchase or manage Studio membership. Unsubscribe anytime — access lasts until the billing period ends."],
     topics: ["Topics", "Set a date and time, then Schedule. Studio starts due queued topics about every 30 seconds into free pipeline slots (up to max concurrent). Run now enqueues/starts as soon as a slot is free."],
     costs: ["Costs", "Estimated Flux spend per video from illustration counts × ~4.6¢, plus today’s counters. Open the Costs tab anytime — estimates, not a fal invoice."],
     watch: ["Watch", "Play the rendered mp4, then jump into script, pictures, voice, or render."],
@@ -597,6 +597,7 @@ function setStep(name) {
   if (name === "topics") loadTopics();
   if (name === "costs") loadCosts();
   if (name === "prompts") loadPrompts();
+  if (name === "subscription") refreshSubscriptionPage();
   if (name === "settings") {
     refreshGentleStatus();
     loadYoutube();
@@ -624,8 +625,18 @@ function setStep(name) {
 }
 
 async function restoreRoute() {
+  const params = new URLSearchParams(location.search || "");
+  const qStep = (params.get("step") || "").trim();
+  const checkout = (params.get("checkout") || "").trim();
+  if (checkout === "success") toast("Membership updated. Stripe may take a moment to sync.");
+  else if (checkout === "canceled") toast("Checkout canceled — no charge was made.");
+  if (params.has("step") || params.has("checkout") || params.has("session_id")) {
+    try {
+      history.replaceState(null, "", `${location.pathname}${location.hash || ""}`);
+    } catch { /* ignore */ }
+  }
   const fromHash = parseLocationRoute();
-  let step = (fromHash && fromHash.step) || readStoredStep() || "";
+  let step = qStep || (fromHash && fromHash.step) || readStoredStep() || "";
   let jobId = (fromHash && fromHash.jobId) || readStoredJob() || "";
   if (!APP_STEPS.includes(step)) {
     const running = jobIndex.find((j) => j.running || j.busy);
@@ -5538,6 +5549,216 @@ $("#signup-form")?.addEventListener("submit", async (e) => {
   }
 });
 
+let lastBillingMe = null;
+
+function moneyCents(cents, currency = "usd") {
+  const n = Number(cents || 0) / 100;
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: (currency || "usd").toUpperCase(),
+    }).format(n);
+  } catch {
+    return `$${n.toFixed(2)}`;
+  }
+}
+
+function subscriptionActions(me) {
+  const status = (me.subscription_status || "none").toLowerCase();
+  const access = !!me.has_access;
+  const pendingCancel = !!me.cancel_at_period_end;
+  if (me.is_admin) {
+    return {
+      label: `Admin · ${status}`,
+      hint: "Admins always have Studio access. Configure Stripe in Admin → Stripe.",
+      subscribe: false,
+      resubscribe: false,
+      manage: false,
+      unsubscribe: false,
+      reactivate: false,
+    };
+  }
+  if (!me.stripe_configured) {
+    return {
+      label: `${status} · billing offline`,
+      hint: "Stripe is not configured yet. Ask an admin to connect billing in Admin → Stripe.",
+      subscribe: false,
+      resubscribe: false,
+      manage: false,
+      unsubscribe: false,
+      reactivate: false,
+    };
+  }
+  if (pendingCancel && ["active", "trialing"].includes(status)) {
+    return {
+      label: `${status} · ends soon`,
+      hint: "Unsubscribe scheduled. You keep access until the period ends. Choose Keep subscription to stay on the plan.",
+      subscribe: false,
+      resubscribe: false,
+      manage: true,
+      unsubscribe: false,
+      reactivate: true,
+    };
+  }
+  if (status === "trialing") {
+    return {
+      label: "Trialing · full access",
+      hint: "Your trial is active. Unsubscribe anytime before it ends, or keep the plan and you’ll be billed when the trial converts.",
+      subscribe: false,
+      resubscribe: false,
+      manage: true,
+      unsubscribe: true,
+      reactivate: false,
+    };
+  }
+  if (status === "active" && access) {
+    return {
+      label: "Active · full access",
+      hint: "Your membership is active. Manage billing for cards/invoices, or Unsubscribe to end at the period close.",
+      subscribe: false,
+      resubscribe: false,
+      manage: true,
+      unsubscribe: true,
+      reactivate: false,
+    };
+  }
+  if (status === "past_due" || status === "unpaid") {
+    return {
+      label: `${status} · locked`,
+      hint: "Payment needs attention. Update your card in Manage billing, or resubscribe if the plan ended.",
+      subscribe: false,
+      resubscribe: true,
+      manage: true,
+      unsubscribe: true,
+      reactivate: false,
+    };
+  }
+  if (status === "canceled" || status === "incomplete_expired" || status === "incomplete") {
+    return {
+      label: `${status} · locked`,
+      hint: "Subscribe again to unlock create, edit, topics, and renders. Browse and delete stay available.",
+      subscribe: false,
+      resubscribe: true,
+      manage: true,
+      unsubscribe: false,
+      reactivate: false,
+    };
+  }
+  return {
+    label: `${status || "none"} · ${access ? "access" : "locked"}`,
+    hint: access
+      ? "You’re signed in. Manage billing anytime from this page."
+      : "Subscribe to unlock Studio. Every member gets the same privileges.",
+    subscribe: !access,
+    resubscribe: false,
+    manage: true,
+    unsubscribe: false,
+    reactivate: false,
+  };
+}
+
+function renderSubscriptionPage(me) {
+  lastBillingMe = me || lastBillingMe || {};
+  me = lastBillingMe;
+  const catalog = me.catalog || {};
+  const amount = catalog.amount_cents;
+  const cur = catalog.currency || "usd";
+  const interval = catalog.interval || "month";
+  const actions = subscriptionActions(me);
+  const who = $("#sub-who");
+  if (who) who.textContent = `${me.username || "Member"}${me.email ? ` · ${me.email}` : ""}`;
+  const name = $("#sub-plan-name");
+  if (name) name.textContent = catalog.membership_name || "Stickman Automation Membership";
+  const price = $("#sub-plan-price");
+  if (price) price.textContent = amount != null ? moneyCents(amount, cur) : "—";
+  const iv = $("#sub-plan-interval");
+  if (iv) iv.textContent = amount != null ? `per ${interval}` : "";
+  const pill = $("#sub-status");
+  if (pill) {
+    let label = actions.label;
+    if (me.cancel_at_period_end && me.current_period_end) {
+      label += ` · ends ${String(me.current_period_end).slice(0, 10)}`;
+    }
+    pill.textContent = `Status: ${label}`;
+    pill.dataset.tone = me.has_access ? "ok" : "bad";
+  }
+  const hint = $("#sub-hint");
+  if (hint) hint.textContent = actions.hint;
+  const map = {
+    "sub-subscribe": actions.subscribe,
+    "sub-resubscribe": actions.resubscribe,
+    "sub-manage": actions.manage,
+    "sub-unsubscribe": actions.unsubscribe,
+    "sub-reactivate": actions.reactivate,
+  };
+  Object.entries(map).forEach(([id, show]) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.hidden = !show;
+    el.disabled = !me.stripe_configured && id !== "sub-manage";
+  });
+  const adminNote = $("#subscription-admin-note");
+  if (adminNote) adminNote.hidden = !me.is_admin;
+  const err = $("#sub-error");
+  if (err) { err.hidden = true; err.textContent = ""; }
+}
+
+async function refreshSubscriptionPage() {
+  try {
+    const me = await api("/api/billing/status");
+    renderSubscriptionPage(me);
+    return me;
+  } catch (err) {
+    toast(err.message || "Could not load subscription", true);
+    throw err;
+  }
+}
+
+async function startMembershipCheckout() {
+  const data = await api("/api/billing/checkout", { method: "POST", body: {} });
+  if (data.url) {
+    location.href = data.url;
+    return;
+  }
+  if (data.portal_url) {
+    location.href = data.portal_url;
+    return;
+  }
+  if (data.skipped) {
+    toast(data.reason || "Already have access.");
+    return;
+  }
+  throw new Error(data.reason || data.next || "Checkout unavailable");
+}
+
+async function openBillingPortal() {
+  const data = await api("/api/billing/portal", { method: "POST", body: {} });
+  if (data.url) {
+    location.href = data.url;
+    return;
+  }
+  throw new Error(data.reason || "Billing portal unavailable");
+}
+
+async function unsubscribeMembership() {
+  if (!confirm("Unsubscribe at the end of the current billing period? You keep access until then.")) {
+    return;
+  }
+  const data = await api("/api/billing/cancel", { method: "POST", body: { at_period_end: true } });
+  toast(data.message || "Unsubscribed at period end.");
+  await refreshMembershipUi(data);
+  if ($("#view-subscription")?.classList.contains("on")) renderSubscriptionPage(data);
+  return data;
+}
+
+async function reactivateMembership() {
+  const data = await api("/api/billing/reactivate", { method: "POST", body: {} });
+  toast(data.message || "Subscription will renew.");
+  await refreshMembershipUi(data);
+  if ($("#view-subscription")?.classList.contains("on")) renderSubscriptionPage(data);
+  return data;
+}
+
 async function refreshMembershipUi(session) {
   if (desktopMode || session?.desktop_mode) {
     desktopMode = true;
@@ -5560,15 +5781,15 @@ async function refreshMembershipUi(session) {
   document.body.classList.toggle("is-member", !isAdmin);
   const adminLink = $("#admin-link");
   if (adminLink) adminLink.hidden = !isAdmin;
-  const pricingLink = $("#pricing-link");
-  if (pricingLink) pricingLink.hidden = !!isAdmin;
+  const subTab = $("#subscription-tab");
+  if (subTab) subTab.hidden = false;
   $$(".admin-only").forEach((el) => {
     if (el.id === "admin-link") return;
     el.hidden = !isAdmin;
   });
   $$(".member-only").forEach((el) => {
-    if (el.id === "pricing-link") {
-      el.hidden = !!isAdmin;
+    if (el.id === "subscription-tab") {
+      el.hidden = false;
       return;
     }
     el.hidden = isAdmin;
@@ -5598,10 +5819,10 @@ async function refreshMembershipUi(session) {
       if (text) {
         if (isTrial) {
           text.textContent =
-            `Trial active (${price}). Open Pricing to manage or cancel before it converts.`;
+            `Trial active (${price}). Open Subscription to manage or unsubscribe before it converts.`;
         } else if (isPastDue) {
           text.textContent =
-            `Payment issue (${status}). Update your card or resubscribe on the Pricing page (${price}).`;
+            `Payment issue (${status}). Update your card or resubscribe on Subscription (${price}).`;
         } else {
           text.textContent =
             `Membership required (${price}). Browse and delete stay open — subscribe to create, edit, generate topics, or render.`;
@@ -5622,7 +5843,6 @@ async function refreshMembershipUi(session) {
   const portalBtn = $("#settings-membership-portal");
   const bannerCheckout = $("#membership-checkout");
   const bannerPortal = $("#membership-portal");
-  const bannerPricing = $("#membership-pricing");
   if (checkoutBtn) {
     checkoutBtn.hidden = !canSubscribe;
     checkoutBtn.disabled = !stripeOk;
@@ -5633,7 +5853,7 @@ async function refreshMembershipUi(session) {
   if (portalBtn) {
     portalBtn.hidden = !canManage;
     portalBtn.textContent = ["active", "trialing", "past_due"].includes(status)
-      ? "Manage / cancel"
+      ? "Manage billing"
       : "Manage billing";
   }
   if (bannerCheckout) {
@@ -5642,44 +5862,38 @@ async function refreshMembershipUi(session) {
   }
   if (bannerPortal) {
     bannerPortal.hidden = !canManage;
-    bannerPortal.textContent = portalBtn?.textContent || "Manage / cancel";
+    bannerPortal.textContent = "Manage billing";
   }
-  if (bannerPricing) bannerPricing.hidden = !showBanner;
+  const settingsUnsub = $("#settings-membership-unsubscribe");
+  if (settingsUnsub) {
+    const pendingCancel = !!me.cancel_at_period_end;
+    settingsUnsub.hidden = !(canManage && ["active", "trialing", "past_due"].includes(status) && !pendingCancel);
+  }
 
   const memLead = $("#membership-settings-lead");
   if (memLead) {
     if (!stripeOk) {
       memLead.textContent = "Billing is not configured yet. Ask an admin to connect Stripe.";
     } else if (isTrial) {
-      memLead.textContent = "Your trial is active. Open the pricing page to cancel or manage billing.";
+      memLead.textContent = "Your trial is active. Open Subscription to unsubscribe or manage billing.";
     } else if (needsPay || isPastDue) {
       const amount = me.catalog?.amount_cents;
       const cur = (me.catalog?.currency || "usd").toUpperCase();
       const interval = me.catalog?.interval || "month";
       const price = amount != null ? `$${(Number(amount) / 100).toFixed(2)} ${cur}/${interval}` : "a membership";
-      memLead.textContent = `Subscribe for ${price} on the pricing page. Every member gets the same privileges.`;
+      memLead.textContent = `Subscribe for ${price} on the Subscription page. Every member gets the same privileges.`;
     } else {
-      memLead.textContent = "All members share the same Studio privileges for their own jobs. Manage or cancel anytime on Pricing.";
+      memLead.textContent = "All members share the same Studio privileges for their own jobs. Manage or unsubscribe anytime on Subscription.";
     }
   }
   applyMembershipUiLocks();
+  if ($("#view-subscription")?.classList.contains("on")) renderSubscriptionPage(me);
   if (me.must_change_password && isAdmin) {
     toast("Change the default admin password in Settings → Account before going live.", true);
     try { setStep("settings"); } catch { /* ignore */ }
   }
 }
 
-async function startMembershipCheckout() {
-  const data = await api("/api/billing/checkout", { method: "POST", body: {} });
-  if (data.url) location.href = data.url;
-  else toast(data.reason || data.next || "Checkout unavailable", true);
-}
-
-async function openMembershipPortal() {
-  const data = await api("/api/billing/portal", { method: "POST", body: {} });
-  if (data.url) location.href = data.url;
-  else toast("Portal unavailable", true);
-}
 
 $("#membership-checkout")?.addEventListener("click", async () => {
   try {
@@ -5691,7 +5905,7 @@ $("#membership-checkout")?.addEventListener("click", async () => {
 
 $("#membership-portal")?.addEventListener("click", async () => {
   try {
-    await openMembershipPortal();
+    await openBillingPortal();
   } catch (err) {
     toast(err.message, true);
   }
@@ -5707,10 +5921,37 @@ $("#settings-membership-checkout")?.addEventListener("click", async () => {
 
 $("#settings-membership-portal")?.addEventListener("click", async () => {
   try {
-    await openMembershipPortal();
+    await openBillingPortal();
   } catch (err) {
     toast(err.message, true);
   }
+});
+
+$("#membership-open-sub")?.addEventListener("click", () => setStep("subscription"));
+$("#settings-open-subscription")?.addEventListener("click", () => setStep("subscription"));
+$("#settings-membership-unsubscribe")?.addEventListener("click", async () => {
+  try { await unsubscribeMembership(); } catch (err) { toast(err.message, true); }
+});
+$("#sub-subscribe")?.addEventListener("click", async () => {
+  try { await startMembershipCheckout(); } catch (err) {
+    const box = $("#sub-error"); if (box) { box.hidden = false; box.textContent = err.message; }
+    toast(err.message, true);
+  }
+});
+$("#sub-resubscribe")?.addEventListener("click", async () => {
+  try { await startMembershipCheckout(); } catch (err) {
+    const box = $("#sub-error"); if (box) { box.hidden = false; box.textContent = err.message; }
+    toast(err.message, true);
+  }
+});
+$("#sub-manage")?.addEventListener("click", async () => {
+  try { await openBillingPortal(); } catch (err) { toast(err.message, true); }
+});
+$("#sub-unsubscribe")?.addEventListener("click", async () => {
+  try { await unsubscribeMembership(); } catch (err) { toast(err.message, true); }
+});
+$("#sub-reactivate")?.addEventListener("click", async () => {
+  try { await reactivateMembership(); } catch (err) { toast(err.message, true); }
 });
 
 $("#logout-btn")?.addEventListener("click", async () => {

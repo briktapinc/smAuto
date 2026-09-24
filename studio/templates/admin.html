@@ -154,7 +154,17 @@
           <label>Publishable key <input id="stripe-pub" placeholder="pk_test_..." autocomplete="off" /></label>
           <label>Webhook secret <input id="stripe-whsec" type="password" placeholder="whsec_..." autocomplete="off" /></label>
           <label>Price id (optional if auto-created) <input id="stripe-price" placeholder="price_..." /></label>
-          <label>Amount (cents) <input id="stripe-amount" type="number" min="100" step="100" value="2900" /></label>
+          <div class="row">
+            <label>Amount (cents) <input id="stripe-amount" type="number" min="100" step="100" value="2900" /></label>
+            <label>Currency <input id="stripe-currency" placeholder="usd" /></label>
+            <label>Interval
+              <select id="stripe-interval">
+                <option value="month">month</option>
+                <option value="year">year</option>
+                <option value="week">week</option>
+              </select>
+            </label>
+          </div>
           <label>Public base URL (for Checkout redirects / webhooks) <input id="stripe-public-url" placeholder="https://your-tunnel.example" /></label>
           <label class="check"><input type="checkbox" id="stripe-membership-required" checked /> Require membership when Stripe is configured</label>
           <div class="row">
@@ -164,6 +174,7 @@
           <p id="stripe-status" class="muted"></p>
         </form>
         <p class="muted">Webhook endpoint: <code id="stripe-webhook-url">/api/stripe/webhook</code></p>
+        <p class="muted">Members subscribe and unsubscribe from Studio → Subscription. Checkout returns there after payment.</p>
       </section>
 
       <section id="panel-email" class="panel">

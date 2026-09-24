@@ -302,8 +302,8 @@ def create_checkout_session(user: dict[str, Any]) -> dict[str, Any]:
         "mode": "subscription",
         "customer": customer_id,
         "line_items": [{"price": price_id, "quantity": 1}],
-        "success_url": f"{base}/pricing?checkout=success&session_id={{CHECKOUT_SESSION_ID}}",
-        "cancel_url": f"{base}/pricing?checkout=canceled",
+        "success_url": f"{base}/?step=subscription&checkout=success&session_id={{CHECKOUT_SESSION_ID}}",
+        "cancel_url": f"{base}/?step=subscription&checkout=canceled",
         "client_reference_id": user.get("id") or "",
         "metadata": {
             "bubblepod_user_id": user.get("id") or "",
@@ -350,7 +350,7 @@ def create_portal_session(user: dict[str, Any]) -> dict[str, Any]:
     client = get_stripe_client()
     params = {
         "customer": customer_id,
-        "return_url": f"{base}/pricing",
+        "return_url": f"{base}/?step=subscription",
     }
     if hasattr(client, "v1"):
         session = client.v1.billing_portal.sessions.create(params)
@@ -359,6 +359,118 @@ def create_portal_session(user: dict[str, Any]) -> dict[str, Any]:
 
         session = stripe.billing_portal.Session.create(**params)
     return {"ok": True, "url": _obj_get(session, "url")}
+
+
+def _resolve_subscription_id(user: dict[str, Any]) -> str:
+    """Return the Stripe subscription id for this user (stored or looked up)."""
+    sub_id = (user.get("stripe_subscription_id") or "").strip()
+    if sub_id:
+        return sub_id
+    customer_id = (user.get("stripe_customer_id") or "").strip()
+    if not customer_id:
+        return ""
+    client = get_stripe_client()
+    try:
+        if hasattr(client, "v1"):
+            listed = client.v1.subscriptions.list(
+                {"customer": customer_id, "status": "all", "limit": 10}
+            )
+        else:
+            import stripe
+
+            listed = stripe.Subscription.list(customer=customer_id, status="all", limit=10)
+        rows = _obj_get(listed, "data") or []
+        preferred = None
+        for row in rows:
+            status = str(_obj_get(row, "status") or "")
+            if status in ("active", "trialing", "past_due", "unpaid"):
+                preferred = row
+                break
+            if preferred is None:
+                preferred = row
+        return str(_obj_get(preferred, "id") or "") if preferred is not None else ""
+    except Exception as exc:
+        _log.warning("Could not list subscriptions for customer %s: %s", customer_id, exc)
+        return ""
+
+
+def cancel_subscription(user: dict[str, Any], *, at_period_end: bool = True) -> dict[str, Any]:
+    """Cancel membership. Default: at period end (unsubscribe, keep access until then)."""
+    from studio.members import get_user_by_id
+
+    if (user.get("role") or "") == "admin":
+        return {"ok": True, "skipped": True, "reason": "Admins do not have a billable membership."}
+
+    sub_id = _resolve_subscription_id(user)
+    if not sub_id:
+        raise RuntimeError("No Stripe subscription found for this account.")
+
+    client = get_stripe_client()
+    if at_period_end:
+        params = {"cancel_at_period_end": True}
+        if hasattr(client, "v1"):
+            sub = client.v1.subscriptions.update(sub_id, params)
+        else:
+            import stripe
+
+            sub = stripe.Subscription.modify(sub_id, **params)
+    else:
+        if hasattr(client, "v1"):
+            sub = client.v1.subscriptions.cancel(sub_id, {})
+        else:
+            import stripe
+
+            sub = stripe.Subscription.cancel(sub_id)
+
+    # Keep local user record in sync immediately (webhook may lag).
+    _apply_subscription_to_user(user.get("id") or "", sub)
+    fresh = get_user_by_id(user["id"]) or user
+    period_end = fresh.get("current_period_end") or ""
+    return {
+        "ok": True,
+        "subscription_id": str(_obj_get(sub, "id") or sub_id),
+        "status": str(_obj_get(sub, "status") or fresh.get("subscription_status") or ""),
+        "cancel_at_period_end": bool(_obj_get(sub, "cancel_at_period_end")),
+        "current_period_end": period_end,
+        "at_period_end": bool(at_period_end),
+        "message": (
+            "Subscription will end at the close of the current billing period."
+            if at_period_end and bool(_obj_get(sub, "cancel_at_period_end"))
+            else "Subscription canceled."
+        ),
+    }
+
+
+def reactivate_subscription(user: dict[str, Any]) -> dict[str, Any]:
+    """Undo a pending cancel-at-period-end so the membership continues."""
+    from studio.members import get_user_by_id
+
+    if (user.get("role") or "") == "admin":
+        return {"ok": True, "skipped": True, "reason": "Admins do not have a billable membership."}
+
+    sub_id = _resolve_subscription_id(user)
+    if not sub_id:
+        raise RuntimeError("No Stripe subscription found for this account.")
+
+    client = get_stripe_client()
+    params = {"cancel_at_period_end": False}
+    if hasattr(client, "v1"):
+        sub = client.v1.subscriptions.update(sub_id, params)
+    else:
+        import stripe
+
+        sub = stripe.Subscription.modify(sub_id, **params)
+
+    _apply_subscription_to_user(user.get("id") or "", sub)
+    fresh = get_user_by_id(user["id"]) or user
+    return {
+        "ok": True,
+        "subscription_id": str(_obj_get(sub, "id") or sub_id),
+        "status": str(_obj_get(sub, "status") or fresh.get("subscription_status") or ""),
+        "cancel_at_period_end": False,
+        "current_period_end": fresh.get("current_period_end") or "",
+        "message": "Subscription will renew as usual.",
+    }
 
 
 def create_refund(*, payment_intent: str = "", charge_id: str = "", amount_cents: int | None = None, reason: str = "") -> dict[str, Any]:

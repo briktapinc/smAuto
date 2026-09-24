@@ -253,6 +253,8 @@ async function loadStripeForm() {
   $("#stripe-pub").value = settings.stripe_publishable_key || "";
   $("#stripe-price").value = settings.stripe_price_id || "";
   $("#stripe-amount").value = settings.stripe_price_amount_cents || 2900;
+  $("#stripe-currency").value = settings.stripe_price_currency || "usd";
+  $("#stripe-interval").value = settings.stripe_price_interval || "month";
   $("#stripe-public-url").value = settings.public_base_url || settings.ngrok_url || "";
   $("#stripe-membership-required").checked = settings.membership_required !== false;
   $("#stripe-secret").placeholder = settings.stripe_secret_key_set ? "******** (set — enter new to change)" : "sk_test_... or rk_...";
@@ -422,6 +424,8 @@ $("#stripe-form")?.addEventListener("submit", async (e) => {
     stripe_publishable_key: $("#stripe-pub").value.trim(),
     stripe_price_id: $("#stripe-price").value.trim(),
     stripe_price_amount_cents: Number($("#stripe-amount").value || 2900),
+    stripe_price_currency: ($("#stripe-currency").value || "usd").trim().toLowerCase(),
+    stripe_price_interval: ($("#stripe-interval").value || "month").trim().toLowerCase(),
     public_base_url: $("#stripe-public-url").value.trim(),
     membership_required: $("#stripe-membership-required").checked,
   };

@@ -119,7 +119,7 @@
           <button type="button" data-step="costs">Costs</button>
           <button type="button" data-step="settings">Settings</button>
           <button type="button" data-step="prompts">Prompts</button>
-          <a class="tab-link member-only" href="/pricing" id="pricing-link">Pricing</a>
+          <button type="button" data-step="subscription" id="subscription-tab">Subscription</button>
           <a class="tab-link admin-only" href="/admin" id="admin-link" hidden>Admin</a>
         </nav>
         <div class="chrome-meta">
@@ -161,9 +161,9 @@
       <p id="toast" hidden></p>
       <div id="membership-banner" class="membership-banner" hidden>
         <span class="membership-banner-text" id="membership-banner-text">Membership required for Studio access. All members have equal privileges.</span>
-        <a class="primary button-link" id="membership-pricing" href="/pricing">View pricing</a>
         <button type="button" class="primary" id="membership-checkout">Subscribe</button>
-        <button type="button" id="membership-portal">Manage / cancel</button>
+        <button type="button" id="membership-portal">Manage billing</button>
+        <button type="button" id="membership-open-sub">Subscription</button>
       </div>
 
       <div class="content-shell">
@@ -621,6 +621,34 @@
         </div>
       </section>
 
+      <section id="view-subscription" class="view">
+        <div class="card subscription-card" id="subscription-card">
+          <p class="eyebrow" id="sub-who">Membership</p>
+          <h3 class="lib-heading" style="margin-top:0" id="sub-plan-name">Stickman Automation Membership</h3>
+          <p class="sub-price" id="sub-plan-price">…</p>
+          <p class="meta" id="sub-plan-interval"></p>
+          <ul class="sub-perks">
+            <li>Create jobs, topics, and renders</li>
+            <li>Your library stays private to your account</li>
+            <li>Unsubscribe anytime — access lasts until the period ends</li>
+          </ul>
+          <p class="status-pill" id="sub-status">Status: …</p>
+          <p class="hint" id="sub-hint"></p>
+          <div class="row settings-actions" id="sub-actions">
+            <button type="button" class="primary" id="sub-subscribe" hidden>Subscribe</button>
+            <button type="button" class="primary" id="sub-resubscribe" hidden>Resubscribe</button>
+            <button type="button" id="sub-manage" hidden>Manage billing</button>
+            <button type="button" id="sub-reactivate" hidden>Keep subscription</button>
+            <button type="button" class="danger" id="sub-unsubscribe" hidden>Unsubscribe</button>
+          </div>
+          <p id="sub-error" class="error" hidden></p>
+        </div>
+        <div class="card admin-only" id="subscription-admin-note" hidden>
+          <h3 class="lib-heading" style="margin-top:0">Admin</h3>
+          <p class="hint">Admins always have full access. Configure Stripe keys, price, and membership lock in <a href="/admin">Admin → Stripe</a>.</p>
+        </div>
+      </section>
+
       <section id="view-settings" class="view">
         <form id="settings-form" class="settings-stack">
           <details class="card settings-card" id="settings-account-card" open>
@@ -663,14 +691,14 @@
               <p class="meta" id="membership-status-line">Status: …</p>
               <div id="settings-membership-banner" class="membership-banner membership-banner--settings" hidden>
                 <span class="membership-banner-text" id="settings-membership-banner-text"></span>
-                <a class="primary button-link" href="/pricing">View pricing</a>
                 <button type="button" class="primary" id="settings-membership-checkout">Subscribe</button>
-                <button type="button" id="settings-membership-portal">Manage / cancel</button>
+                <button type="button" id="settings-membership-portal">Manage billing</button>
               </div>
               <div class="row settings-actions" id="settings-membership-actions">
-                <a class="primary button-link" id="settings-membership-pricing" href="/pricing">Open pricing page</a>
+                <button type="button" class="primary" id="settings-open-subscription">Open Subscription</button>
+                <button type="button" class="danger" id="settings-membership-unsubscribe" hidden>Unsubscribe</button>
               </div>
-              <p class="hint">Trial, expired, and inactive accounts use the pricing page to subscribe, resubscribe, or cancel via Stripe.</p>
+              <p class="hint">Subscribe, resubscribe, or unsubscribe from the Subscription page. Manage billing opens Stripe’s secure portal for cards and invoices.</p>
             </div>
           </details>
 
