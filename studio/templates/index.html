@@ -169,6 +169,7 @@
       <div class="content-shell">
         <nav id="content-tabs" class="panel-tabs" aria-label="Content">
           <button type="button" data-step="library" class="on">Library</button>
+          <button type="button" data-step="archives">Archives</button>
           <span id="job-tabs" class="job-tabs" hidden>
             <button type="button" data-step="script">Script</button>
             <button type="button" data-step="pictures">Pictures</button>
@@ -183,6 +184,13 @@
       <section id="view-library" class="view on">
         <div class="lib-toolbar">
           <p class="meta" id="lib-count"></p>
+          <div class="lib-bulk" id="lib-bulk">
+            <label class="check check-inline">
+              <input type="checkbox" id="lib-select-all" />
+              Select all
+            </label>
+            <button type="button" id="lib-archive-btn" disabled title="Move selected videos to Archives">Archive</button>
+          </div>
         </div>
         <h3 class="lib-heading" id="library-heading">Ready to watch</h3>
         <div id="library-grid" class="library-grid"></div>
@@ -190,6 +198,28 @@
           <button type="button" id="lib-prev">Previous</button>
           <span id="lib-page-label"></span>
           <button type="button" id="lib-next">Next</button>
+        </div>
+      </section>
+
+      <section id="view-archives" class="view">
+        <div class="lib-toolbar">
+          <p class="meta" id="archives-count"></p>
+          <div class="lib-bulk" id="archives-bulk">
+            <label class="check check-inline">
+              <input type="checkbox" id="archives-select-all" />
+              Select all
+            </label>
+            <button type="button" id="archives-restore-btn" disabled title="Restore selected videos to Library">Restore</button>
+            <button type="button" class="danger" id="archives-delete-btn" disabled title="Permanently delete selected archived videos">Delete</button>
+          </div>
+        </div>
+        <h3 class="lib-heading" id="archives-heading">Archived videos</h3>
+        <p class="hint">Archived videos stay on disk but leave Library and Jobs. Restore to bring them back.</p>
+        <div id="archives-grid" class="library-grid"></div>
+        <div class="library-pager" id="archives-pager" hidden>
+          <button type="button" id="archives-prev">Previous</button>
+          <span id="archives-page-label"></span>
+          <button type="button" id="archives-next">Next</button>
         </div>
       </section>
 

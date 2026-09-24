@@ -443,7 +443,19 @@ def is_listed_project(project_id: str) -> bool:
     return pid not in load_deleted_ids()
 
 
-def list_projects() -> list[dict[str, Any]]:
+def is_archived_project(project_id: str | dict[str, Any] | None = None) -> bool:
+    if isinstance(project_id, dict):
+        return bool(project_id.get("archived"))
+    if not project_id:
+        return False
+    try:
+        meta = load_meta(_safe_project_id(project_id))
+    except FileNotFoundError:
+        return False
+    return bool(meta.get("archived"))
+
+
+def list_projects(*, include_archived: bool = False, archived_only: bool = False) -> list[dict[str, Any]]:
     ensure_dirs()
     hidden = load_deleted_ids()
     items: list[dict[str, Any]] = []
@@ -468,6 +480,11 @@ def list_projects() -> list[dict[str, Any]]:
         pid = str(meta.get("id") or folder.name)
         if meta.get("deleted") or pid in hidden:
             return
+        archived = bool(meta.get("archived"))
+        if archived_only and not archived:
+            return
+        if not include_archived and not archived_only and archived:
+            return
         seen_real.add(real)
         items.append(meta)
 
@@ -483,6 +500,68 @@ def list_projects() -> list[dict[str, Any]]:
 
     items.sort(key=lambda m: str(m.get("updated_at") or m.get("created_at") or ""), reverse=True)
     return items
+
+
+def list_archived_projects() -> list[dict[str, Any]]:
+    return list_projects(archived_only=True)
+
+
+def archive_project(project_id: str) -> dict[str, Any]:
+    """Hide a job from Library/Jobs without deleting files. Reversible via unarchive_project."""
+    pid = _safe_project_id(project_id)
+    if not is_listed_project(pid):
+        raise FileNotFoundError(f"Unknown project: {project_id}")
+    meta = load_meta(pid)
+    if meta.get("archived"):
+        return project_payload(pid)
+    meta["archived"] = True
+    meta["archived_at"] = datetime.now(timezone.utc).isoformat()
+    save_meta(pid, meta)
+    return project_payload(pid)
+
+
+def unarchive_project(project_id: str) -> dict[str, Any]:
+    """Restore an archived job back into Library/Jobs."""
+    pid = _safe_project_id(project_id)
+    if not is_listed_project(pid):
+        raise FileNotFoundError(f"Unknown project: {project_id}")
+    meta = load_meta(pid)
+    if not meta.get("archived"):
+        return project_payload(pid)
+    meta["archived"] = False
+    meta.pop("archived_at", None)
+    save_meta(pid, meta)
+    return project_payload(pid)
+
+
+def archive_projects(project_ids: list[str]) -> dict[str, Any]:
+    archived: list[str] = []
+    errors: list[dict[str, str]] = []
+    for raw in project_ids:
+        pid = str(raw or "").strip()
+        if not pid:
+            continue
+        try:
+            archive_project(pid)
+            archived.append(pid)
+        except Exception as exc:
+            errors.append({"id": pid, "error": str(exc)})
+    return {"archived": archived, "count": len(archived), "errors": errors}
+
+
+def unarchive_projects(project_ids: list[str]) -> dict[str, Any]:
+    restored: list[str] = []
+    errors: list[dict[str, str]] = []
+    for raw in project_ids:
+        pid = str(raw or "").strip()
+        if not pid:
+            continue
+        try:
+            unarchive_project(pid)
+            restored.append(pid)
+        except Exception as exc:
+            errors.append({"id": pid, "error": str(exc)})
+    return {"restored": restored, "count": len(restored), "errors": errors}
 
 
 def _rmtree(folder: Path) -> None:
@@ -1417,6 +1496,8 @@ def project_payload(project_id: str) -> dict[str, Any]:
         "video_layout": project_video_layout(project_id),
         "character_size": project_character_size(project_id),
         "include_bubblehead": project_include_bubblehead(meta),
+        "archived": bool(meta.get("archived")),
+        "archived_at": meta.get("archived_at"),
         "background_file": project_background_file(project_id),
         "audio_source": _project_audio_source_label(meta),
         "has_external_audio": (project_dir(project_id) / "narration_external.mp3").is_file(),

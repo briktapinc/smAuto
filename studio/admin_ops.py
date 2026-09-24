@@ -15,7 +15,7 @@ def _now() -> str:
 def system_load() -> dict[str, Any]:
     load1 = load5 = load15 = None
     try:
-        load1, load5, load15 = os.getloadavg()
+        load1, load5, load15 = (round(v, 2) for v in os.getloadavg())
     except OSError:
         pass
     mem = {}

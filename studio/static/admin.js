@@ -97,7 +97,9 @@ async function loadOverview() {
     ["Pipeline queued", q.queued_count ?? 0],
     ["Max concurrent", q.max_concurrent ?? 1],
     ["Failed jobs", data.failed_jobs_count ?? 0],
-    ["Load 1/5/15", `${load["1"] ?? "—"} / ${load["5"] ?? "—"} / ${load["15"] ?? "—"}`],
+    ["Load 1/5/15", [load["1"], load["5"], load["15"]].every((v) => v == null)
+      ? "—"
+      : [load["1"], load["5"], load["15"]].map((v) => (v == null ? "—" : Number(v).toFixed(2))).join(" / ")],
     ["Mem used %", sys.memory?.used_pct ?? "—"],
     ["Disk used %", sys.disk?.used_pct ?? "—"],
     ["FAL images today", fal.flux_images ?? 0],

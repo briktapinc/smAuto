@@ -7,7 +7,7 @@ const STORE_LIB_FILTER = "lazykh.libraryFilter";
 const STORE_TOKEN = "bubblepod.authToken";
 const LIBRARY_PAGE = 12;
 const APP_STEPS = [
-  "library", "jobs", "topics", "costs", "create", "settings", "prompts",
+  "library", "archives", "jobs", "topics", "costs", "create", "settings", "prompts",
   "watch", "script", "pictures", "voice", "backgrounds", "music", "video",
 ];
 
@@ -19,10 +19,15 @@ let lastIllust = null;
 let regenTargetKey = "";
 const ILLUST_POLL_MS = 2500;
 let jobIndex = [];
+let archiveIndex = [];
 let libraryPage = 0;
+let archivesPage = 0;
 let libraryFilter = "all";
+let librarySelected = new Set();
+let archivesSelected = new Set();
 let pendingDeleteId = null;
 let pendingDeleteFiles = false;
+let pendingBulkDeleteIds = null;
 let bgCatalog = [];
 let topicList = [];
 let topicQueue = [];
@@ -565,7 +570,8 @@ function setStep(name) {
   syncJobTabs();
   $$(".view").forEach((v) => v.classList.toggle("on", v.id === `view-${name}`));
   const titles = {
-    library: ["Library", "Finished videos. Click a ready video to watch."],
+    library: ["Library", "Finished videos. Click a ready video to watch. Select videos to archive."],
+    archives: ["Archives", "Hidden from Library and Jobs. Restore to bring them back, or delete permanently."],
     jobs: ["Jobs", "Work queue. Start runs when a slot is free, or enqueues (round-robin by user). Shows queue position and N running / M queued. Stop halts after the current step. Resume continues and skips finished artifacts. Delete stops a live/queued run and permanently removes the job and all assets."],
     topics: ["Topics", "Set a date and time, then Schedule. Studio starts due queued topics about every 30 seconds into free pipeline slots (up to max concurrent). Run now enqueues/starts as soon as a slot is free."],
     costs: ["Costs", "Estimated Flux spend per video from illustration counts × ~4.6¢, plus today’s counters. Open the Costs tab anytime — estimates, not a fal invoice."],
@@ -584,6 +590,9 @@ function setStep(name) {
   $("#page-title").textContent = pair[0];
   $("#page-sub").textContent = pair[1];
   if (name === "library") renderLibrary();
+  if (name === "archives") {
+    refreshArchives().then(() => renderArchives()).catch((err) => toast(err.message, true));
+  }
   if (name === "jobs") renderJobsQueue();
   if (name === "topics") loadTopics();
   if (name === "costs") loadCosts();
@@ -736,7 +745,7 @@ function resumeLabel(item) {
   return from && from !== "done" ? `Resume from ${from}` : "Resume";
 }
 
-function cardHtml(item, compact = false) {
+function cardHtml(item, compact = false, { selectable = false, selected = false, showDelete = true } = {}) {
   const ready = isReady(item);
   const local = hasLocalVideo(item);
   const ytOnly = ready && !local;
@@ -744,15 +753,22 @@ function cardHtml(item, compact = false) {
   const label = esc(jobLabel(item));
   const state = ytOnly ? "on YouTube" : jobState(item);
   const stamp = encodeURIComponent(item.updated_at || item.id);
+  const check = selectable
+    ? `<input type="checkbox" class="card-check" data-select="${esc(item.id)}" ${selected ? "checked" : ""} aria-label="Select ${label}" onclick="event.stopPropagation()">`
+    : "";
+  const del = showDelete
+    ? `<button type="button" class="thumb-x" data-delete="${esc(item.id)}" title="Delete job" aria-label="Delete ${label}">×</button>`
+    : "";
   return `<div class="yt-wrap" data-id="${esc(item.id)}">
     <div class="yt-card ${portrait ? "portrait" : ""} ${ready ? "ready" : "pending"} ${ytOnly ? "youtube-only" : ""} ${compact ? "compact" : ""} ${item.running ? "running" : ""}" data-id="${esc(item.id)}">
     <div class="thumb">
+      ${check}
       <div class="ph-doodle" aria-hidden="true">LK</div>
       <img src="${withBase(`/api/projects/${esc(item.id)}/thumbnail?t=${stamp}`)}" alt="" onerror="this.remove()">
       ${ready ? `<span class="play" aria-hidden="true"></span>` : `<span class="chip">${esc(state)}</span>`}
       ${ytOnly ? `<span class="chip yt-chip">YouTube</span>` : ""}
       <span class="dur">${formatDuration(item.duration_seconds)}</span>
-      <button type="button" class="thumb-x" data-delete="${esc(item.id)}" title="Delete job" aria-label="Delete ${label}">×</button>
+      ${del}
     </div>
     <div class="yt-info">
       <strong>${label}</strong>
@@ -760,6 +776,21 @@ function cardHtml(item, compact = false) {
     </div>
   </div>
   </div>`;
+}
+
+function syncBulkToolbar(prefix, selected, ids) {
+  const all = $(`#${prefix}-select-all`);
+  const archiveBtn = $(`#${prefix}-archive-btn`);
+  const restoreBtn = $(`#${prefix}-restore-btn`);
+  const deleteBtn = $(`#${prefix}-delete-btn`);
+  const n = selected.size;
+  if (all) {
+    all.checked = ids.length > 0 && n === ids.length;
+    all.indeterminate = n > 0 && n < ids.length;
+  }
+  if (archiveBtn) archiveBtn.disabled = n === 0;
+  if (restoreBtn) restoreBtn.disabled = n === 0;
+  if (deleteBtn) deleteBtn.disabled = n === 0;
 }
 
 function renderLibrary() {
@@ -770,19 +801,67 @@ function renderLibrary() {
   const pages = Math.max(1, Math.ceil(items.length / LIBRARY_PAGE) || 1);
   libraryPage = Math.min(libraryPage, pages - 1);
   const slice = items.slice(libraryPage * LIBRARY_PAGE, (libraryPage + 1) * LIBRARY_PAGE);
+  const pageIds = slice.map((item) => item.id);
+  librarySelected = new Set([...librarySelected].filter((id) => items.some((item) => item.id === id)));
   const heading = $("#library-heading");
   if (heading) heading.textContent = "Ready to watch";
   grid.innerHTML = slice.length
-    ? slice.map((item) => cardHtml(item)).join("")
+    ? slice.map((item) => cardHtml(item, false, {
+      selectable: true,
+      selected: librarySelected.has(item.id),
+    })).join("")
     : `<p class="empty-lib">No finished videos yet. <button type="button" id="lib-empty-jobs">Open jobs</button> or <button type="button" id="lib-empty-create">Create a job</button></p>`;
   const count = $("#lib-count");
-  if (count) count.textContent = `${ready.length} ready`;
+  if (count) {
+    count.textContent = librarySelected.size
+      ? `${ready.length} ready · ${librarySelected.size} selected`
+      : `${ready.length} ready`;
+  }
+  syncBulkToolbar("lib", librarySelected, pageIds.length ? items.map((i) => i.id) : []);
   const pager = $("#library-pager");
   if (pager) {
     pager.hidden = items.length <= LIBRARY_PAGE;
     $("#lib-page-label").textContent = `Page ${libraryPage + 1} of ${pages}`;
     $("#lib-prev").disabled = libraryPage <= 0;
     $("#lib-next").disabled = libraryPage >= pages - 1;
+  }
+}
+
+async function refreshArchives() {
+  archiveIndex = await api("/api/archives");
+  return archiveIndex;
+}
+
+function renderArchives() {
+  const grid = $("#archives-grid");
+  if (!grid) return;
+  const items = archiveIndex || [];
+  const pages = Math.max(1, Math.ceil(items.length / LIBRARY_PAGE) || 1);
+  archivesPage = Math.min(archivesPage, pages - 1);
+  const slice = items.slice(archivesPage * LIBRARY_PAGE, (archivesPage + 1) * LIBRARY_PAGE);
+  archivesSelected = new Set([...archivesSelected].filter((id) => items.some((item) => item.id === id)));
+  const heading = $("#archives-heading");
+  if (heading) heading.textContent = "Archived videos";
+  grid.innerHTML = slice.length
+    ? slice.map((item) => cardHtml(item, false, {
+      selectable: true,
+      selected: archivesSelected.has(item.id),
+      showDelete: true,
+    })).join("")
+    : `<p class="empty-lib">No archived videos. Archive finished videos from Library to free up space there.</p>`;
+  const count = $("#archives-count");
+  if (count) {
+    count.textContent = archivesSelected.size
+      ? `${items.length} archived · ${archivesSelected.size} selected`
+      : `${items.length} archived`;
+  }
+  syncBulkToolbar("archives", archivesSelected, items.map((i) => i.id));
+  const pager = $("#archives-pager");
+  if (pager) {
+    pager.hidden = items.length <= LIBRARY_PAGE;
+    $("#archives-page-label").textContent = `Page ${archivesPage + 1} of ${pages}`;
+    $("#archives-prev").disabled = archivesPage <= 0;
+    $("#archives-next").disabled = archivesPage >= pages - 1;
   }
 }
 
@@ -963,6 +1042,9 @@ async function refreshJobs(selectId) {
   refreshJobQueueSnap().catch(() => {});
   renderJobList();
   if ($("#view-library")?.classList.contains("on")) renderLibrary();
+  if ($("#view-archives")?.classList.contains("on")) {
+    refreshArchives().then(() => renderArchives()).catch(() => {});
+  }
   if ($("#view-jobs")?.classList.contains("on")) renderJobsQueue();
   if ($("#view-topics")?.classList.contains("on")) await loadTopics({ silent: true });
   if ($("#view-watch")?.classList.contains("on")) renderWatchRelated();
@@ -1973,16 +2055,29 @@ function goLibrary() {
 }
 
 function jobById(id) {
-  if (current?.id === id) return current;
-  return jobIndex.find((j) => j.id === id) || { id };
+  return jobIndex.find((j) => j.id === id)
+    || archiveIndex.find((j) => j.id === id)
+    || (current?.id === id ? current : null)
+    || { id };
 }
 
 function askDelete(id) {
+  pendingBulkDeleteIds = null;
   pendingDeleteId = id;
   pendingDeleteFiles = true;
   const dlg = $("#delete-dialog");
   if (!dlg) return;
   $("#delete-job-name").textContent = jobLabel(jobById(id));
+  dlg.showModal();
+}
+
+function askBulkDelete(ids) {
+  pendingDeleteId = null;
+  pendingBulkDeleteIds = [...ids];
+  pendingDeleteFiles = true;
+  const dlg = $("#delete-dialog");
+  if (!dlg) return;
+  $("#delete-job-name").textContent = `${ids.length} archived video${ids.length === 1 ? "" : "s"}`;
   dlg.showModal();
 }
 
@@ -1995,9 +2090,29 @@ function releaseMedia(sel) {
 }
 
 async function confirmDelete() {
+  const bulkIds = pendingBulkDeleteIds;
   const id = pendingDeleteId;
   pendingDeleteId = null;
   pendingDeleteFiles = false;
+  pendingBulkDeleteIds = null;
+  if (bulkIds?.length) {
+    try {
+      for (const pid of bulkIds) {
+        await api(`/api/projects/${encodeURIComponent(pid)}?delete_files=true`, {
+          method: "DELETE",
+          body: { delete_files: true },
+        });
+      }
+      archivesSelected.clear();
+      await refreshJobs();
+      await refreshArchives();
+      renderArchives();
+      toast(`Deleted ${bulkIds.length} archived video${bulkIds.length === 1 ? "" : "s"}.`);
+    } catch (err) {
+      toast(err.message, true);
+    }
+    return;
+  }
   if (!id) return;
   const wasCurrent = current?.id === id;
   try {
@@ -2023,6 +2138,10 @@ async function confirmDelete() {
     }
     await refreshJobs();
     await refreshJobQueueSnap();
+    if ($("#view-archives")?.classList.contains("on")) {
+      await refreshArchives();
+      renderArchives();
+    }
     toast("Job stopped and deleted with all assets.");
   } catch (err) {
     toast(err.message, true);
@@ -2074,8 +2193,76 @@ $("#lib-next")?.addEventListener("click", () => {
   renderLibrary();
 });
 
+function toggleSelectSet(set, id, checked) {
+  if (checked) set.add(id);
+  else set.delete(id);
+}
+
+$("#lib-select-all")?.addEventListener("change", (e) => {
+  const ready = jobIndex.filter(isReady);
+  if (e.target.checked) ready.forEach((item) => librarySelected.add(item.id));
+  else librarySelected.clear();
+  renderLibrary();
+});
+
+$("#lib-archive-btn")?.addEventListener("click", async () => {
+  const ids = [...librarySelected];
+  if (!ids.length) return toast("Select videos to archive, or use Select all.", true);
+  try {
+    const result = await api("/api/archives", { method: "POST", body: { ids } });
+    librarySelected.clear();
+    await refreshJobs();
+    toast(`Archived ${result.count || ids.length} video${(result.count || ids.length) === 1 ? "" : "s"}.`);
+  } catch (err) {
+    toast(err.message, true);
+  }
+});
+
+$("#archives-prev")?.addEventListener("click", () => {
+  archivesPage = Math.max(0, archivesPage - 1);
+  renderArchives();
+});
+$("#archives-next")?.addEventListener("click", () => {
+  archivesPage += 1;
+  renderArchives();
+});
+
+$("#archives-select-all")?.addEventListener("change", (e) => {
+  if (e.target.checked) (archiveIndex || []).forEach((item) => archivesSelected.add(item.id));
+  else archivesSelected.clear();
+  renderArchives();
+});
+
+$("#archives-restore-btn")?.addEventListener("click", async () => {
+  const ids = [...archivesSelected];
+  if (!ids.length) return toast("Select videos to restore.", true);
+  try {
+    const result = await api("/api/archives/restore", { method: "POST", body: { ids } });
+    archivesSelected.clear();
+    await refreshJobs();
+    await refreshArchives();
+    renderArchives();
+    toast(`Restored ${result.count || ids.length} video${(result.count || ids.length) === 1 ? "" : "s"} to Library.`);
+  } catch (err) {
+    toast(err.message, true);
+  }
+});
+
+$("#archives-delete-btn")?.addEventListener("click", () => {
+  const ids = [...archivesSelected];
+  if (!ids.length) return toast("Select videos to delete.", true);
+  askBulkDelete(ids);
+});
+
 $("#view-library")?.addEventListener("click", async (e) => {
   if (handleDeleteClick(e)) return;
+  const select = e.target.closest("[data-select]");
+  if (select) {
+    e.stopPropagation();
+    toggleSelectSet(librarySelected, select.dataset.select, select.checked);
+    renderLibrary();
+    return;
+  }
   if (e.target.closest("#lib-empty-create")) {
     setStep("create");
     return;
@@ -2085,7 +2272,23 @@ $("#view-library")?.addEventListener("click", async (e) => {
     return;
   }
   const card = e.target.closest("[data-id]");
-  if (!card || e.target.closest("#library-pager")) return;
+  if (!card || e.target.closest("#library-pager") || e.target.closest(".lib-bulk")) return;
+  try { await openFromLibrary(card.dataset.id); }
+  catch (err) { toast(err.message, true); }
+});
+
+$("#view-archives")?.addEventListener("click", async (e) => {
+  if (handleDeleteClick(e)) return;
+  const select = e.target.closest("[data-select]");
+  if (select) {
+    e.stopPropagation();
+    toggleSelectSet(archivesSelected, select.dataset.select, select.checked);
+    renderArchives();
+    return;
+  }
+  if (e.target.closest(".lib-bulk") || e.target.closest("#archives-pager")) return;
+  const card = e.target.closest("[data-id]");
+  if (!card) return;
   try { await openFromLibrary(card.dataset.id); }
   catch (err) { toast(err.message, true); }
 });

@@ -1084,6 +1084,10 @@ button:disabled { opacity: .55; cursor: wait; }
   display: flex; justify-content: space-between; align-items: center;
   gap: 16px; flex-wrap: wrap; margin-top: 8px;
 }
+.lib-bulk {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+}
+.lib-bulk button:disabled { opacity: 0.45; cursor: not-allowed; }
 .lib-filters { display: flex; gap: 8px; flex-wrap: wrap; }
 .lib-filters button.on { background: var(--ink); color: #fff; }
 .lib-heading {
@@ -1105,6 +1109,17 @@ button:disabled { opacity: .55; cursor: wait; }
 }
 .progress-row .yt-wrap { flex: 0 0 200px; }
 .yt-wrap { position: relative; display: flex; flex-direction: column; gap: 10px; }
+.yt-wrap .card-check {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 5;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  accent-color: var(--ink);
+  cursor: pointer;
+}
 button.thumb-x {
   position: absolute;
   top: 8px;

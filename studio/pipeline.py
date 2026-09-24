@@ -33,6 +33,7 @@ from studio.projects import (
     input_prefix,
     invalidate_render_artifacts,
     last_video_path,
+    list_archived_projects,
     list_projects,
     load_lines,
     load_meta,
@@ -470,7 +471,12 @@ def _youtube_watch_info(meta: dict | None) -> dict[str, Any]:
     return youtube_watch_info(meta)
 
 
-def list_library_items(*, owner_id: str | None = None, is_admin: bool = False) -> list[dict]:
+def list_library_items(
+    *,
+    owner_id: str | None = None,
+    is_admin: bool = False,
+    archived_only: bool = False,
+) -> list[dict]:
     """Studio library cards: jobs with thumb/cover/audio/video flags for GUI and MCP.
 
     Intentionally avoids per-job inspect_artifacts / next_resume_step (those open
@@ -478,6 +484,7 @@ def list_library_items(*, owner_id: str | None = None, is_admin: bool = False) -
     from GET /api/projects/{id}/job when a card is opened.
 
     When owner_id is set and is_admin is False, only that member's jobs are returned.
+    archived_only=True returns only archived jobs (for the Archives page).
     """
     settings = load_settings()
     host = settings.get("host") or "127.0.0.1"
@@ -486,7 +493,8 @@ def list_library_items(*, owner_id: str | None = None, is_admin: bool = False) -
     port = int(settings.get("port") or 7878)
     base = f"http://{host}:{port}"
     items = []
-    for item in list_projects():
+    source = list_archived_projects() if archived_only else list_projects()
+    for item in source:
         if not is_admin and owner_id:
             if str(item.get("owner_id") or "").strip() != str(owner_id).strip():
                 continue

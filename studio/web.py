@@ -54,6 +54,7 @@ from studio.pipeline import (
 )
 from studio.projects import (
     apply_youtube_publish_meta,
+    archive_projects,
     cover_path,
     create_project,
     delete_project,
@@ -78,6 +79,7 @@ from studio.projects import (
     set_project_voice,
     set_project_youtube,
     set_video_layout,
+    unarchive_projects,
     write_scripts,
 )
 from studio.prompts import catalog_payload, get_prompt, reset_prompt, reset_prompt_user, save_prompt, save_prompts, set_prompt_user
@@ -137,6 +139,10 @@ class ProjectPatch(BaseModel):
     youtube_keywords: str | list[str] | None = None
     youtube_hashtags: str | list[str] | None = None
     generate_9x16: bool | None = None
+
+
+class ArchiveIdsBody(BaseModel):
+    ids: list[str] = []
 
 
 class SetMusicBody(BaseModel):
@@ -2374,6 +2380,49 @@ def create_app() -> FastAPI:
             owner_id=user.get("id"),
             is_admin=(user.get("role") or "") == "admin",
         )
+
+    @app.get("/api/archives")
+    def archives_list(request: Request):
+        user = studio_auth.require_session(request)
+        return list_library_items(
+            owner_id=user.get("id"),
+            is_admin=(user.get("role") or "") == "admin",
+            archived_only=True,
+        )
+
+    def _archive_ids_for_user(request: Request, ids: list[str]) -> list[str]:
+        from studio.tenant import require_project_access
+
+        out: list[str] = []
+        for raw in ids or []:
+            pid = str(raw or "").strip()
+            if not pid:
+                continue
+            require_project_access(request, pid)
+            out.append(pid)
+        return out
+
+    @app.post("/api/archives")
+    def archives_add(body: ArchiveIdsBody, request: Request):
+        studio_auth.require_session(request)
+        try:
+            ids = _archive_ids_for_user(request, body.ids)
+            if not ids:
+                raise RuntimeError("Select at least one video to archive.")
+            return archive_projects(ids)
+        except Exception as exc:
+            raise _err(exc)
+
+    @app.post("/api/archives/restore")
+    def archives_restore(body: ArchiveIdsBody, request: Request):
+        studio_auth.require_session(request)
+        try:
+            ids = _archive_ids_for_user(request, body.ids)
+            if not ids:
+                raise RuntimeError("Select at least one video to restore.")
+            return unarchive_projects(ids)
+        except Exception as exc:
+            raise _err(exc)
 
     @app.post("/api/projects")
     def new_project(body: NewProject, request: Request):
