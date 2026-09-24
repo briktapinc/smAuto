@@ -148,6 +148,7 @@ def _assemble_generated(
     image_provider: str,
     model: str,
     art_style: str | None = None,
+    include_bubblehead: bool = True,
 ) -> dict[str, Any]:
     tagged = (data.get("script_tagged") or "").replace("\r\n", "\n").strip()
     if not tagged and data.get("lines"):
@@ -179,6 +180,7 @@ def _assemble_generated(
         layout=layout,
         image_provider=image_provider,
         art_style=art_style,
+        include_bubblehead=include_bubblehead,
     )
     for line, item in zip(lines, data.get("lines") or []):
         if item.get("scene"):
@@ -192,6 +194,7 @@ def _assemble_generated(
                 layout=layout,
                 provider=image_provider,
                 art_style=art_style,
+                include_bubblehead=include_bubblehead,
             )
     # Always derive spoken text from tagged so illustration cues cannot leak into TTS.
     raw = raw_from_tagged(tagged)
@@ -276,13 +279,16 @@ def generate_script(
     if not isinstance(data, dict):
         raise RuntimeError("Generated script was not a JSON object.")
     art_style = None
+    include_bubblehead = True
     if project_id:
         try:
-            from studio.projects import project_art_style
+            from studio.projects import project_art_style, project_include_bubblehead
 
             art_style = project_art_style(project_id)
+            include_bubblehead = project_include_bubblehead(project_id)
         except Exception:
             art_style = None
+            include_bubblehead = True
     return _assemble_generated(
         data,
         topic=topic,
@@ -293,6 +299,7 @@ def generate_script(
         image_provider=image_provider,
         model=model,
         art_style=art_style,
+        include_bubblehead=include_bubblehead,
     )
 
 

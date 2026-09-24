@@ -66,6 +66,7 @@ from studio.projects import (
     project_payload,
     project_video_layout,
     project_image_provider,
+    project_include_bubblehead,
     save_lines,
     set_aspect,
     set_art_style,
@@ -2566,6 +2567,7 @@ def create_app() -> FastAPI:
                 aspect=meta.get("aspect") or DEFAULT_ASPECT,
                 layout=project_video_layout(project_id),
                 image_provider=project_image_provider(project_id),
+                include_bubblehead=project_include_bubblehead(meta),
             )
             save_lines(project_id, lines, summary=summary)
             if (

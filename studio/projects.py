@@ -949,6 +949,7 @@ def refresh_line_prompts(project_id: str) -> None:
     title = meta.get("title") or meta.get("topic") or ""
     summary = meta.get("summary") or ""
     provider = project_image_provider(project_id)
+    include_bubblehead = project_include_bubblehead(meta)
     for line in lines:
         scene = line.get("scene") or line.get("raw") or ""
         spoken = line.get("raw") or ""
@@ -961,6 +962,7 @@ def refresh_line_prompts(project_id: str) -> None:
             layout=layout,
             provider=provider,
             art_style=style,
+            include_bubblehead=include_bubblehead,
         )
     path.write_text(json.dumps(lines, indent=2), encoding="utf-8")
 
@@ -1022,6 +1024,7 @@ def set_include_bubblehead(project_id: str, enabled: bool = True) -> dict[str, A
     meta = load_meta(project_id)
     meta["include_bubblehead"] = bool(enabled)
     save_meta(project_id, meta)
+    refresh_line_prompts(project_id)
     return project_payload(project_id)
 
 
@@ -1309,6 +1312,7 @@ def load_lines(project_id: str) -> list[dict[str, Any]]:
             aspect=meta.get("aspect") or DEFAULT_ASPECT,
             layout=project_video_layout(project_id),
             image_provider=project_image_provider(project_id),
+            include_bubblehead=project_include_bubblehead(meta),
         )
     return []
 

@@ -419,7 +419,7 @@ SETTINGS (get_studio_settings / update_studio_settings)
   update_studio_settings(video_layout=...) or set_video_layout(layout).
   Per-job: set_video_layout(layout, project_id).
 - character_size: 'large' (current, scale 1.0), 'medium' (half), or 'small' (1/3). Feet stay bottom-anchored. update_studio_settings(character_size=...) or set_character_size(size); per-job set_character_size(size, project_id).
-- include_bubblehead: true (default) composites the yellow stick-figure narrator; false keeps cover/line art (or billboard TV + studio room), audio, and music without the character. set_include_bubblehead(enabled, project_id) or render_final_video(..., include_bubblehead=) or PATCH include_bubblehead.
+- include_bubblehead: true (default) composites the yellow stick-figure narrator; false keeps cover/line art (or billboard TV + studio room), audio, and music without the character, and uses full-frame cover line prompts (no host gap). set_include_bubblehead(enabled, project_id) or render_final_video(..., include_bubblehead=) or PATCH include_bubblehead.
 - stickman_head_color: studio-wide Bubblehead fill (#RRGGBB). get_stickman_head_color / set_stickman_head_color(color) / reset_stickman_head_color — recolors every pose*.png; shadow auto H−10.4° / L−8.4. Free. Re-render to update finished videos.
 - default_aspect / aspect: '16:9' landscape, '9:16' portrait/shorts, or 'both'
   (Render writes script_final_16x9.mp4 then script_final_9x16.mp4). New jobs

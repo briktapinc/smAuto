@@ -152,6 +152,21 @@ FRAMING_COVER_PORTRAIT_DEFAULT = (
     "Almost no readable lettering."
 )
 
+# Used when include_bubblehead is false — no host gap; fill the whole frame.
+FRAMING_COVER_LANDSCAPE_FULL_DEFAULT = (
+    "Constraints: {size_line}. The image MUST be {phrase}, full-bleed, covering the entire "
+    "video frame as the COVER background (not square, not 4:5, not a framed billboard). "
+    "Fill the entire frame with one clear diagram or illustration of the topic. "
+    "Almost no readable lettering."
+)
+
+FRAMING_COVER_PORTRAIT_FULL_DEFAULT = (
+    "Constraints: {size_line}. The image MUST be {phrase}, full-bleed, covering the entire "
+    "video frame as the COVER background (not square, not 4:5, not a small inset or framed billboard). "
+    "Fill the entire frame with one clear diagram or illustration of the topic. "
+    "Almost no readable lettering."
+)
+
 FRAMING_BILLBOARD_LANDSCAPE_DEFAULT = (
     "Constraints: {size_line}. The image MUST be {phrase} — 16:9 at {gen_w}x{gen_h}, "
     "fill the frame, no letterbox. Full-frame subject-only diagram/illustration of the topic. "
@@ -390,15 +405,29 @@ CATALOG: list[dict[str, str]] = [
         "key": "art.framing_cover_landscape",
         "category": "Images / art",
         "label": "Cover framing (16:9)",
-        "description": "Cover-layout framing for landscape jobs. Placeholders: {size_line}, {phrase}. Leave empty space; do not draw a host.",
+        "description": "Cover-layout framing for landscape jobs when Bubblehead is on. Placeholders: {size_line}, {phrase}. Leave empty space on the right for the host.",
         "default": FRAMING_COVER_LANDSCAPE_DEFAULT,
     },
     {
         "key": "art.framing_cover_portrait",
         "category": "Images / art",
         "label": "Cover framing (9:16)",
-        "description": "Cover-layout framing for portrait jobs. Placeholders: {size_line}, {phrase}. Leave empty space; do not draw a host.",
+        "description": "Cover-layout framing for portrait jobs when Bubblehead is on. Placeholders: {size_line}, {phrase}. Leave empty space at the bottom for the host.",
         "default": FRAMING_COVER_PORTRAIT_DEFAULT,
+    },
+    {
+        "key": "art.framing_cover_landscape_full",
+        "category": "Images / art",
+        "label": "Cover framing full-frame (16:9)",
+        "description": "Cover-layout framing when Include Bubblehead is off. Placeholders: {size_line}, {phrase}. Fill the entire frame.",
+        "default": FRAMING_COVER_LANDSCAPE_FULL_DEFAULT,
+    },
+    {
+        "key": "art.framing_cover_portrait_full",
+        "category": "Images / art",
+        "label": "Cover framing full-frame (9:16)",
+        "description": "Cover-layout framing when Include Bubblehead is off. Placeholders: {size_line}, {phrase}. Fill the entire frame.",
+        "default": FRAMING_COVER_PORTRAIT_FULL_DEFAULT,
     },
     {
         "key": "art.framing_billboard_landscape",

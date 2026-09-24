@@ -230,7 +230,12 @@ def scene_subject(scene: str) -> str:
     return text
 
 
-def _framing_bundle(aspect: str, layout: str, provider: str = "flux") -> dict:
+def _framing_bundle(
+    aspect: str,
+    layout: str,
+    provider: str = "flux",
+    include_bubblehead: bool = True,
+) -> dict:
     from studio.aspect import (
         canvas_phrase,
         canvas_size,
@@ -258,10 +263,18 @@ def _framing_bundle(aspect: str, layout: str, provider: str = "flux") -> dict:
         )
         ratio_line = get_prompt("art.ratio_billboard", **frame_kwargs)
     elif is_portrait(aspect):
-        framing_key = "art.framing_cover_portrait"
+        framing_key = (
+            "art.framing_cover_portrait"
+            if include_bubblehead
+            else "art.framing_cover_portrait_full"
+        )
         ratio_line = get_prompt("art.ratio_cover", **frame_kwargs)
     else:
-        framing_key = "art.framing_cover_landscape"
+        framing_key = (
+            "art.framing_cover_landscape"
+            if include_bubblehead
+            else "art.framing_cover_landscape_full"
+        )
         ratio_line = get_prompt("art.ratio_cover", **frame_kwargs)
     return {
         "aspect": aspect,
@@ -288,12 +301,14 @@ def wrap_scene_prompt(
     provider: str = "flux",
     art_style: str | None = None,
     user_id: str | None = None,
+    include_bubblehead: bool = True,
 ) -> str:
     """Build the image-model prompt for one line.
 
     Flux and ComfyUI use images.flux_instructions + art.* only — a short scene prompt.
     ChatGPT native uses art.scene_wrapper (may mention the image-UI preset).
     Neither path concatenates MCP playbook, script.rules, or TTS text.
+    Cover layout reserves host space only when include_bubblehead is true.
     """
     from studio.prompts import get_prompt
     from studio.settings import normalize_image_provider, uses_short_image_prompt
@@ -301,7 +316,9 @@ def wrap_scene_prompt(
     scene = scene_subject(scene or "")
     provider = normalize_image_provider(provider)
     style = art_style_texts(art_style, user_id=user_id)
-    ctx = _framing_bundle(aspect, layout, provider=provider)
+    ctx = _framing_bundle(
+        aspect, layout, provider=provider, include_bubblehead=include_bubblehead
+    )
     style_kwargs = {
         "art_style_short": style["short"],
         "art_style_full": style["full"],
@@ -310,9 +327,12 @@ def wrap_scene_prompt(
     }
     if uses_short_image_prompt(provider):
         w, h, lay = ctx["width"], ctx["height"], ctx["layout"]
-        if lay == "billboard":
+        if lay == "billboard" or not include_bubblehead:
             ctx["framing"] = (
-                "Full-frame topic diagram/illustration only. Almost no readable text."
+                f"{w}x{h} full-bleed. Fill the entire frame with a clear diagram/illustration; "
+                "almost no readable text."
+                if lay == "cover"
+                else "Full-frame topic diagram/illustration only. Almost no readable text."
             )
         elif h > w:
             ctx["framing"] = (

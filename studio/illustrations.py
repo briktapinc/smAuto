@@ -47,6 +47,7 @@ from studio.projects import (
     migrate_legacy_aspect_files,
     project_art_style,
     project_image_provider,
+    project_include_bubblehead,
     project_payload,
     project_video_layout,
     publish_cover_alias,
@@ -607,6 +608,7 @@ def migrate_billboard_short_names(project_id: str) -> dict:
                     aspect=ASPECT_9_16,
                     layout="cover",
                     image_provider=project_image_provider(project_id),
+                    include_bubblehead=project_include_bubblehead(meta),
                 )
                 _migrate_folder(billboards_dir(project_id, ASPECT_9_16), shorts_lines)
     except Exception as exc:
@@ -1112,6 +1114,7 @@ def _append_line_jobs(
 ) -> None:
     fields = job_image_fields(aspect, layout, provider=provider)
     style = project_art_style(project_id)
+    include_bubblehead = project_include_bubblehead(project_id)
     seen: set[str] = set()
     for i, line in enumerate(lines):
         # Always use short b00N stems (ignore legacy topic filenames / ChatGPT titles).
@@ -1131,6 +1134,7 @@ def _append_line_jobs(
             layout=layout,
             provider=provider,
             art_style=style,
+            include_bubblehead=include_bubblehead,
         )
         jobs.append(
             attach_illustration_file_meta(
@@ -1219,6 +1223,7 @@ def illustration_jobs(project_id: str) -> dict:
                 aspect=ASPECT_9_16,
                 layout="cover",
                 image_provider=provider,
+                include_bubblehead=project_include_bubblehead(project_id),
             )
             if shorts_tagged
             else []

@@ -119,6 +119,7 @@ def parse_tagged_script(
     layout: str = "cover",
     image_provider: str = "flux",
     art_style: str | None = None,
+    include_bubblehead: bool = True,
 ) -> list[dict]:
     tagged = tagged.replace("\r\n", "\n")
     raw_lines = tagged.split("\n")
@@ -159,6 +160,7 @@ def parse_tagged_script(
             layout=layout,
             provider=image_provider,
             art_style=art_style,
+            include_bubblehead=include_bubblehead,
         )
         lines.append(
             {

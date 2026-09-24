@@ -39,6 +39,7 @@ from studio.projects import (
     load_meta,
     project_art_style,
     project_image_provider,
+    project_include_bubblehead,
     project_payload,
     project_video_layout,
     save_lines,
@@ -1204,6 +1205,7 @@ def build_mcp() -> "FastMCP":
             aspect=meta.get("aspect") or DEFAULT_ASPECT,
             layout=project_video_layout(project_id),
             image_provider=project_image_provider(project_id),
+            include_bubblehead=project_include_bubblehead(meta),
         )
         save_lines(project_id, lines, summary=summary)
         if youtube_description or youtube_keywords or youtube_hashtags:
@@ -1336,7 +1338,7 @@ def build_mcp() -> "FastMCP":
 
     @mcp.tool
     def set_include_bubblehead(enabled: bool = True, project_id: str = "") -> dict:
-        """Include or omit the yellow stick-figure narrator (poses/mouth/bubble head) on final frames. Default true. Per-job meta include_bubblehead — pass project_id. Does not remove audio, cover intro, or cover/billboard art. Also accepted on render_final_video(include_bubblehead=) and PATCH /api/projects/{id}."""
+        """Include or omit the yellow stick-figure narrator (poses/mouth/bubble head) on final frames. Default true. Per-job meta include_bubblehead — pass project_id. False also switches cover-layout line prompts to full-frame (no host gap). Does not remove audio, cover intro, or cover/billboard art. Also accepted on render_final_video(include_bubblehead=) and PATCH /api/projects/{id}."""
         if not project_id:
             raise ValueError("project_id is required (include_bubblehead is per-job).")
         return write_project_include_bubblehead(project_id, bool(enabled))
