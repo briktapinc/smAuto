@@ -808,6 +808,8 @@ def normalize_slot_kind(kind: str | None) -> str:
     value = (kind or "").strip().lower()
     if value in {"cover"}:
         return "cover"
+    if value in {"shorts", "shorts_line", "short", "9x16"}:
+        return "shorts_line"
     if value in {"line", "billboard", "background", "illustration"}:
         return "line"
     return ""
@@ -2993,11 +2995,16 @@ def resolve_illustration_slot(
                 job
                 for job in matches
                 if not (job.get("role") == "cover" or is_cover_filename(job.get("filename")))
+                and job.get("role") != "shorts_line"
             ]
+        if kind_n == "shorts_line":
+            matches = [job for job in matches if job.get("role") == "shorts_line"]
         if len(matches) > 1:
             shorts = [job for job in matches if job.get("role") == "shorts_line"]
             lines = [job for job in matches if job.get("role") != "shorts_line"]
-            # Default to explainer line unless the caller asked for a shorts index.
+            # Prefer the aspect the caller asked for; default to explainer line.
+            if kind_n == "shorts_line" and shorts:
+                return shorts[0], info
             if shorts and not lines:
                 return shorts[0], info
             if lines:
