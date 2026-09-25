@@ -526,3 +526,24 @@ def set_hands_off_prefs(
             raise FileNotFoundError("Unknown user")
         return _public_user(user)
     return update_user(owner_id, **fields)
+
+
+def sync_signed_in_hands_off(user_id: str | None, updates: dict[str, Any]) -> None:
+    """Copy a Settings save onto the signed-in member so the scheduler and the checkbox match."""
+    uid = str(user_id or "").strip()
+    if not uid:
+        return
+    kwargs: dict[str, Any] = {}
+    if "hands_off" in updates:
+        from studio.settings import normalize_hands_off
+
+        kwargs["enabled"] = normalize_hands_off(updates.get("hands_off"))
+    if "hands_off_interval_hours" in updates:
+        kwargs["interval_hours"] = updates.get("hands_off_interval_hours")
+    if "hands_off_min_queue" in updates:
+        kwargs["min_queue"] = updates.get("hands_off_min_queue")
+    if kwargs:
+        try:
+            set_hands_off_prefs(uid, **kwargs)
+        except FileNotFoundError:
+            pass

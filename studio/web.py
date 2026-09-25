@@ -48,6 +48,7 @@ from studio.pipeline import (
     start_illustrations_job,
     start_project,
     start_regenerate_illustration_job,
+    start_motion_clips_job,
     start_render_thread,
     start_script_job,
     stop_project,
@@ -188,6 +189,16 @@ class RenderBody(BaseModel):
     shuffle_music: bool = False
 
 
+class MotionClipsBody(BaseModel):
+    filename: str | None = None
+    index: int | None = None
+    kind: str | None = None
+    all: bool = False
+    redo: bool = False
+    confirm_spend: bool = False
+    spend_confirm_id: str = ""
+
+
 class RegenerateIllustrationBody(BaseModel):
     filename: str | None = None
     index: int | None = None
@@ -224,6 +235,7 @@ class SettingsBody(BaseModel):
     openai_api_key: str | None = None
     elevenlabs_api_key: str | None = None
     fal_key: str | None = None
+    fal_video_model: str | None = None
     openai_model: str | None = None
     openai_tts_model: str | None = None
     elevenlabs_model: str | None = None
@@ -1995,6 +2007,11 @@ def create_app() -> FastAPI:
                 save_settings(updates)
             except RuntimeError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if any(k in updates for k in ("hands_off", "hands_off_interval_hours", "hands_off_min_queue")):
+                from studio.members import sync_signed_in_hands_off
+
+                actor = studio_auth.require_session(request)
+                sync_signed_in_hands_off(actor.get("id"), updates)
             if "image_provider" in updates:
                 from studio.settings import normalize_image_provider
 
@@ -2711,6 +2728,9 @@ def create_app() -> FastAPI:
                     "line": job.get("line"),
                     "needs_regen": job.get("needs_regen"),
                     "waiting_for": job.get("waiting_for"),
+                    "has_clip": job.get("has_clip"),
+                    "clip_url": job.get("clip_url"),
+                    "clip_mtime": job.get("clip_mtime") or 0,
                 }
                 for job in data.get("jobs") or []
             ],
@@ -2733,6 +2753,42 @@ def create_app() -> FastAPI:
                 filename=body.filename,
                 index=body.index,
                 kind=body.kind,
+            )
+        except Exception as exc:
+            raise _err(exc)
+
+    @app.post("/api/projects/{project_id}/illustrations/motion")
+    def convert_illustrations_to_motion(project_id: str, body: MotionClipsBody):
+        try:
+            from studio.fal_video import FAL_VIDEO_USD_ESTIMATE, slots_for_motion
+
+            slots = slots_for_motion(
+                project_id,
+                filename=body.filename,
+                index=body.index,
+                kind=body.kind,
+                all_slots=body.all,
+                redo=body.redo,
+            )
+            if slots:
+                _gate_spend(
+                    "fal_video",
+                    confirm_spend=body.confirm_spend,
+                    spend_confirm_id=body.spend_confirm_id,
+                    units=len(slots),
+                    detail=(
+                        f"Convert {len(slots)} picture(s) to video "
+                        f"(~${FAL_VIDEO_USD_ESTIMATE:.2f} each, model price varies)"
+                    ),
+                    project_id=project_id,
+                )
+            return start_motion_clips_job(
+                project_id,
+                filename=body.filename,
+                index=body.index,
+                kind=body.kind,
+                all_slots=body.all,
+                redo=body.redo,
             )
         except Exception as exc:
             raise _err(exc)
@@ -3153,7 +3209,7 @@ def create_app() -> FastAPI:
         return FileResponse(path, media_type=media)
 
     @app.get("/api/projects/{project_id}/cover")
-    def cover_image(project_id: str, aspect: str | None = None, filename: str | None = None):
+    def cover_image(project_id: str, aspect: str | None = None, filename: str | None = None, clip: int = 0):
         try:
             if filename:
                 name = Path(filename).name
@@ -3166,6 +3222,11 @@ def create_app() -> FastAPI:
                 path = cover_path(project_id)
         except FileNotFoundError as exc:
             raise HTTPException(404, str(exc))
+        if clip:
+            path = path.with_suffix(".mp4")
+            if not path.is_file():
+                raise HTTPException(404, "Cover video clip not generated yet.")
+            return FileResponse(path, media_type="video/mp4", headers={"Cache-Control": "no-cache"})
         if not path.is_file():
             raise HTTPException(404, "Cover image not generated yet.")
         return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-cache"})
@@ -3182,7 +3243,8 @@ def create_app() -> FastAPI:
             path = alt / Path(filename).name
         if not path.is_file():
             raise HTTPException(404, "Illustration not found.")
-        return FileResponse(path, headers={"Cache-Control": "no-cache"})
+        media = "video/mp4" if path.suffix.lower() == ".mp4" else None
+        return FileResponse(path, media_type=media, headers={"Cache-Control": "no-cache"})
 
     @app.get("/api/projects/{project_id}/audio-file")
     def audio_file(project_id: str):

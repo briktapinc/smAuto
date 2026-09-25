@@ -447,6 +447,7 @@
               </select>
             </label>
             <button id="gen-flux" class="primary">Generate backgrounds with Flux</button>
+            <button id="convert-all-clips" type="button">Convert all to video clips</button>
           </div>
           <p id="pictures-help">Flux (default) queues a server job that fills missing line backgrounds via fal-ai/flux-2 (Flux Dev 2). ChatGPT / External means generate in MCP or the built-in image tool, then upload or MCP-save. ComfyUI posts your uploaded API JSON to a local ComfyUI server. Never DALL-E / OpenAI Images API.</p>
           <p id="pictures-live" class="meta" hidden></p>
@@ -763,6 +764,16 @@
                     <option value="external">External (MCP / agent upload)</option>
                   </select>
                 </label>
+                <label>fal video model
+                  <select name="fal_video_model">
+                    <option value="fal-ai/kling-video/v3/standard/image-to-video" selected>Kling 3.0 Standard</option>
+                    <option value="fal-ai/kling-video/v2.6/pro/image-to-video">Kling 2.6 Pro</option>
+                    <option value="fal-ai/ltx-2/image-to-video/fast">LTX-2 Fast</option>
+                    <option value="fal-ai/minimax/video-01/image-to-video">MiniMax Video-01</option>
+                    <option value="fal-ai/veo3.1/fast/image-to-video">Veo 3.1 Fast</option>
+                  </select>
+                </label>
+                <p class="hint">Pictures → Convert to video clip uses this image-to-video model. The clip replaces that still in the final render. Price depends on the model (often well above a still).</p>
                 <label>Cover provider override
                   <select name="cover_provider">
                     <option value="" selected>Same as image provider</option>

@@ -993,6 +993,21 @@ def attach_illustration_file_meta(project_id: str, job: dict) -> dict:
     job["url"] = url
     job["content_hash"] = content_hash
     job["sha256"] = content_hash
+    from studio.fal_video import clip_is_ready, clip_path_for_still
+
+    clip = clip_path_for_still(dest) if dest.name else dest
+    has_clip = bool(ready and clip_is_ready(clip))
+    clip_mtime = int(clip.stat().st_mtime) if has_clip else 0
+    job["has_clip"] = has_clip
+    job["clip_name"] = clip.name if has_clip else ""
+    job["clip_mtime"] = clip_mtime
+    if has_clip and is_cover:
+        job["clip_url"] = f"/api/projects/{project_id}/cover?aspect={cover_aspect}&clip=1&t={clip_mtime}"
+    elif has_clip:
+        sep = "&" if "?" in rel else "?"
+        job["clip_url"] = rel.replace(filename, clip.name) + f"{sep}t={clip_mtime}"
+    else:
+        job["clip_url"] = ""
     return job
 
 

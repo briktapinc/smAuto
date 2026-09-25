@@ -1212,18 +1212,47 @@ def _set_job(project_id: str, **fields) -> None:
 
 def _run_code(script: str, extra: list[str]) -> None:
     from studio.paths import poses_env_for_subprocess
+    from studio.render_trace import (
+        append_render_log,
+        project_id_from_args,
+        register_render_pid,
+        unregister_render_pid,
+    )
 
+    project_id = project_id_from_args(extra)
     cmd = [sys.executable, str(CODE_DIR / script), *extra]
     env = os.environ.copy()
     env.update(poses_env_for_subprocess())
-    result = subprocess.run(cmd, cwd=str(REPO_ROOT), capture_output=True, text=True, env=env)
-    if result.stdout:
-        sys.stdout.write(result.stdout)
-        if not result.stdout.endswith("\n"):
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(REPO_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        start_new_session=True,
+    )
+    register_render_pid(project_id, proc.pid)
+    try:
+        stdout, stderr = proc.communicate()
+    finally:
+        unregister_render_pid(project_id, proc.pid)
+    stdout = stdout or ""
+    stderr = stderr or ""
+    append_render_log(
+        project_id,
+        script=script,
+        exit_code=int(proc.returncode or 0),
+        stdout=stdout,
+        stderr=stderr,
+    )
+    if stdout:
+        sys.stdout.write(stdout)
+        if not stdout.endswith("\n"):
             sys.stdout.write("\n")
-    if result.returncode != 0:
-        err = (result.stderr or "").strip() or (result.stdout or "").strip() or "no output"
-        raise RuntimeError(f"{script} failed (exit {result.returncode}):\n{err}")
+    if proc.returncode != 0:
+        err = stderr.strip() or stdout.strip() or "no output"
+        raise RuntimeError(f"{script} failed (exit {proc.returncode}):\n{err}")
 
 
 def start_task(
@@ -1318,6 +1347,21 @@ def start_task(
                     from studio.topics import on_pipeline_finished
 
                     on_pipeline_finished(project_id, outcome, detail)
+                except Exception:
+                    pass
+                try:
+                    from studio.job_notifications import publish_job_finished
+
+                    with _lock:
+                        snap = dict(_jobs.get(project_id) or {})
+                    publish_job_finished(
+                        project_id,
+                        kind=kind,
+                        outcome=outcome,
+                        detail=detail,
+                        error=str(snap.get("error") or ""),
+                        step=str(snap.get("step") or ""),
+                    )
                 except Exception:
                     pass
 
@@ -1861,6 +1905,80 @@ def start_regenerate_illustration_job(
         except Exception:
             pass
     return out
+
+
+def start_motion_clips_job(
+    project_id: str,
+    *,
+    filename: str | None = None,
+    index: int | None = None,
+    kind: str | None = None,
+    all_slots: bool = False,
+    redo: bool = False,
+) -> dict:
+    """Queue fal image-to-video for one ready picture, or every ready picture missing a clip."""
+    if is_busy(project_id):
+        raise RuntimeError("This job is already running. Stop or wait before converting pictures to clips.")
+    from studio.fal_video import convert_slots, model_spec, slots_for_motion
+    from studio.illustrations import ensure_fal_ready
+
+    slots = slots_for_motion(
+        project_id,
+        filename=filename,
+        index=index,
+        kind=kind,
+        all_slots=all_slots,
+        redo=redo,
+    )
+    if not slots:
+        return {
+            "ok": True,
+            "queued": False,
+            "count": 0,
+            "detail": "Every ready picture already has a video clip.",
+        }
+    ensure_fal_ready()
+    spec = model_spec()
+    label = slots[0].get("filename") or "picture"
+    detail = (
+        f"Converting {len(slots)} pictures to video with {spec['label']}…"
+        if all_slots
+        else f"Converting {label} to video with {spec['label']}…"
+    )
+
+    def worker():
+        def _note(msg: str) -> None:
+            _progress(project_id, step="illustrations", detail=msg)
+
+        result = convert_slots(project_id, slots, model_id=spec["id"], progress=_note)
+        errors = result.get("errors") or []
+        if errors and result.get("count"):
+            _progress(
+                project_id,
+                step="illustrations",
+                detail=f"Saved {result['count']} clip(s); {len(errors)} failed.",
+            )
+        elif not result.get("count"):
+            raise RuntimeError(errors[0]["error"] if errors else "No clips were saved.")
+
+    status = start_task(
+        project_id,
+        "illustrations",
+        worker,
+        detail,
+        done_detail=f"Video clips ready ({len(slots)}).",
+        extra={"motion_clips": len(slots), "fal_video_model": spec["id"]},
+    )
+    return {
+        **status,
+        "ok": True,
+        "queued": True,
+        "count": len(slots),
+        "filenames": [slot.get("filename") for slot in slots],
+        "fal_video_model": spec["id"],
+        "model_label": spec["label"],
+    }
+
 
 def start_align_job(project_id: str) -> dict:
     def worker():

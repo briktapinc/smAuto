@@ -97,22 +97,29 @@ def auto_scheduler_enabled() -> bool:
 
 
 def hands_off_enabled(owner_id: str | None = None) -> bool:
-    """Per-member hands-off. With no owner_id, true if any member has it on."""
+    """True when this member opted in, or (with no member) when any member or the Settings switch is on.
+
+    The header checkbox writes Settings. The Topics poll reads this flag. Both have to agree
+    or the switch snaps off and the due-picker never runs.
+    """
     from studio.members import list_hands_off_owner_ids, user_hands_off_enabled
+    from studio.settings import hands_off_enabled as settings_hands_off
 
     uid = (owner_id or "").strip()
     if uid:
         return user_hands_off_enabled(uid)
-    return bool(list_hands_off_owner_ids())
+    return bool(list_hands_off_owner_ids()) or settings_hands_off()
 
 
 def _hands_off_interval(owner_id: str | None = None) -> timedelta:
     from studio.members import hands_off_prefs
-    from studio.settings import normalize_hands_off_interval_hours
+    from studio.settings import load_settings, normalize_hands_off_interval_hours
 
-    hours = normalize_hands_off_interval_hours(
-        hands_off_prefs(owner_id).get("hands_off_interval_hours")
-    )
+    if (owner_id or "").strip():
+        raw = hands_off_prefs(owner_id).get("hands_off_interval_hours")
+    else:
+        raw = load_settings().get("hands_off_interval_hours")
+    hours = normalize_hands_off_interval_hours(raw)
     return timedelta(hours=hours)
 
 
@@ -132,9 +139,13 @@ def _gpu_busy_reschedule_delta() -> timedelta:
 
 def _hands_off_min_queue(owner_id: str | None = None) -> int:
     from studio.members import hands_off_prefs
-    from studio.settings import normalize_hands_off_min_queue
+    from studio.settings import load_settings, normalize_hands_off_min_queue
 
-    return normalize_hands_off_min_queue(hands_off_prefs(owner_id).get("hands_off_min_queue"))
+    if (owner_id or "").strip():
+        raw = hands_off_prefs(owner_id).get("hands_off_min_queue")
+    else:
+        raw = load_settings().get("hands_off_min_queue")
+    return normalize_hands_off_min_queue(raw)
 
 
 def _empty() -> dict[str, Any]:

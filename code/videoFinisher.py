@@ -42,6 +42,8 @@ COVER_MS = int(round(COVER_SECONDS * 1000))
 cover_path = (args.cover or "").strip() or (INPUT_FILE + "_cover.png")
 FRAMES_DIR = (args.frames_dir or "").strip() or (INPUT_FILE + "_frames")
 OUTPUT_FILE = (args.output or "").strip() or (INPUT_FILE + "_final.mp4")
+cover_video = os.path.splitext(cover_path)[0] + ".mp4"
+COVER_VIDEO = os.path.isfile(cover_video) and os.path.getsize(cover_video) > 1000
 if not os.path.isfile(cover_path):
     print(
         f"ERROR: title-card cover missing at {cover_path}. "
@@ -55,7 +57,15 @@ wav_path = INPUT_FILE + ".wav"
 if not os.path.isfile(wav_path):
     wav_path = INPUT_FILE + ".mp3"
 
-print(f"Prepending {COVER_SECONDS:g}s title-card still (no character overlay): {cover_path}")
+if COVER_VIDEO:
+    print(f"Prepending {COVER_SECONDS:g}s title-card clip (no character overlay): {cover_video}")
+else:
+    print(f"Prepending {COVER_SECONDS:g}s title-card still (no character overlay): {cover_path}")
+
+def _cover_inputs():
+    if COVER_VIDEO:
+        return ["-stream_loop", "-1", "-t", str(COVER_SECONDS), "-i", cover_video]
+    return ["-loop", "1", "-framerate", "30", "-t", str(COVER_SECONDS), "-i", cover_path]
 
 def _resolve_ffmpeg() -> str:
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -72,6 +82,9 @@ def _mux(audio_filter):
     enc = detect_video_encoder()
     encoder = enc.get("encoder") or "libx264"
     preset = enc.get("preset") or "veryfast"
+    # CPU guard (Ely 2026-09-23): cap ffmpeg at ~1 core so the VPS stays under Hostinger CPU limit.
+    # Override with env BUBBLEPOD_FFMPEG_THREADS (e.g. "2") without a code change.
+    _threads = os.environ.get("BUBBLEPOD_FFMPEG_THREADS", "1")
     # Expose for parent pipeline job status
     try:
         import os as _os
@@ -89,7 +102,8 @@ def _mux(audio_filter):
     )
     command = [
         _resolve_ffmpeg(), "-y",
-        "-loop", "1", "-framerate", "30", "-t", str(COVER_SECONDS), "-i", cover_path,
+        "-threads", _threads, "-filter_threads", _threads,
+        *_cover_inputs(),
         "-framerate", "30",
         "-i", os.path.join(FRAMES_DIR, "f%06d.png"),
         "-i", wav_path,
@@ -116,7 +130,8 @@ def _mux(audio_filter):
             print(f"{encoder} failed; falling back to libx264", file=sys.stderr)
             command = [
                 _resolve_ffmpeg(), "-y",
-                "-loop", "1", "-framerate", "30", "-t", str(COVER_SECONDS), "-i", cover_path,
+        "-threads", _threads, "-filter_threads", _threads,
+                *_cover_inputs(),
                 "-framerate", "30",
                 "-i", os.path.join(FRAMES_DIR, "f%06d.png"),
                 "-i", wav_path,

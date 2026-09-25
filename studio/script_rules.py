@@ -81,7 +81,7 @@ openai | chatgpt | claude | lmstudio.
 - claude: Claude Desktop / Claude Code, same stdio MCP (python -m studio.mcp_server). Same as chatgpt: YOU write then save_script (include YouTube metadata). Do NOT call generate_script_via_api.
 - lmstudio: local OpenAI-compatible API (default http://127.0.0.1:1234/v1). Studio generates via the local LLM — no OpenAI cloud, no MCP native write, no spend confirm. ChatGPT/Claude must call generate_script_via_api / generate_topics rather than writing the body themselves. Settings: lmstudio_base_url, lmstudio_model (optional; empty → GET /v1/models, first loaded). If it is not running: start the LM Studio local server.
 Topics: if chatgpt or claude, YOU invent titles then create_topic / schedule_topic. Do not call generate_topics unless provider is openai or lmstudio.
-SPEND GUARD (OpenAI cloud + fal/Flux only): request_spend_confirm(action) then pass spend_confirm_id, or confirm_spend=true on the billed tool. Actions: openai_script, openai_topics, openai_tts, flux_images, flux_cover, flux_regen. ComfyUI, local TTS, ChatGPT/Claude native, and LM Studio skip this. get_spend_status / get_audit_log. Audit JSONL: user_data/audit.log.
+SPEND GUARD (OpenAI cloud + fal/Flux only): request_spend_confirm(action) then pass spend_confirm_id, or confirm_spend=true on the billed tool. Actions: openai_script, openai_topics, openai_tts, flux_images, flux_cover, flux_regen, fal_video. ComfyUI, local TTS, ChatGPT/Claude native, and LM Studio skip this. get_spend_status / get_audit_log. Audit JSONL: user_data/audit.log.
 """.strip()
 
 
@@ -207,8 +207,11 @@ inside brackets are dropped from speech entirely.
 1. EMOTION TAGS
 - Allowed tags, and only these: <explain> <happy> <sad> <angry> <confused> <rq>
 - Anything in triangle brackets is NOT spoken. TTS and Gentle never hear it.
-- Put a tag at the start of a line when the emotion should change.
-- The emotion sticks until the next tag (1 line or 100 lines later).
+- EVERY non-empty line must be exactly `<tag> Sentence` — the tag, a space, then the spoken sentence.
+  Example: <explain> Despite being over 3 inches long, the [tarantula] is tiny next to the Sun.
+- Do not leave a line untagged. Do not put the tag in the middle of the sentence.
+- A blank line is a section break and has no tag.
+- save_script rejects any other shape and sends it back. Rewrite the whole script to this format and call save_script again.
 - Meanings:
   explain = default teaching energy, informative, not over-the-top
   happy = genuine excitement, delight, a cool reveal
@@ -384,7 +387,7 @@ openai | chatgpt | claude | lmstudio. Call get_text_provider before writing a sc
 - claude: YOU are Claude Desktop / Claude Code on the same stdio server. Write the tagged script yourself then save_script (include YouTube publish metadata). Do NOT call generate_script_via_api.
 - lmstudio: local OpenAI-compatible API (default http://127.0.0.1:1234/v1). Studio generates via the local LLM — no OpenAI cloud, no spend confirm. YOU must call generate_script_via_api (and generate_topics) rather than writing the body yourself. Optional lmstudio_model; empty uses the first loaded model from GET /v1/models. If it fails, start the LM Studio local server.
 Topics: openai or lmstudio → generate_topics. chatgpt/claude → invent titles, then create_topic and/or schedule_topic. Do not call generate_topics unless provider is openai or lmstudio.
-SPEND GUARD: Never silently bill OpenAI cloud or fal. Call request_spend_confirm(action) then pass spend_confirm_id, or pass confirm_spend=true on generate_script_via_api / generate_topics / generate_speech / generate_illustrations_with_flux / generate_illustrations / generate_cover / regenerate_illustration when those hit OpenAI or Flux. get_spend_status, get_audit_log (user_data/audit.log).
+SPEND GUARD: Never silently bill OpenAI cloud or fal. Call request_spend_confirm(action) then pass spend_confirm_id, or pass confirm_spend=true on generate_script_via_api / generate_topics / generate_speech / generate_illustrations_with_flux / generate_illustrations / generate_cover / regenerate_illustration / convert_illustration_to_clip / convert_all_illustrations_to_clips when those hit OpenAI or fal. Video clips use action fal_video (billed even when image_provider is not flux). get_spend_status, get_audit_log (user_data/audit.log).
 UNSUPERVISED: set_hands_off(true) then walk away, or schedule_topic(..., scheduled_at='YYYY-MM-DDTHH:MM'). Naive times are this PC's local zone. Studio's ~30s due-picker starts queued topics when due ONLY while hands_off is on (FIFO by scheduled_at, one at a time). Hands-off also auto-generates topics (openai/lmstudio) and auto-schedules drafts; each job uploads to YouTube as private (per-job override). text openai/lmstudio auto-writes the script; chatgpt/claude must save_script in the same turn. Pictures: flux, comfyui, or external (MCP save_illustration_image for every slot — like external TTS; missing → EXTERNAL_IMAGES_MISSING). chatgpt pictures use the same upload path. hands_off() / set_hands_off / list_topics / start_topic_pipeline / restart_api.
 GPU: never fire illustrations + local TTS + another job in parallel. Wait for get_gpu_lock ({busy, holder, waiters}). ComfyUI, Chatterbox, Flux batches, and pipeline image/audio/render are one-at-a-time (user_data/gpu.lock).
 
@@ -657,6 +660,11 @@ WORKFLOW
      save_illustration_image after each so Pictures /
      list_illustration_jobs see the file under user_data/projects/{id}/ immediately.
      Never generate_cover / generate_illustrations_with_flux. No FAL_KEY.
+   To turn a ready picture into motion (fal image-to-video, action fal_video):
+   convert_illustration_to_clip(project_id, filename=...) or
+   convert_all_illustrations_to_clips(project_id). Sibling .mp4 replaces the still in the
+   final render (title card and line art / billboard TV). Pick the model with
+   set_fal_video_model / list_fal_video_models (Settings fal_video_model). confirm_spend required.
    To redo one existing picture: regenerate_illustration(project_id, filename=...).
      flux queues fal for that file only. comfyui queues the uploaded workflow. chatgpt marks jobs[].needs_regen and returns
      the app prompt plus save_illustration_image filename/kind. Do not regenerate the whole set.

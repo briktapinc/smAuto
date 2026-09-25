@@ -274,6 +274,55 @@ def script_structure_warnings(tagged: str) -> list[str]:
     return issues
 
 
+_TAGGED_LINE_RE = re.compile(
+    r"^<(" + "|".join(ALLOWED_EMOTIONS) + r")>\s+(\S.*)$",
+    re.I,
+)
+
+
+def audit_mcp_script_format(tagged: str) -> list[str]:
+    """Every non-empty MCP line must be `<tag> Sentence`. Blank lines are section breaks."""
+    issues: list[str] = []
+    lines = (tagged or "").replace("\r\n", "\n").split("\n")
+    spoken = 0
+    for index, raw in enumerate(lines, start=1):
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        spoken += 1
+        match = _TAGGED_LINE_RE.match(stripped)
+        if not match:
+            issues.append(
+                f"Line {index} is not `<tag> Sentence`. Rewrite it as "
+                f"`<explain> {stripped[:90]}` using one allowed tag."
+            )
+            continue
+        rest = match.group(2)
+        if "<" in rest:
+            issues.append(
+                f"Line {index} has an extra <tag> after the sentence start. "
+                "Use exactly one tag at the beginning of the line."
+            )
+    if spoken == 0:
+        issues.append("Script has no spoken lines. Write each line as `<tag> Sentence`.")
+    return issues
+
+
+def mcp_script_rejection(issues: list[str]) -> str:
+    shown = issues[:12]
+    extra = len(issues) - len(shown)
+    tail = f" (+{extra} more)" if extra > 0 else ""
+    allowed = " ".join(f"<{tag}>" for tag in ALLOWED_EMOTIONS)
+    return (
+        "Script rejected. Rewrite the whole tagged script so every non-empty line is "
+        "`<tag> Sentence` and call save_script again with the rewritten script. "
+        "A blank line is a section break and has no tag. "
+        f"Allowed tags: {allowed}. "
+        "Do not send markdown, numbered lists, or a sentence with no tag. "
+        "Problems: " + " | ".join(shown) + tail
+    )
+
+
 def validate_tagged_script(tagged: str) -> list[str]:
     errors = []
     if "<" in tagged:

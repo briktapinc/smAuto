@@ -1,5 +1,7 @@
 import argparse
 import os.path
+import subprocess
+import sys
 import numpy as np
 from PIL import Image
 import math
@@ -129,6 +131,87 @@ def _line_image_path(imageNum):
         return short
     legacy = f"{INPUT_FILE}_billboards/{getFilenameOfLine(line)}.png"
     return legacy if os.path.isfile(legacy) else None
+
+
+CLIP_SAMPLE_FPS = 8
+_CLIP_CACHE = {}
+
+
+def _ffmpeg_bin():
+    root = REPO_ROOT
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from studio.ffmpeg_bin import resolve_ffmpeg
+    return resolve_ffmpeg()
+
+
+def _motion_clip_path(imageNum):
+    png = _line_image_path(imageNum)
+    if not png:
+        return None
+    clip = os.path.splitext(png)[0] + ".mp4"
+    try:
+        if os.path.isfile(clip) and os.path.getsize(clip) > 1000:
+            return clip
+    except OSError:
+        return None
+    return None
+
+
+def _load_clip_frames(clip):
+    mtime = os.path.getmtime(clip)
+    cached = _CLIP_CACHE.get(clip)
+    if cached and cached[0] == mtime and cached[1]:
+        return cached[1]
+    _CLIP_CACHE.clear()
+    tmp = os.path.splitext(clip)[0] + ".frames"
+    if os.path.isdir(tmp):
+        shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp, exist_ok=True)
+    pattern = os.path.join(tmp, "f%04d.jpg")
+    subprocess.check_call(
+        [
+            _ffmpeg_bin(), "-y", "-i", clip,
+            "-vf", f"fps={CLIP_SAMPLE_FPS},scale=960:-2",
+            "-q:v", "4", pattern,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    frames = []
+    for name in sorted(os.listdir(tmp)):
+        if not name.lower().endswith(".jpg"):
+            continue
+        frames.append(Image.open(os.path.join(tmp, name)).convert("RGB"))
+    _CLIP_CACHE[clip] = (mtime, frames)
+    return frames
+
+
+def _motion_index(imageNum, elapsed_frames):
+    if not USE_BILLBOARDS:
+        return -1
+    clip = _motion_clip_path(imageNum)
+    if not clip:
+        return -1
+    try:
+        frames = _load_clip_frames(clip)
+    except Exception:
+        return -1
+    if not frames:
+        return -1
+    tick = int(max(0, elapsed_frames) * CLIP_SAMPLE_FPS / float(FRAME_RATE))
+    return tick % len(frames)
+
+
+def _motion_image(imageNum, elapsed_frames):
+    ix = _motion_index(imageNum, elapsed_frames)
+    if ix < 0:
+        return None, -1
+    clip = _motion_clip_path(imageNum)
+    frames = (_CLIP_CACHE.get(clip) or (0, []))[1]
+    if not frames:
+        return None, -1
+    return frames[ix], ix
 
 
 def _tv_slot(flipped):
@@ -315,16 +398,19 @@ def _paste_tv_billboard(frame, scribble, flipped):
     frame.paste(overlay_s, (tv_x, tv_y), overlay_s)
 
 
-def _compose_background(paragraph, imageNum, flipped):
+def _compose_background(paragraph, imageNum, flipped, still=None):
     line_path = _line_image_path(imageNum)
+    art = still
+    if art is None and line_path:
+        art = Image.open(line_path)
     if not LAYOUT_BILLBOARD:
-        if line_path:
-            return _cover(Image.open(line_path), W_W, W_H)
+        if art is not None:
+            return _cover(art, W_W, W_H)
         return _pale(_cover(Image.open(_background_path(paragraph)), W_W, W_H))
     # Billboard: room at full color (do not wash/pale the studio wall).
     frame = _cover(Image.open(_background_path(paragraph)), W_W, W_H)
-    if line_path:
-        _paste_tv_billboard(frame, Image.open(line_path), flipped)
+    if art is not None:
+        _paste_tv_billboard(frame, art, flipped)
     return frame
 
 
@@ -332,12 +418,15 @@ def drawFrame(frameNum,paragraph,emotion,imageNum,pose,phoneNum,poseTimeSinceLas
     global MOUTH_COOR
     global BG_CACHE
     FLIPPED = (paragraph%2 == 1)
-    cache_key = (LAYOUT_BILLBOARD, paragraph, imageNum if USE_BILLBOARDS else -1)
+    img_start = frameOf(2, 0)
+    elapsed = frameNum - img_start if img_start > -100000 else 0
+    motion, motion_ix = _motion_image(imageNum, elapsed)
+    cache_key = (LAYOUT_BILLBOARD, paragraph, imageNum if USE_BILLBOARDS else -1, motion_ix)
 
     if cache_key == BG_CACHE[0]:
         frame = BG_CACHE[1].copy()
     else:
-        frame = _compose_background(paragraph, imageNum, FLIPPED)
+        frame = _compose_background(paragraph, imageNum, FLIPPED, still=motion)
         BG_CACHE = [cache_key, frame.copy()]
 
     if not INCLUDE_BUBBLEHEAD:
@@ -667,7 +756,10 @@ for frame in range(0,FRAME_COUNT):
     TUNPC_cache = min(timeUntilNextPoseChange, MAX_JIGGLE_TIME) if ENABLE_JIGGLING else 0
     IMAGE_cache = imageNum if USE_BILLBOARDS else 0
 
-    thisFrameInfo = infoToString([paragraph, emotion, IMAGE_cache, pose, phonemesPerFrame[frame], TSPPC_cache, TUNPC_cache])
+    img_start = frameOf(2, 0)
+    elapsed = frame - img_start if img_start > -100000 else 0
+    motion_ix = _motion_index(imageNum, elapsed)
+    thisFrameInfo = infoToString([paragraph, emotion, IMAGE_cache, pose, phonemesPerFrame[frame], TSPPC_cache, TUNPC_cache, motion_ix])
     if ENABLE_FRAME_CACHING and thisFrameInfo not in FRAME_CACHES:
         FRAME_CACHES[thisFrameInfo] = frame
 

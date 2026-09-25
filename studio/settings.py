@@ -120,6 +120,7 @@ DEFAULTS = {
     "lmstudio_base_url": LMSTUDIO_DEFAULT_BASE_URL,
     "lmstudio_model": "",
     "image_provider": "flux",
+    "fal_video_model": "fal-ai/kling-video/v3/standard/image-to-video",
     "cover_provider": "",
     "script_draft_provider": "",
     "comfyui_url": COMFYUI_DEFAULT_URL,
@@ -297,6 +298,14 @@ def text_provider_label(value: str | None = None) -> str:
     except RuntimeError:
         provider = current_text_provider()
     return TEXT_PROVIDER_LABELS.get(provider, provider)
+
+
+def normalize_fal_video_model(value: Any) -> str:
+    from studio.fal_video import DEFAULT_FAL_VIDEO_MODEL, FAL_VIDEO_MODELS
+
+    raw = str(value or "").strip()
+    allowed = {row["id"] for row in FAL_VIDEO_MODELS}
+    return raw if raw in allowed else DEFAULT_FAL_VIDEO_MODEL
 
 
 def normalize_image_provider(value: str | None, default: str = "flux") -> str:
@@ -795,6 +804,7 @@ def load_settings() -> dict[str, Any]:
             pass
     data.update(_env_overrides())
     data["image_provider"] = normalize_image_provider(data.get("image_provider"))
+    data["fal_video_model"] = normalize_fal_video_model(data.get("fal_video_model"))
     try:
         data["cover_provider"] = normalize_cover_provider(data.get("cover_provider"))
     except RuntimeError:
@@ -914,6 +924,8 @@ def save_settings(updates: dict[str, Any]) -> dict[str, Any]:
                 continue
             if key == "image_provider":
                 data[key] = normalize_image_provider(value)
+            elif key == "fal_video_model":
+                data[key] = normalize_fal_video_model(value)
             elif key == "cover_provider":
                 data[key] = normalize_cover_provider(value)
             elif key == "script_draft_provider":
@@ -1142,6 +1154,10 @@ def public_settings() -> dict[str, Any]:
         data["owner_priority_effective"] = data["owner_priority"]
     data["scheduler_interval_sec"] = 30
     data["flux_model"] = FLUX_MODEL
+    from studio.fal_video import fal_video_catalog
+
+    data["fal_video_models"] = fal_video_catalog()
+    data["fal_video_model"] = normalize_fal_video_model(data.get("fal_video_model"))
     data["image_providers"] = list(IMAGE_PROVIDERS)
     data["image_provider_labels"] = dict(IMAGE_PROVIDER_LABELS)
     data["cover_providers"] = list(COVER_PROVIDERS)
@@ -1304,6 +1320,8 @@ _MEMBER_SETTINGS_KEYS = frozenset({
     "stripe_price_interval",
     "public_base_url",
     "flux_model",
+    "fal_video_model",
+    "fal_video_models",
 })
 
 

@@ -27,6 +27,7 @@ from studio.pipeline import (
     resume_project,
     start_illustrations_job,
     start_project,
+    start_motion_clips_job,
     start_regenerate_illustration_job,
     start_render_thread,
     start_script_downstream_job,
@@ -91,10 +92,17 @@ from studio.topics import (
 )
 from studio.textgen import native_script_handoff
 from studio.tts import list_voices
-from studio.utils_script import parse_tagged_script, raw_from_tagged, script_structure_warnings, validate_tagged_script
+from studio.utils_script import (
+    audit_mcp_script_format,
+    mcp_script_rejection,
+    parse_tagged_script,
+    raw_from_tagged,
+    script_structure_warnings,
+    validate_tagged_script,
+)
 from studio import youtube as yt
 
-MCP_BUILD = "2026-09-23-external-images-mcp"
+MCP_BUILD = "2026-09-25-oversight-tools"
 
 # Keep in sync with every @mcp.tool in build_mcp (stdio and FastMCP HTTP /mcp).
 MCP_TOOL_NAMES = (
@@ -173,6 +181,10 @@ MCP_TOOL_NAMES = (
     "list_cover_versions",
     "set_active_cover",
     "regenerate_illustration",
+    "list_fal_video_models",
+    "set_fal_video_model",
+    "convert_illustration_to_clip",
+    "convert_all_illustrations_to_clips",
     "save_illustration_image",
     "save_illustration_images",
     "get_cover_provider",
@@ -188,6 +200,12 @@ MCP_TOOL_NAMES = (
     "align_phonemes",
     "render_final_video",
     "get_render_status",
+    "listen_job_notifications",
+    "get_render_log",
+    "extract_frame",
+    "cancel_render",
+    "get_narration_info",
+    "estimate_render_time",
     "start_job",
     "resume_job",
     "stop_job",
@@ -272,6 +290,14 @@ def handshake_instructions() -> str:
         "render including both → optional YouTube). Without hands_off, due topics stay queued until Hands-off or Run now. "
         "MCP image path: set_image_provider('external') (or chatgpt), list_illustration_jobs, generate art, "
         "save_illustration_image / save_illustration_images for cover + every line, then start_job / resume_job. "
+        "When a pipeline or final render finishes, call listen_job_notifications (optional project_id; "
+        "pass the returned cursor as after_id on the next call). "
+        "A render_error notice means the render failed and the job is not finished: fix it, then resume_job or render_final_video. "
+        "Downloads: get_file(kind=video, aspect=16:9|9:16, mode=url). "
+        "Scripts: get_project or get_file(kind=script_tagged). "
+        "Art slots: list_illustration_jobs. Search: search. Rename: rename_video. "
+        "Swap one image: save_illustration_image. Queue: get_queue_status and get_gpu_lock. "
+        "Render diagnosis: get_render_log, extract_frame, get_narration_info, estimate_render_time, cancel_render. "
         "GPU lock: ComfyUI, local Chatterbox TTS, Flux batches, "
         "and pipeline image/audio/render run one at a time — never fire illustrations + local TTS + "
         "another job in parallel; wait or call get_gpu_lock. run_now=true starts immediately. Pause holds the queue. "
@@ -1054,6 +1080,11 @@ def build_mcp() -> "FastMCP":
         if min_queue is not None and int(min_queue) >= 1:
             updates["hands_off_min_queue"] = int(min_queue)
         save_settings(updates)
+        caller = _mcp_caller_user()
+        if caller and caller.get("id"):
+            from studio.members import sync_signed_in_hands_off
+
+            sync_signed_in_hands_off(caller.get("id"), updates)
         status = hands_off_status()
         status["settings"] = studio_settings_payload()
         return status
@@ -1190,10 +1221,10 @@ def build_mcp() -> "FastMCP":
         youtube_keywords: str | list[str] = "",
         youtube_hashtags: str | list[str] = "",
     ) -> dict:
-        """Save a ChatGPT- or Claude-written tagged script (hook + body + subscribe outro). Raw/TTS text is derived automatically: emotion tags and any illustration/art-direction cues are stripped (short [topic] nouns stay spoken). Pass optional scenes=[...] — one subject-only illustration prompt per non-empty line, in order — do NOT embed IMAGE:/PROMPT:/long [scene descriptions] in script_tagged. Also pass youtube_description, youtube_keywords (comma-separated or list), and youtube_hashtags (with #) so upload_to_youtube can publish with that metadata."""
-        errors = validate_tagged_script(script_tagged)
+        """Save a ChatGPT- or Claude-written tagged script (hook + body + subscribe outro). Every non-empty line must be `<tag> Sentence` (one of explain, happy, sad, angry, confused, rq). If the format is wrong, save_script rejects the script and you must rewrite it and call save_script again. Raw/TTS text is derived automatically: emotion tags and any illustration/art-direction cues are stripped (short [topic] nouns stay spoken). Pass optional scenes=[...] — one subject-only illustration prompt per non-empty line, in order — do NOT embed IMAGE:/PROMPT:/long [scene descriptions] in script_tagged. Also pass youtube_description, youtube_keywords (comma-separated or list), and youtube_hashtags (with #) so upload_to_youtube can publish with that metadata."""
+        errors = audit_mcp_script_format(script_tagged) + validate_tagged_script(script_tagged)
         if errors:
-            raise RuntimeError("Script failed validation: " + "; ".join(errors))
+            raise RuntimeError(mcp_script_rejection(errors))
         meta = load_meta(project_id)
         title = meta.get("title") or meta.get("topic") or project_id
         summary = summary or meta.get("summary") or meta.get("topic") or ""
@@ -1619,6 +1650,97 @@ def build_mcp() -> "FastMCP":
             out.setdefault("canvas", aspect_info.get("canvas"))
         return out
 
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def list_fal_video_models() -> dict:
+        """List fal image-to-video models the Pictures 'Convert to video clip' buttons can use. The active choice is settings.fal_video_model."""
+        from studio.fal_video import fal_video_catalog
+        from studio.settings import load_settings
+
+        settings = load_settings()
+        return {
+            "ok": True,
+            "fal_video_model": settings.get("fal_video_model"),
+            "models": fal_video_catalog(),
+        }
+
+    @mcp.tool
+    def set_fal_video_model(model: str) -> dict:
+        """Set the fal image-to-video model used when converting pictures to clips. Pass an id from list_fal_video_models."""
+        from studio.fal_video import fal_video_catalog
+        from studio.settings import normalize_fal_video_model, save_settings
+
+        chosen = normalize_fal_video_model(model)
+        if chosen != (model or "").strip():
+            ids = [row["id"] for row in fal_video_catalog()]
+            raise RuntimeError(f"Unknown fal video model. Choose one of: {', '.join(ids)}")
+        save_settings({"fal_video_model": chosen})
+        return {"ok": True, "fal_video_model": chosen}
+
+    @mcp.tool
+    def convert_illustration_to_clip(
+        project_id: str,
+        filename: str = "",
+        index: int | None = None,
+        kind: str = "",
+        redo: bool = False,
+        confirm_spend: bool = False,
+        spend_confirm_id: str = "",
+    ) -> dict:
+        """Convert one ready picture (cover or line PNG) into a sibling mp4 with the selected fal video model. The final render uses that clip in place of the still. Always billed (action fal_video) — pass confirm_spend=true or spend_confirm_id. redo=true replaces an existing clip."""
+        from studio.fal_video import FAL_VIDEO_USD_ESTIMATE, slots_for_motion
+
+        slots = slots_for_motion(
+            project_id,
+            filename=filename or None,
+            index=index,
+            kind=kind or None,
+            redo=redo,
+        )
+        if slots:
+            _mcp_spend(
+                "fal_video",
+                confirm_spend=confirm_spend,
+                spend_confirm_id=spend_confirm_id,
+                units=len(slots),
+                detail=(
+                    f"Convert {filename or index} to video "
+                    f"(~${FAL_VIDEO_USD_ESTIMATE:.2f}, model price varies)"
+                ),
+                project_id=project_id,
+            )
+        return start_motion_clips_job(
+            project_id,
+            filename=filename or None,
+            index=index,
+            kind=kind or None,
+            redo=redo,
+        )
+
+    @mcp.tool
+    def convert_all_illustrations_to_clips(
+        project_id: str,
+        redo: bool = False,
+        confirm_spend: bool = False,
+        spend_confirm_id: str = "",
+    ) -> dict:
+        """Convert every ready picture that does not already have a clip (covers and line art) using the selected fal video model. Final render plays those clips instead of stills. redo=true reconverts pictures that already have clips. Billed action fal_video — confirm_spend required, one unit per picture."""
+        from studio.fal_video import FAL_VIDEO_USD_ESTIMATE, slots_for_motion
+
+        slots = slots_for_motion(project_id, all_slots=True, redo=redo)
+        if slots:
+            _mcp_spend(
+                "fal_video",
+                confirm_spend=confirm_spend,
+                spend_confirm_id=spend_confirm_id,
+                units=len(slots),
+                detail=(
+                    f"Convert {len(slots)} pictures to video "
+                    f"(~${FAL_VIDEO_USD_ESTIMATE:.2f} each, model price varies)"
+                ),
+                project_id=project_id,
+            )
+        return start_motion_clips_job(project_id, all_slots=True, redo=redo)
+
     @mcp.tool
     def save_illustration_image(
         project_id: str,
@@ -1789,6 +1911,56 @@ def build_mcp() -> "FastMCP":
         )
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def listen_job_notifications(
+        project_id: str = "",
+        after_id: int = 0,
+        timeout_sec: int = 30,
+    ) -> dict:
+        """Wait for a Studio job to finish or for a render to fail. job_completed means the pipeline or final render succeeded with no render error. render_error means drawing frames, muxing, or ffmpeg failed (including one aspect of a both job) — read error/detail and action, fix that project, then resume_job or render_final_video. job_failed is any other terminal failure of start/resume/render. Pass project_id to listen for one job. Pass after_id=0 the first time, then the returned cursor so you only receive newer notices. An empty list means the wait timed out — call again with the same cursor. timeout_sec is capped at 50."""
+        from studio.job_notifications import listen_job_notifications as wait_for_jobs
+
+        return wait_for_jobs(
+            project_id=project_id or "",
+            after_id=after_id or 0,
+            timeout_sec=timeout_sec or 30,
+        )
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def get_render_log(project_id: str, tail_chars: int = 12000) -> dict:
+        """Detailed scheduler / videoDrawer / videoFinisher stdout and stderr for this project, plus the current job error. Use this when a render fails and get_render_status only shows a short error."""
+        from studio.mcp_oversight import get_render_log as _log
+
+        return _log(project_id, tail_chars=int(tail_chars or 12000))
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def extract_frame(project_id: str, timestamp: str = "1", aspect: str = "") -> dict:
+        """Grab one JPEG from the finished mp4 at timestamp (seconds or HH:MM:SS). Returns base64 so a visual check does not download the whole video. aspect is 16:9 or 9:16; omit to use the last render."""
+        from studio.mcp_oversight import extract_frame as _frame
+
+        return _frame(project_id, timestamp=timestamp or "1", aspect=aspect or "")
+
+    @mcp.tool
+    def cancel_render(project_id: str) -> dict:
+        """Stop a stuck render now. Kills the live scheduler, frame-draw, or ffmpeg child for this project, then stop_job. stop_job alone only asks the worker to halt at the next step."""
+        from studio.mcp_oversight import cancel_render as _cancel
+
+        return _cancel(project_id)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def get_narration_info(project_id: str) -> dict:
+        """Wav duration and whether that wav plus Gentle alignment still match the current script_raw.txt. audio_matches_current_script is false when the spoken script was rewritten after the last voice render."""
+        from studio.mcp_oversight import get_narration_info as _narration
+
+        return _narration(project_id)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def estimate_render_time(project_id: str, aspect: str = "") -> dict:
+        """Rough remaining render time from narration length and frames already drawn. An estimate, not a measurement."""
+        from studio.mcp_oversight import estimate_render_time as _eta
+
+        return _eta(project_id, aspect=aspect or "")
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def get_render_status(project_id: str) -> dict:
         """Poll frame-draw / ffmpeg progress for a project."""
         return job_status(project_id)
@@ -1933,6 +2105,7 @@ def build_mcp() -> "FastMCP":
         local_voice: str = "",
         gentle_url: str = "",
         image_provider: str = "",
+        fal_video_model: str = "",
         text_provider: str = "",
         script_provider: str = "",
         video_layout: str = "",
@@ -1987,6 +2160,8 @@ def build_mcp() -> "FastMCP":
             updates["gentle_url"] = gentle_url
         if image_provider:
             updates["image_provider"] = image_provider
+        if fal_video_model:
+            updates["fal_video_model"] = fal_video_model
         chosen_text = text_provider or script_provider
         if chosen_text:
             updates["text_provider"] = normalize_text_provider(chosen_text)
@@ -2041,6 +2216,11 @@ def build_mcp() -> "FastMCP":
             updates["rate_limit_login"] = rate_limit_login
         if updates:
             save_settings(updates)
+            caller = _mcp_caller_user()
+            if caller and caller.get("id"):
+                from studio.members import sync_signed_in_hands_off
+
+                sync_signed_in_hands_off(caller.get("id"), updates)
         return studio_settings_payload()
 
     return mcp

@@ -140,6 +140,8 @@ def is_billed(action: str, *, context: dict[str, Any] | None = None) -> bool:
         return tts == "openai"
     if action in ("flux_images", "flux_cover", "flux_regen"):
         return image == "flux"
+    if action == "fal_video":
+        return True
     if action == "pipeline_billed":
         return text == "openai" or image == "flux" or tts == "openai"
     return False
@@ -248,9 +250,10 @@ def _check_caps(action: str, units: int, *, user_id: str | None = None) -> None:
             )
     # Per-user FAL spend / image quotas (plan tier)
     uid = (user_id or "").strip()
-    if uid and action.startswith("flux"):
+    if uid and (action.startswith("flux") or action == "fal_video"):
         try:
             from studio.costs import FLUX_USD_PER_IMAGE
+            from studio.fal_video import FAL_VIDEO_USD_ESTIMATE
             from studio.members import get_user_by_id
             from studio.plans import plan_for_user
             from studio.usage import sum_usage
@@ -258,15 +261,17 @@ def _check_caps(action: str, units: int, *, user_id: str | None = None) -> None:
             user = get_user_by_id(uid)
             if user and (user.get("role") or "") != "admin":
                 plan = plan_for_user(user)
-                img_cap = plan.get("images_generated")
-                if img_cap is not None and sum_usage(uid, "images_generated") + units > float(img_cap):
-                    raise SpendBlocked(
-                        f"Plan image quota reached ({img_cap}/period).",
-                        payload={"code": "quota_exhausted", "kind": "images_generated", "error_code": "quota_exhausted"},
-                    )
+                per = FAL_VIDEO_USD_ESTIMATE if action == "fal_video" else FLUX_USD_PER_IMAGE
+                if action.startswith("flux"):
+                    img_cap = plan.get("images_generated")
+                    if img_cap is not None and sum_usage(uid, "images_generated") + units > float(img_cap):
+                        raise SpendBlocked(
+                            f"Plan image quota reached ({img_cap}/period).",
+                            payload={"code": "quota_exhausted", "kind": "images_generated", "error_code": "quota_exhausted"},
+                        )
                 fal_cap = plan.get("fal_spend_cents")
                 if fal_cap is not None:
-                    add_cents = int(round(units * FLUX_USD_PER_IMAGE * 100))
+                    add_cents = int(round(units * per * 100))
                     if sum_usage(uid, "fal_spend_cents") + add_cents > float(fal_cap):
                         raise SpendBlocked(
                             f"Plan FAL spend cap reached (${float(fal_cap)/100:.2f}/period).",
@@ -287,21 +292,26 @@ def record_spend(action: str, units: int = 1, *, user_id: str | None = None, pro
             c["openai_calls"] = int(c.get("openai_calls") or 0) + units
         elif action.startswith("flux"):
             c["flux_images"] = int(c.get("flux_images") or 0) + units
+        elif action == "fal_video":
+            c["fal_video_clips"] = int(c.get("fal_video_clips") or 0) + units
         _write_counters(c)
     uid = (user_id or "").strip()
-    if uid and action.startswith("flux"):
+    if uid and (action.startswith("flux") or action == "fal_video"):
         try:
             from studio.costs import FLUX_USD_PER_IMAGE
+            from studio.fal_video import FAL_VIDEO_USD_ESTIMATE
             from studio.usage import record_usage
 
-            cents = int(round(units * FLUX_USD_PER_IMAGE * 100))
-            record_usage(
-                uid,
-                "images_generated",
-                units,
-                cost_cents=0,
-                project_id=project_id,
-            )
+            per = FAL_VIDEO_USD_ESTIMATE if action == "fal_video" else FLUX_USD_PER_IMAGE
+            cents = int(round(units * per * 100))
+            if action.startswith("flux"):
+                record_usage(
+                    uid,
+                    "images_generated",
+                    units,
+                    cost_cents=0,
+                    project_id=project_id,
+                )
             record_usage(
                 uid,
                 "fal_spend_cents",

@@ -17,6 +17,7 @@ let illustTimer = null;
 let illustSeq = 0;
 let lastIllust = null;
 let regenTargetKey = "";
+let motionTargetKey = "";
 const ILLUST_POLL_MS = 2500;
 let jobIndex = [];
 let archiveIndex = [];
@@ -496,6 +497,32 @@ function pauseWatch() {
   if (player && !player.paused) player.pause();
 }
 
+function pauseVideoStep() {
+  const player = $("#video-player");
+  if (player && !player.paused) player.pause();
+}
+
+function pauseYoutubeEmbed() {
+  const frame = $("#watch-youtube-frame");
+  if (!frame || !frame.getAttribute("src")) return;
+  frame.dataset.heldSrc = frame.src;
+  frame.removeAttribute("src");
+}
+
+function viewIsOn(name) {
+  return !!$(`#view-${name}`)?.classList.contains("on");
+}
+
+function pauseOffscreenPlayers() {
+  if (!viewIsOn("watch")) {
+    pauseWatch();
+    pauseYoutubeEmbed();
+  } else {
+    pauseVideoStep();
+  }
+  if (!viewIsOn("video")) pauseVideoStep();
+}
+
 const JOB_STEPS = ["script", "pictures", "voice", "backgrounds", "music", "video"];
 
 function stepButtons() {
@@ -557,7 +584,6 @@ function applyLibraryFilter(filter) {
 
 function setStep(name) {
   if (!APP_STEPS.includes(name)) name = "library";
-  if (name !== "watch") pauseWatch();
   try { localStorage.setItem(STORE_STEP, name); } catch { /* ignore */ }
   if ((JOB_STEPS.includes(name) || name === "watch") && current?.id) {
     try { localStorage.setItem(STORE_JOB, current.id); } catch { /* ignore */ }
@@ -622,6 +648,7 @@ function setStep(name) {
   }
   if (current) setBusy(!!current.running, current.job?.error || current.job?.detail || "");
   syncIllustrationPolling();
+  pauseOffscreenPlayers();
 }
 
 async function restoreRoute() {
@@ -1195,22 +1222,30 @@ function fillVideoPlayer(id, { autoplay = false } = {}) {
   player.hidden = false;
   player.classList.toggle("portrait", playAsp === "9:16");
   player.src = videoSrc(id, playAsp);
-  if (autoplay) player.play().catch(() => {});
+  if (autoplay && viewIsOn("video")) {
+    pauseWatch();
+    pauseYoutubeEmbed();
+    player.play().catch(() => {});
+  } else {
+    player.pause();
+  }
 }
 
 function autoloadReadyVideo({ switchToVideo = true } = {}) {
   if (!current?.id) return false;
   const hasVideo = !!current.has_video || readyAspects().length > 0;
   if (!hasVideo) return false;
-  fillVideoPlayer(current.id, { autoplay: true });
-  const watchOn = $("#view-watch")?.classList.contains("on");
+  const watchOn = viewIsOn("watch");
+  fillVideoPlayer(current.id, { autoplay: !watchOn });
   if (watchOn) {
+    pauseVideoStep();
     const playAsp = preferredPlayAspect();
     const player = $("#watch-player");
     if (player) {
       fillAspectPick($("#watch-aspect-pick"), $("#watch-aspect-pick-wrap"), playAsp);
       player.classList.toggle("portrait", playAsp === "9:16");
       player.src = videoSrc(current.id, playAsp);
+      pauseYoutubeEmbed();
       player.play().catch(() => {});
     }
     if ($("#watch-sub")) {
@@ -1219,7 +1254,12 @@ function autoloadReadyVideo({ switchToVideo = true } = {}) {
   } else if (switchToVideo) {
     const active = document.querySelector(".content-panel .view.on, #view-watch.on, #view-library.on")?.id || "";
     const onJobTab = ["view-script", "view-pictures", "view-voice", "view-backgrounds", "view-music", "view-video"].includes(active);
-    if (onJobTab || active === "view-video") setStep("video");
+    if (onJobTab || active === "view-video") {
+      setStep("video");
+      pauseWatch();
+      pauseYoutubeEmbed();
+      $("#video-player")?.play().catch(() => {});
+    }
   }
   syncYoutubeUploadButtons();
   fillJobYoutube();
@@ -1254,13 +1294,17 @@ async function openWatch(id) {
     player.hidden = false;
     player.classList.toggle("portrait", playAsp === "9:16");
     player.src = videoSrc(id, playAsp);
+    pauseVideoStep();
+    pauseYoutubeEmbed();
     player.play().catch(() => {});
   } else if (ytUrl) {
+    pauseWatch();
+    pauseVideoStep();
     player.hidden = true;
     player.removeAttribute("src");
     if (embedWrap) embedWrap.hidden = false;
     if (frame && embedId) {
-      frame.src = `https://www.youtube.com/embed/${encodeURIComponent(embedId)}`;
+      frame.src = `https://www.youtube.com/embed/${encodeURIComponent(embedId)}?enablejsapi=1`;
       if (fallback) fallback.hidden = true;
     } else if (fallback) {
       fallback.hidden = false;
@@ -1594,6 +1638,7 @@ function pictureCardHtml(job) {
       <div class="pic-media">
         ${media}
         <button type="button" class="pic-regen" data-regen="${esc(filename)}" data-kind="${regenKind}" data-index="${esc(indexVal)}" data-aspect="${esc(isShorts ? "9:16" : (isCover ? coverAspect : ""))}"${regenerating ? " disabled" : ""}>${regenerating ? "Regenerating…" : (isCover ? "Regenerate cover" : "Regenerate")}</button>
+        ${ready ? `<button type="button" class="pic-motion" data-motion="${esc(filename)}" data-kind="${regenKind}" data-index="${esc(indexVal)}" data-redo="${job.has_clip ? "1" : ""}">${job.has_clip ? "Redo video clip" : "Convert to video clip"}</button>` : ""}
         ${waiting ? `<div class="pic-waiting">waiting for ChatGPT</div>` : ""}
       </div>
       <div>
@@ -1680,6 +1725,16 @@ function syncPictureRegenState(article, job) {
     regenBtn.textContent = regenerating
       ? "Regenerating…"
       : (pictureIsCover(job) ? "Regenerate cover" : "Regenerate");
+  }
+  const motionBtn = article.querySelector(".pic-motion");
+  if (motionBtn) {
+    const converting = motionTargetKey === key;
+    const busy = converting || !!(current?.running || current?.busy) || !(job.ready ?? job.has_image);
+    motionBtn.disabled = busy;
+    motionBtn.dataset.redo = job.has_clip ? "1" : "";
+    motionBtn.textContent = converting
+      ? "Converting…"
+      : (job.has_clip ? "Redo video clip" : "Convert to video clip");
   }
 }
 
@@ -2007,6 +2062,7 @@ async function tickJob() {
 
       if (prev && (prev.running || prev.busy) && !running && !busy) {
         regenTargetKey = "";
+        motionTargetKey = "";
         const id = current.id;
         await refreshJobs(id);
         await loadJob(id, { poll: false });
@@ -2535,6 +2591,41 @@ $("#picture-list").addEventListener("click", async (e) => {
     }
     return;
   }
+  const motionBtn = e.target.closest("[data-motion]");
+  if (motionBtn && current) {
+    e.preventDefault();
+    if (current.running || current.busy) return toast("This job is already running.", true);
+    const filename = motionBtn.dataset.motion;
+    const kind = motionBtn.dataset.kind || "line";
+    const indexRaw = motionBtn.dataset.index;
+    const redo = motionBtn.dataset.redo === "1";
+    const article = motionBtn.closest("article.pic");
+    const model = lastSettings.fal_video_model || "the fal video model in Settings";
+    const ok = await confirmSpend(
+      `${redo ? "Redo" : "Convert"} ${filename} to a video clip with ${model}? This spends fal credits (often more than a still). The clip replaces that picture in the final render.`,
+      { flux: false }
+    );
+    if (!ok) return;
+    motionTargetKey = article?.dataset.file || pictureFileKey({ filename, role: kind === "cover" ? "cover" : "" });
+    motionBtn.disabled = true;
+    motionBtn.textContent = "Converting…";
+    try {
+      const body = { filename, kind, redo, confirm_spend: true };
+      if (indexRaw !== "" && Number.isFinite(Number(indexRaw))) body.index = Number(indexRaw);
+      const result = await api(`/api/projects/${current.id}/illustrations/motion`, { method: "POST", body });
+      if (!result.queued) {
+        motionTargetKey = "";
+        toast(result.detail || `${filename} already has a video clip.`);
+      } else toast(`Converting ${filename} to a video clip.`);
+      await refreshIllustrations({ rebuild: false });
+      startIllustrationPolling();
+    } catch (err) {
+      motionTargetKey = "";
+      toast(err.message, true);
+      await refreshIllustrations({ rebuild: true });
+    }
+    return;
+  }
   const btn = e.target.closest("[data-regen]");
   if (!btn || !current) return;
   e.preventDefault();
@@ -2661,6 +2752,29 @@ $("#gen-flux")?.addEventListener("click", async () => {
     body.confirm_spend = true;
   }
   kick(`/api/projects/${current.id}/illustrations/flux`, body, "pictures");
+});
+
+$("#convert-all-clips")?.addEventListener("click", async () => {
+  if (!current) return toast("Create or pick a job first.", true);
+  if (current.running || current.busy) return toast("This job is already running.", true);
+  const model = lastSettings.fal_video_model || "the fal video model in Settings";
+  const ok = await confirmSpend(
+    `Convert every ready picture that does not already have a clip to video with ${model}? Each clip spends fal credits and replaces that still in the final render.`,
+    { flux: false }
+  );
+  if (!ok) return;
+  try {
+    const result = await api(`/api/projects/${current.id}/illustrations/motion`, {
+      method: "POST",
+      body: { all: true, confirm_spend: true },
+    });
+    if (!result.queued) toast(result.detail || "Every ready picture already has a video clip.");
+    else toast(`Converting ${result.count || "ready"} picture(s) to video clips.`);
+    startIllustrationPolling();
+    await refreshIllustrations({ rebuild: false });
+  } catch (err) {
+    toast(err.message, true);
+  }
 });
 
 $("#voice-provider").addEventListener("change", async () => {
@@ -3236,6 +3350,10 @@ $("#video-aspect-pick")?.addEventListener("change", (e) => {
   if (!player) return;
   player.classList.toggle("portrait", asp === "9:16");
   player.src = videoSrc(current.id, asp);
+  if (viewIsOn("video")) {
+    pauseWatch();
+    pauseYoutubeEmbed();
+  }
 });
 
 $("#watch-aspect-pick")?.addEventListener("change", (e) => {
@@ -3248,7 +3366,28 @@ $("#watch-aspect-pick")?.addEventListener("change", (e) => {
   if ($("#watch-sub")) {
     $("#watch-sub").textContent = `${formatDuration(current.duration_seconds)} · ${asp} · Ready`;
   }
-  player.play().catch(() => {});
+  if (viewIsOn("watch")) {
+    pauseVideoStep();
+    pauseYoutubeEmbed();
+    player.play().catch(() => {});
+  }
+});
+
+$("#watch-player")?.addEventListener("play", () => {
+  if (!viewIsOn("watch")) {
+    pauseWatch();
+    return;
+  }
+  pauseVideoStep();
+  pauseYoutubeEmbed();
+});
+$("#video-player")?.addEventListener("play", () => {
+  if (!viewIsOn("video")) {
+    pauseVideoStep();
+    return;
+  }
+  pauseWatch();
+  pauseYoutubeEmbed();
 });
 
 $("#shuffle-music")?.addEventListener("click", async () => {
