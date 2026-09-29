@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from studio.aspect import canvas_size, normalize_aspect
+from studio.aspect import canvas_size
 
 YT_THUMB_MAX_BYTES = 2 * 1024 * 1024  # YouTube hard cap
 SLOT_SOFT_MAX_BYTES = 1 * 1024 * 1024  # preferred after ingest

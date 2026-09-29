@@ -29,6 +29,7 @@ from studio.aspect import (
     cover_filename,
     generate_at_line,
     illustration_size,
+    is_longform_portrait,
     is_portrait,
     job_image_fields,
     needs_explainer_assets,
@@ -1187,11 +1188,13 @@ def illustration_jobs(project_id: str) -> dict:
     provider = payload.get("image_provider") or project_image_provider(project_id)
     want_full = needs_explainer_assets(job_aspect)
     want_shorts = bool(aspect_info.get("generate_9x16"))
-    # Full explainer line art is for the 16:9 canvas when both/16:9.
-    # 9:16-only jobs skip full body lines and only generate hook short portraits.
-    # generate_9x16 also forces hook-line portrait slots even on 16:9 jobs.
-    line_aspect = ASPECT_16_9 if want_full else aspect
-    line_layout = layout if want_full else "cover"
+    longform_portrait = is_longform_portrait(job_aspect)
+    # Body lines are the full explainer: 16:9, both, and long-form 9:16.
+    # generate_9x16 adds a separate hook short (script_9x16_billboards); it does
+    # not replace those body lines.
+    include_body = want_full or longform_portrait
+    line_aspect = ASPECT_9_16 if longform_portrait and not want_full else ASPECT_16_9
+    line_layout = layout if include_body else "cover"
     line_fields = job_image_fields(line_aspect, line_layout, provider=provider)
     cover_fields = job_image_fields(aspect, "cover", provider=provider)
     video_w, video_h = canvas_size(aspect)
@@ -1201,7 +1204,7 @@ def illustration_jobs(project_id: str) -> dict:
     jobs = cover_jobs(project_id, aspect_info.get("cover_aspects") or aspects_to_render(job_aspect))
     title = payload.get("title") or ""
     summary = payload.get("summary") or ""
-    if want_full:
+    if include_body:
         _append_line_jobs(
             jobs,
             project_id=project_id,
@@ -1255,7 +1258,7 @@ def illustration_jobs(project_id: str) -> dict:
             role="shorts_line",
             index_offset=10_000,
         )
-    if layout == "billboard" and want_full:
+    if layout == "billboard" and include_body:
         shape = get_prompt(
             "images.shape_billboard",
             aspect=aspect,
@@ -1317,7 +1320,7 @@ def illustration_jobs(project_id: str) -> dict:
             f"Cover: {cover_fields['image_size']}. Line art: {line_fields['image_size']}"
             + (
                 " (16:9 explainer billboard line art stays 1920x1080)."
-                if layout == "billboard" and want_full
+                if layout == "billboard" and include_body
                 else "."
             )
             + shorts_size_bit
@@ -1335,7 +1338,7 @@ def illustration_jobs(project_id: str) -> dict:
             f"at {line_fields['image_size']}"
             + (
                 " (billboard line art stays 16:9 1920x1080 for the explainer)."
-                if layout == "billboard" and want_full
+                if layout == "billboard" and include_body
                 else "."
             )
             + shorts_size_bit

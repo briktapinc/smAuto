@@ -138,6 +138,13 @@ MCP_TOOL_NAMES = (
     "list_failed_jobs",
     "retry_failed_job",
     "run_backup",
+    "list_video_orders",
+    "get_video_order",
+    "update_video_order_status",
+    "set_order_video",
+    "attach_order_video_mp4",
+    "mark_order_video_ready",
+    "deliver_video_order",
     "generate_topics",
     "create_topic",
     "list_topics",
@@ -966,6 +973,62 @@ def build_mcp() -> "FastMCP":
 
         _require_mcp_admin()
         return _run()
+
+    def _order_admin(fn, *args, **kwargs):
+        _require_mcp_admin()
+        try:
+            return fn(*args, **kwargs)
+        except LookupError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def list_video_orders() -> dict:
+        """Admin only: paid client video orders, oldest first. Includes name, email, niche, package, video_count, video_length, format, amount_cents, status, and each video's id, topic, status, and mp4_attached. Same queue as the Production page."""
+        from studio.orders import list_production_orders
+
+        return _order_admin(list_production_orders)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def get_video_order(order_id: str) -> dict:
+        """Admin only: one client video order and its video rows. Same record as the Production queue."""
+        from studio.orders import get_production_order
+
+        return _order_admin(get_production_order, order_id)
+
+    @mcp.tool
+    def update_video_order_status(order_id: str, status: str) -> dict:
+        """Admin only: set order status to paid, queued, in_production, or delivered. delivered runs the same approval path as Mark delivered (every video must be ready; emails the client when SMTP is configured, otherwise records in-app delivery)."""
+        from studio.orders import update_order_status
+
+        return _order_admin(update_order_status, order_id, status)
+
+    @mcp.tool
+    def set_order_video(order_id: str, video_id: str, topic: str | None = None, status: str | None = None) -> dict:
+        """Admin only: edit one video's topic and/or status (queued, scripting, art, narration, rendering, ready). Moving into scripting, art, narration, or rendering sets the order to in_production when it was paid or queued. ready requires an MP4 already attached."""
+        from studio.orders import update_order_video
+
+        return _order_admin(update_order_video, order_id, video_id, topic=topic, status=status)
+
+    @mcp.tool
+    def attach_order_video_mp4(order_id: str, video_id: str, file_path: str) -> dict:
+        """Admin only: copy a local MP4 onto a client-order video so it can be downloaded. Remote URLs are rejected. The file must exist and be an MP4."""
+        from studio.orders import attach_video_mp4
+
+        return _order_admin(attach_video_mp4, order_id, video_id, file_path)
+
+    @mcp.tool
+    def mark_order_video_ready(order_id: str, video_id: str) -> dict:
+        """Admin only: mark one order video ready, same as the Production queue button. Requires an MP4 already attached."""
+        from studio.orders import mark_video_ready
+
+        return _order_admin(mark_video_ready, order_id, video_id)
+
+    @mcp.tool
+    def deliver_video_order(order_id: str) -> dict:
+        """Admin only: approve and deliver a client order, same as Mark delivered. Every video must be ready with an MP4. Sends email when SMTP is configured; otherwise records in-app delivery. Returns email_sent, delivery_channel, delivery_note, and delivery_email_error."""
+        from studio.orders import deliver_order
+
+        return _order_admin(deliver_order, order_id)
 
     @mcp.tool
     def generate_topics(

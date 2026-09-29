@@ -17,6 +17,7 @@ workspace/
 data/
 settings.json
 *.db
+user_data/order_videos/
 
 # Node / Electron
 node_modules/

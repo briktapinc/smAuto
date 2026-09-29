@@ -88,6 +88,7 @@ function applyDesktopModeUi() {
   });
   $$(".member-only").forEach((el) => { el.hidden = true; });
   try { applyMembershipUiLocks(); } catch { /* ignore */ }
+  refreshProductionBadge();
 }
 const LIST_PAGE = 12;
 const PROMPTS_PAGE = 3;
@@ -369,6 +370,16 @@ function formatDuration(sec) {
   const m = Math.floor(sec / 60);
   const s = sec % 60;
   return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+async function refreshProductionBadge() {
+  const link = $("#production-link");
+  if (!link || link.hidden) return;
+  try {
+    const data = await api("/api/production/summary");
+    const count = Number(data.unreviewed_count || 0);
+    link.textContent = count > 0 ? `Production (${count})` : "Production";
+  } catch { /* queue badge is optional */ }
 }
 
 async function api(path, opts = {}) {
@@ -5188,7 +5199,13 @@ $("#restart-api")?.addEventListener("click", async () => {
   const btn = $("#restart-api");
   const desktop = typeof window.bubblePod?.restartApi === "function";
   const targetPort = Number($("#studio-port")?.value || lastSettings.port || 7878) || 7878;
-  const targetUrl = `${location.protocol}//${location.hostname}:${targetPort}/`;
+  const loopback = /^(127\.0\.0\.1|localhost|\[::1\])$/i.test(location.hostname);
+  const pagePort = String(location.port || (location.protocol === "https:" ? "443" : "80"));
+  const portChanged = loopback && pagePort !== String(targetPort);
+  // Public HTTPS is reverse-proxied to the Studio port. Polling :7878 on that host never comes back.
+  const targetUrl = portChanged
+    ? `${location.protocol}//${location.hostname}:${targetPort}/`
+    : `${location.origin}/`;
   if (!desktop && !window.confirm(`Restart the Studio API? This page will come back when ${targetUrl} is healthy.`)) {
     return;
   }
@@ -5201,28 +5218,33 @@ $("#restart-api")?.addEventListener("click", async () => {
       toast("API restarted.");
       return;
     }
+    let sawDown = false;
     try {
       await api("/api/admin/restart", { method: "POST", body: {} });
     } catch {
       /* connection drop is expected as uvicorn exits */
+      sawDown = true;
     }
-    for (let i = 0; i < 60; i += 1) {
+    const started = Date.now();
+    for (let i = 0; i < 75; i += 1) {
       await new Promise((r) => setTimeout(r, 400));
       try {
         const health = await fetch(`${targetUrl}api/health`, { cache: "no-store" });
-        if (health.ok) {
-          if (String(location.port || "") !== String(targetPort) && !(targetPort === 80 && !location.port)) {
-            location.href = targetUrl;
-          } else {
-            location.reload();
-          }
-          return;
+        if (!health.ok) {
+          sawDown = true;
+          continue;
         }
+        // POST /api/admin/restart returns while the old process is still listening
+        // (it exits about a second later). Reloading on that first 200 lands in the shutdown.
+        if (!sawDown && Date.now() - started < 2500) continue;
+        if (portChanged) location.href = targetUrl;
+        else location.reload();
+        return;
       } catch {
-        /* still down */
+        sawDown = true;
       }
     }
-    toast(`API did not come back on port ${targetPort}.`, true);
+    toast(`API did not come back on ${targetUrl}`, true);
   } catch (err) {
     toast(err.message, true);
   } finally {
@@ -5926,6 +5948,7 @@ async function refreshMembershipUi(session) {
     if (el.id === "admin-link") return;
     el.hidden = !isAdmin;
   });
+  if (isAdmin) refreshProductionBadge();
   $$(".member-only").forEach((el) => {
     if (el.id === "subscription-tab") {
       el.hidden = false;
@@ -6167,4 +6190,74 @@ $("#costs-next")?.addEventListener("click", () => {
   renderCostsTable();
 });
 
+function setupOrdersMenu() {
+  document.querySelectorAll("details.nav-menu").forEach((menu) => {
+    const summary = menu.querySelector("summary");
+    const panel = menu.querySelector(".nav-submenu");
+    if (!summary || !panel) return;
+
+    function visibleLinks() {
+      return Array.from(panel.querySelectorAll("a[href]")).filter((link) => {
+        return !link.hidden && link.getClientRects().length > 0;
+      });
+    }
+
+    function place() {
+      if (!menu.closest(".tab-row") || !menu.open) return;
+      const rect = summary.getBoundingClientRect();
+      const width = 200;
+      const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8));
+      panel.style.position = "fixed";
+      panel.style.width = `${width}px`;
+      panel.style.top = `${Math.round(rect.bottom + 8)}px`;
+      panel.style.left = `${Math.round(left)}px`;
+      panel.style.right = "auto";
+      panel.style.zIndex = "40";
+    }
+
+    menu.addEventListener("toggle", () => {
+      if (menu.open) place();
+    });
+    summary.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        menu.open = true;
+        place();
+        const first = visibleLinks()[0];
+        if (first) first.focus();
+      } else if (event.key === "Escape" && menu.open) {
+        event.preventDefault();
+        menu.open = false;
+      }
+    });
+    panel.addEventListener("keydown", (event) => {
+      const links = visibleLinks();
+      const index = links.indexOf(document.activeElement);
+      if (event.key === "Escape") {
+        event.preventDefault();
+        menu.open = false;
+        summary.focus();
+      } else if (event.key === "ArrowDown" && links.length) {
+        event.preventDefault();
+        links[(index + 1) % links.length].focus();
+      } else if (event.key === "ArrowUp" && links.length) {
+        event.preventDefault();
+        if (index <= 0) {
+          menu.open = false;
+          summary.focus();
+        } else {
+          links[index - 1].focus();
+        }
+      }
+    });
+    document.addEventListener("click", (event) => {
+      if (!menu.open || menu.contains(event.target)) return;
+      menu.open = false;
+    });
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+  });
+}
+
+setupOrdersMenu();
 startApp();

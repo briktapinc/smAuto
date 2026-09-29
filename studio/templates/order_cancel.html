@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Checkout canceled — Bubble Pod</title>
+  <link rel="stylesheet" href="/static/order.css" />
+</head>
+<body data-page="cancel">
+  <header class="chrome">
+    <a class="brand" href="/">
+      <span class="mark">BP</span>
+      <div><strong>Bubble Pod</strong><small>Stickman Automation</small></div>
+    </a>
+    <nav class="nav" aria-label="Main">
+      <a href="/">Studio</a>
+      <details class="nav-menu is-current">
+        <summary>Orders</summary>
+        <div class="nav-submenu">
+          <a href="/order" aria-current="page">Order videos</a>
+          <a href="/my-orders">My orders</a>
+          <a href="/production" id="production-nav" hidden>Production</a>
+        </div>
+      </details>
+    </nav>
+  </header>
+  <main>
+    <h1>Payment canceled</h1>
+    <p class="lede">No charge was made. Your package choices are still on the order page.</p>
+    <p><a class="btn-yellow" href="/order" style="display:inline-flex;width:auto;color:#081633;background:#ffd638;padding:0.75rem 1rem;border-radius:12px;text-decoration:none;font-weight:800;">Back to order</a></p>
+  </main>
+  <script src="/static/order.js"></script>
+</body>
+</html>

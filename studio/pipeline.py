@@ -15,6 +15,7 @@ from studio.aspect import (
     DEFAULT_ASPECT,
     aspects_to_render,
     needs_explainer_assets,
+    is_longform_portrait,
     needs_shorts_assets,
     normalize_aspect,
     normalize_job_aspect,
@@ -2011,8 +2012,11 @@ def _render_one_canvas(
     other_video_size = other_video.stat().st_size if other_video.is_file() else None
     other_cover = cover_path(project_id, other_aspect)
     other_cover_size = other_cover.stat().st_size if other_cover.is_file() else None
-    # 9:16 = hook-only short with its own script/audio/align and portrait line art.
-    if canvas == ASPECT_9_16:
+    # A companion 9:16 (16:9 or both) is the hook short: script_9x16 and
+    # script_9x16_billboards. A job whose aspect is 9:16 is a long-form portrait
+    # explainer — full script.txt, script.wav, and script_billboards (b001…).
+    hook_short = canvas == ASPECT_9_16 and not is_longform_portrait(job_aspect)
+    if hook_short:
         write_shorts_scripts(project_id)
         render_prefix = shorts_input_prefix(project_id)
         # Prefer full-bleed cover layout for shorts (portrait art); TV billboard looks wrong.
@@ -2058,7 +2062,7 @@ def _render_one_canvas(
             "Generate it on Pictures (Flux, ComfyUI, or ChatGPT native) before rendering."
         )
     # Ensure 9:16 hook line art exists (portrait) before drawing frames.
-    if canvas == ASPECT_9_16:
+    if hook_short:
         shorts_folder = billboards_dir(project_id, ASPECT_9_16)
         info = illustration_jobs(project_id)
         missing_shorts = [

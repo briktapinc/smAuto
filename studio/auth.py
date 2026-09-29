@@ -80,6 +80,9 @@ PUBLIC_API_PATHS = frozenset({
     "/api/billing/config",
     "/api/stripe/webhook",
     "/api/youtube/oauth/callback",
+    "/api/orders/config",
+    "/api/orders/checkout",
+    "/api/my-orders",
 })
 
 # Authenticated users may hit these even without an active membership.
@@ -866,6 +869,10 @@ def is_public_path(path: str) -> bool:
     if path == "/" or path in PUBLIC_API_PATHS:
         return True
     if path in ("/admin", "/pricing", "/billing/success", "/billing/cancel"):
+        return True
+    if path in ("/order", "/order/success", "/order/cancel", "/my-orders"):
+        return True
+    if path.startswith("/api/orders/by-session/") or path.startswith("/api/orders/download/"):
         return True
     if path.startswith("/billing/") or path.startswith("/pricing"):
         return True

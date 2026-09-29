@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Production queue — Bubble Pod</title>
+  <link rel="stylesheet" href="/static/order.css" />
+</head>
+<body data-page="production">
+  <header class="chrome">
+    <a class="brand" href="/">
+      <span class="mark">BP</span>
+      <div><strong>Bubble Pod</strong><small>Stickman Automation</small></div>
+    </a>
+    <nav class="nav" aria-label="Main">
+      <a href="/">Studio</a>
+      <details class="nav-menu is-current">
+        <summary>Orders</summary>
+        <div class="nav-submenu">
+          <a href="/order">Order videos</a>
+          <a href="/my-orders">My orders</a>
+          <a href="/production" id="production-nav" aria-current="page">Production</a>
+        </div>
+      </details>
+    </nav>
+  </header>
+  <main>
+    <h1>Production queue <span id="unreviewed" class="badge" hidden></span></h1>
+    <p class="lede">Oldest paid orders first. Set a topic, move each video through production, upload the MP4, then mark the order delivered to send it to the client.</p>
+    <p id="queue-error" class="error" hidden></p>
+    <div id="queue"></div>
+  </main>
+  <script src="/static/order.js"></script>
+</body>
+</html>

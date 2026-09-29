@@ -371,8 +371,10 @@ Claude Desktop: quit and reopen after MCP updates so it reloads stdio tools.
 MUST — TOPIC HOOK + SUBSCRIBE OUTRO
 Every tagged script, including ones you write yourself and save with save_script, MUST:
 - Open with a HOOK: 1 to 3 spoken lines on THIS topic before the explainer body. Not a generic greeting.
-  The hook IS the 9:16 short (shorts energy). generate_9x16=true (default) materializes script_9x16
-  (hook + script.shorts_cta), 1080x1920 portraits in script_9x16_billboards, and script_9x16.wav/json.
+  The hook IS the optional 9:16 short when generate_9x16 is on (script_9x16, hook + script.shorts_cta,
+  1080x1920 portraits in script_9x16_billboards, script_9x16.wav). A job with aspect 9:16 is a
+  long-form portrait explainer: the full script, full narration, and line art in script_billboards
+  (billboard line images stay 1920x1080 for the TV; do not replace them with the hook short).
 - Close with a subscribe OUTRO that actually says the word "subscribe" (YouTube-style, still on-topic).
   That outro is for the 16:9 full explainer only — never put the 9:16 channel-link CTA in the full script.
 Hook and outro count toward duration: reserve a few seconds at the start and about 8 to 12 seconds at the end.

@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Order confirmed — Bubble Pod</title>
+  <link rel="stylesheet" href="/static/order.css" />
+</head>
+<body data-page="success">
+  <header class="chrome">
+    <a class="brand" href="/">
+      <span class="mark">BP</span>
+      <div><strong>Bubble Pod</strong><small>Stickman Automation</small></div>
+    </a>
+    <nav class="nav" aria-label="Main">
+      <a href="/">Studio</a>
+      <details class="nav-menu">
+        <summary>Orders</summary>
+        <div class="nav-submenu">
+          <a href="/order">Order videos</a>
+          <a href="/my-orders">My orders</a>
+          <a href="/production" id="production-nav" hidden>Production</a>
+        </div>
+      </details>
+    </nav>
+  </header>
+  <main>
+    <h1>Thank you</h1>
+    <p class="lede">Your payment went through. We’ll start the videos and you can follow them from My Orders with the email you entered at checkout.</p>
+    <section class="card" id="thanks"><p>Confirming your payment…</p></section>
+    <p><a href="/my-orders">Look up My Orders</a></p>
+  </main>
+  <script src="/static/order.js"></script>
+</body>
+</html>

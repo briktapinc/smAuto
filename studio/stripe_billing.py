@@ -581,6 +581,12 @@ def _dispatch_event(etype: str, obj: Any) -> bool:
     from studio.members import get_user_by_id, update_user
 
     if etype == "checkout.session.completed":
+        meta = _obj_get(obj, "metadata") or {}
+        if str(_obj_get(meta, "type") or "") == "video_order":
+            from studio.orders import fulfill_checkout_session
+
+            fulfill_checkout_session(obj)
+            return True
         mode = str(_obj_get(obj, "mode") or "")
         uid = _user_id_from_stripe(
             customer_id=str(_obj_get(obj, "customer") or ""),

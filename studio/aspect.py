@@ -90,6 +90,15 @@ def needs_explainer_assets(aspect: str | None) -> bool:
     return ASPECT_16_9 in aspects_to_render(aspect)
 
 
+def is_longform_portrait(aspect: str | None) -> bool:
+    """True when the job itself is a 9:16 explainer: full script, full narration, line art.
+
+    Distinct from the hook short (generate_9x16 / the 9:16 canvas of a 16:9 or both job),
+    which uses script_9x16 and script_9x16_billboards.
+    """
+    return normalize_job_aspect(aspect) == ASPECT_9_16
+
+
 def aspect_from_cover_filename(filename: str | None) -> str | None:
     """Aspect encoded in script_cover_16x9.png / script_cover_9x16.png. None = unspecified."""
     stem = (filename or "").replace("\\", "/").split("/")[-1].lower()

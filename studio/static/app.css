@@ -99,6 +99,98 @@ button.new-job:hover, button.new-job.on,
   font: inherit;
 }
 .tab-row a.tab-link:hover { background: #3a3027; color: #f6efe3; }
+.tab-row .nav-menu { position: relative; flex: none; }
+.tab-row .nav-menu > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 10px 0;
+  border-radius: 0;
+  text-decoration: none;
+  color: #e7d9c6;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  list-style: none;
+}
+.tab-row .nav-menu > summary::-webkit-details-marker { display: none; }
+.tab-row .nav-menu > summary::after {
+  content: "";
+  width: 0.4rem;
+  height: 0.4rem;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+}
+.tab-row .nav-menu[open] > summary::after { transform: translateY(1px) rotate(225deg); }
+.tab-row .nav-menu > summary:hover,
+.tab-row .nav-menu[open] > summary {
+  background: transparent;
+  color: #ffd638;
+  box-shadow: none;
+}
+.tab-row .nav-menu.is-current > summary,
+.tab-row .nav-menu:has(a[aria-current="page"]) > summary {
+  background: transparent;
+  color: #ffd638;
+  font-weight: 700;
+  box-shadow: none;
+}
+.tab-row .nav-menu > summary:focus-visible,
+.tab-row .nav-submenu a:focus-visible {
+  outline: 2px solid var(--yellow);
+  outline-offset: 2px;
+}
+.tab-row .nav-submenu {
+  display: none;
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 11.5rem;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  border-radius: 12px;
+  background: #231c16;
+  border: 1px solid #3a3027;
+  border-top: 3px solid var(--yellow);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+}
+.tab-row .nav-menu[open] > .nav-submenu {
+  display: flex;
+  position: fixed;
+  right: auto;
+}
+.tab-row .nav-submenu a {
+  display: inline-flex;
+  justify-content: flex-start;
+  white-space: nowrap;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0.2rem 0.1rem;
+  color: #f6efe3;
+  text-decoration: none;
+  font-weight: 500;
+}
+.tab-row .nav-submenu a:hover {
+  background: transparent;
+  color: #16afe9;
+  border-color: transparent;
+  box-shadow: none;
+}
+.tab-row .nav-submenu a[aria-current="page"] {
+  background: transparent;
+  color: #ffd638;
+  border-color: transparent;
+  box-shadow: none;
+  font-weight: 700;
+}
 #admin-link[hidden],
 .admin-only[hidden],
 body:not(.is-admin) .admin-only { display: none !important; }

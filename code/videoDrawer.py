@@ -519,6 +519,29 @@ def duplicateFrame(prevFrame, thisFrame):
 def infoToString(arr):
     return ','. join(map(str,arr))
 
+def _phoneme_slot(fra):
+    """Map a timeline frame onto phonemesPerFrame, or None if it is out of range.
+
+    The array covers speech (and any frames the schedule actually renders).
+    Frames past the end of speech stay the neutral silence phoneme (0) instead
+    of raising IndexError when a word boundary lands on or past the last slot.
+    """
+    n = 0 if phonemesPerFrame is None else int(phonemesPerFrame.shape[0])
+    if n <= 0 or fra < 0 or fra >= n:
+        return None
+    return fra
+
+
+def _write_phoneme(fra, value, add=False):
+    slot = _phoneme_slot(fra)
+    if slot is None:
+        return
+    if add:
+        phonemesPerFrame[slot] += value
+    else:
+        phonemesPerFrame[slot] = value
+
+
 def setPhoneme(i):
     global phonemeTimeline
     global phonemesPerFrame
@@ -537,7 +560,7 @@ def setPhoneme(i):
     if phoneme == 'u':
         phonemesPerFrame[thisFrame:nextFrame] = 9
         if frameLen == 2:
-            phonemesPerFrame[thisFrame+1] = 10
+            _write_phoneme(thisFrame+1, 10)
         elif frameLen >= 3:
             phonemesPerFrame[thisFrame+1:nextFrame-1] = 10
     elif phoneme == 'a':
@@ -559,25 +582,32 @@ def setPhoneme(i):
                 starter = min(fra-thisFrame+startSize,nextFrame-1-fra+endSize)
                 if starter >= 3:
                     if starter%2 == 1:
-                        phonemesPerFrame[fra] = 4
+                        _write_phoneme(fra, 4)
                     else:
-                        phonemesPerFrame[fra] = 5
+                        _write_phoneme(fra, 5)
                 else:
-                    phonemesPerFrame[fra] = (starter-1)*2
+                    _write_phoneme(fra, (starter-1)*2)
         else:
             index = 0
             if START_FORCE_OPEN:
                 index += 2
             if END_FORCE_OPEN:
                 index += 1
-            choiceArray = OPEN_TRACKS[frameLen-1][index]
+            # A collapsed interval (frameLen < 1) has no mouth frames to fill.
+            if 1 <= frameLen <= 4:
+                choiceArray = OPEN_TRACKS[frameLen-1][index]
+            else:
+                choiceArray = []
             for fra in range(thisFrame,nextFrame):
-                 phonemesPerFrame[fra] = (choiceArray[fra-thisFrame]-1)*2
+                offset = fra-thisFrame
+                if offset < 0 or offset >= len(choiceArray):
+                    continue
+                _write_phoneme(fra, (choiceArray[offset]-1)*2)
     if phoneme == 'a' or phoneme == 'y':
         if prevPhoneme == 'u':
-            phonemesPerFrame[thisFrame] += 1
+            _write_phoneme(thisFrame, 1, add=True)
         if nextPhoneme == 'u':
-            phonemesPerFrame[nextFrame-1] += 1
+            _write_phoneme(nextFrame-1, 1, add=True)
 
 def timestepToFrames(timestep):
     return max(0,int(timestep*FRAME_RATE-2))
@@ -660,8 +690,13 @@ for i in range(len(schedules[4])):
             framestamp += 1 # shift current one forward
     phoneme = parts[2]
     phonemeTimeline.append([phoneme,framestamp])
+# Word timings (and the 1-frame collision nudge above) can land on or past
+# the speech-derived FRAME_COUNT. Cover every phoneme frame, then leave any
+# later video frames as silence (0) instead of crashing in setPhoneme.
+if phonemeTimeline:
+    FRAME_COUNT = max(FRAME_COUNT, max(entry[1] for entry in phonemeTimeline) + 1)
 phonemeTimeline.append(["end",FRAME_COUNT])
-phonemesPerFrame = np.zeros(FRAME_COUNT,dtype='int32')
+phonemesPerFrame = np.zeros(max(FRAME_COUNT, 0), dtype='int32')
 for i in range(len(phonemeTimeline)-1):
     setPhoneme(i)
 
@@ -759,7 +794,8 @@ for frame in range(0,FRAME_COUNT):
     img_start = frameOf(2, 0)
     elapsed = frame - img_start if img_start > -100000 else 0
     motion_ix = _motion_index(imageNum, elapsed)
-    thisFrameInfo = infoToString([paragraph, emotion, IMAGE_cache, pose, phonemesPerFrame[frame], TSPPC_cache, TUNPC_cache, motion_ix])
+    phone_now = int(phonemesPerFrame[frame]) if 0 <= frame < len(phonemesPerFrame) else 0
+    thisFrameInfo = infoToString([paragraph, emotion, IMAGE_cache, pose, phone_now, TSPPC_cache, TUNPC_cache, motion_ix])
     if ENABLE_FRAME_CACHING and thisFrameInfo not in FRAME_CACHES:
         FRAME_CACHES[thisFrameInfo] = frame
 
@@ -767,6 +803,6 @@ for frame in range(0,FRAME_COUNT):
         if ENABLE_FRAME_CACHING and FRAME_CACHES[thisFrameInfo] < frame:
             duplicateFrame(FRAME_CACHES[thisFrameInfo], frame)
         else:
-            drawFrame(frame,paragraph,emotion,imageNum,pose,phonemesPerFrame[frame],timeSincePrevPoseChange,timeUntilNextPoseChange)
+            drawFrame(frame,paragraph,emotion,imageNum,pose,phone_now,timeSincePrevPoseChange,timeUntilNextPoseChange)
         if frame%PRINT_EVERY == 0 or frame == FRAME_COUNT-1:
             print(f"Just drew frame {frame+1} / {FRAME_COUNT}")

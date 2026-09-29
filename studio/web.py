@@ -468,6 +468,28 @@ class RefundBody(BaseModel):
     reason: str = "requested_by_customer"
 
 
+class OrderCheckoutBody(BaseModel):
+    niche: str = ""
+    custom_niche: str = ""
+    channel_notes: str = ""
+    package: str = ""
+    video_length: str = "5"
+    format: str = "16:9"
+
+
+class MyOrdersBody(BaseModel):
+    email: str = ""
+
+
+class OrderStatusBody(BaseModel):
+    status: str = ""
+
+
+class OrderVideoBody(BaseModel):
+    topic: str | None = None
+    status: str | None = None
+
+
 class RateLimitASGIMiddleware:
     """Pure ASGI rate limit so streamable /mcp is not buffered."""
 
@@ -788,6 +810,9 @@ def _render_html(page: Path, *, cache_control: str = "no-store") -> HTMLResponse
             ('src="/static/', f'src="{prefix}/static/'),
             ('href="/pricing', f'href="{prefix}/pricing'),
             ('href="/admin', f'href="{prefix}/admin'),
+            ('href="/my-orders', f'href="{prefix}/my-orders'),
+            ('href="/production', f'href="{prefix}/production'),
+            ('href="/order', f'href="{prefix}/order'),
             ('href="/"', f'href="{prefix}/"'),
             ('href="/#', f'href="{prefix}/#'),
         ):
@@ -821,6 +846,14 @@ def _err(exc: Exception) -> HTTPException:
         status, payload = spend_error_http(exc)
         return HTTPException(status_code=status, detail=payload)
     return HTTPException(status_code=400, detail=str(exc))
+
+
+def _request_is_admin(request: Request) -> bool:
+    try:
+        user = studio_auth.require_admin(request)
+    except HTTPException:
+        return False
+    return (user.get("role") or "") == "admin"
 
 
 def _reject_desktop_saas(feature: str = "This feature") -> None:
@@ -1436,6 +1469,184 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             raise _err(exc)
+
+    def _order_http(exc: Exception) -> HTTPException:
+        if isinstance(exc, LookupError):
+            return HTTPException(status_code=404, detail=str(exc))
+        return HTTPException(status_code=400, detail=str(exc))
+
+    @app.get("/order", response_class=HTMLResponse)
+    def order_page():
+        page = TEMPLATES_DIR / "order.html"
+        if not page.is_file():
+            raise HTTPException(404, "Order page missing")
+        return _render_html(page)
+
+    @app.get("/order/success", response_class=HTMLResponse)
+    def order_success_page():
+        page = TEMPLATES_DIR / "order_success.html"
+        if not page.is_file():
+            raise HTTPException(404, "Order confirmation missing")
+        return _render_html(page)
+
+    @app.get("/order/cancel", response_class=HTMLResponse)
+    def order_cancel_page():
+        page = TEMPLATES_DIR / "order_cancel.html"
+        if not page.is_file():
+            raise HTTPException(404, "Order cancel page missing")
+        return _render_html(page)
+
+    @app.get("/my-orders", response_class=HTMLResponse)
+    def my_orders_page():
+        page = TEMPLATES_DIR / "my_orders.html"
+        if not page.is_file():
+            raise HTTPException(404, "My orders page missing")
+        return _render_html(page)
+
+    @app.get("/production", response_class=HTMLResponse)
+    def production_page(request: Request):
+        if not _request_is_admin(request):
+            return HTMLResponse(
+                "<!doctype html><meta charset='utf-8'><title>Production</title>"
+                "<p>Admin access is required.</p><p><a href='/'>Studio</a></p>",
+                status_code=403,
+            )
+        page = TEMPLATES_DIR / "production.html"
+        if not page.is_file():
+            raise HTTPException(404, "Production page missing")
+        return _render_html(page)
+
+    @app.get("/api/orders/config")
+    def orders_config():
+        from studio.orders import public_config
+
+        return public_config()
+
+    @app.post("/api/orders/checkout")
+    def orders_checkout(body: OrderCheckoutBody):
+        from studio.orders import create_checkout
+
+        try:
+            return create_checkout(body.model_dump())
+        except Exception as exc:
+            raise _order_http(exc) from exc
+
+    @app.get("/api/orders/by-session/{session_id}")
+    def orders_by_session(session_id: str):
+        from studio.orders import order_for_session
+
+        try:
+            return order_for_session(session_id)
+        except Exception as exc:
+            raise _order_http(exc) from exc
+
+    @app.post("/api/my-orders")
+    def my_orders_lookup(body: MyOrdersBody):
+        from studio.orders import list_orders_for_email
+
+        try:
+            return list_orders_for_email(body.email)
+        except Exception as exc:
+            raise _order_http(exc) from exc
+
+    @app.get("/api/orders/download/{video_id}")
+    def order_video_download(video_id: str, request: Request, email: str = ""):
+        from studio.orders import resolve_download
+
+        try:
+            path, filename = resolve_download(video_id, email, is_admin=_request_is_admin(request))
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return FileResponse(path, media_type="video/mp4", filename=filename)
+
+    @app.get("/api/production/summary")
+    def production_summary(request: Request):
+        studio_auth.require_admin(request)
+        from studio.orders import unreviewed_count
+
+        return {"ok": True, "unreviewed_count": unreviewed_count()}
+
+    @app.get("/api/production/orders")
+    def production_orders(request: Request):
+        studio_auth.require_admin(request)
+        from studio.orders import list_production_orders
+
+        return list_production_orders()
+
+    @app.get("/api/production/orders/{order_id}")
+    def production_order(order_id: str, request: Request):
+        studio_auth.require_admin(request)
+        from studio.orders import get_production_order
+
+        try:
+            return get_production_order(order_id)
+        except Exception as exc:
+            raise _order_http(exc) from exc
+
+    @app.post("/api/production/orders/{order_id}/status")
+    def production_order_status(order_id: str, body: OrderStatusBody, request: Request):
+        studio_auth.require_admin(request)
+        from studio.orders import update_order_status
+
+        try:
+            return update_order_status(order_id, body.status)
+        except Exception as exc:
+            raise _order_http(exc) from exc
+
+    @app.post("/api/production/orders/{order_id}/deliver")
+    def production_order_deliver(order_id: str, request: Request):
+        studio_auth.require_admin(request)
+        from studio.orders import deliver_order
+
+        try:
+            return deliver_order(order_id)
+        except Exception as exc:
+            raise _order_http(exc) from exc
+
+    @app.post("/api/production/orders/{order_id}/review")
+    def production_order_review(order_id: str, request: Request):
+        studio_auth.require_admin(request)
+        from studio.orders import mark_order_reviewed
+
+        try:
+            return mark_order_reviewed(order_id)
+        except Exception as exc:
+            raise _order_http(exc) from exc
+
+    @app.post("/api/production/orders/{order_id}/videos/{video_id}")
+    def production_video_edit(order_id: str, video_id: str, body: OrderVideoBody, request: Request):
+        studio_auth.require_admin(request)
+        from studio.orders import update_order_video
+
+        try:
+            return update_order_video(order_id, video_id, topic=body.topic, status=body.status)
+        except Exception as exc:
+            raise _order_http(exc) from exc
+
+    @app.post("/api/production/orders/{order_id}/videos/{video_id}/upload")
+    def production_video_upload(
+        order_id: str,
+        video_id: str,
+        request: Request,
+        file: UploadFile = File(...),
+    ):
+        studio_auth.require_admin(request)
+        from studio.orders import save_uploaded_mp4
+
+        try:
+            return save_uploaded_mp4(order_id, video_id, file.file)
+        except Exception as exc:
+            raise _order_http(exc) from exc
+
+    @app.post("/api/production/orders/{order_id}/videos/{video_id}/ready")
+    def production_video_ready(order_id: str, video_id: str, request: Request):
+        studio_auth.require_admin(request)
+        from studio.orders import mark_video_ready
+
+        try:
+            return mark_video_ready(order_id, video_id)
+        except Exception as exc:
+            raise _order_http(exc) from exc
 
     @app.get("/api/admin/overview")
     def admin_overview(request: Request):
