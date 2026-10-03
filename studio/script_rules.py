@@ -74,13 +74,14 @@ Line billboards stay subject-only (no forced title text, no host, no TV-as-objec
 
 TEXT_PROVIDER_REQUIREMENT = """
 TEXT PROVIDER (get_text_provider / set_text_provider; settings text_provider, alias script_provider):
-openai | chatgpt | claude | lmstudio.
+openai | chatgpt | claude | external | lmstudio.
 - openai: billed OpenAI chat API. generate_script_via_api writes the tagged script. generate_topics invents titles.
   SPEND: requires confirm_spend=true or spend_confirm_id from request_spend_confirm (GUI shows a Confirm dialog).
 - chatgpt: ChatGPT Desktop MCP. YOU write the tagged script (topic HOOK + subscribe OUTRO, emotion tags) then save_script with youtube_description / youtube_keywords / youtube_hashtags. Do NOT call generate_script_via_api.
 - claude: Claude Desktop / Claude Code, same stdio MCP (python -m studio.mcp_server). Same as chatgpt: YOU write then save_script (include YouTube metadata). Do NOT call generate_script_via_api.
+- external: External via MCP (any MCP client, not only ChatGPT or Claude). Same as chatgpt: YOU write then save_script. Do NOT call generate_script_via_api.
 - lmstudio: local OpenAI-compatible API (default http://127.0.0.1:1234/v1). Studio generates via the local LLM — no OpenAI cloud, no MCP native write, no spend confirm. ChatGPT/Claude must call generate_script_via_api / generate_topics rather than writing the body themselves. Settings: lmstudio_base_url, lmstudio_model (optional; empty → GET /v1/models, first loaded). If it is not running: start the LM Studio local server.
-Topics: if chatgpt or claude, YOU invent titles then create_topic / schedule_topic. Do not call generate_topics unless provider is openai or lmstudio.
+Topics: if chatgpt, claude, or external, YOU invent titles then create_topic / schedule_topic. Do not call generate_topics unless provider is openai or lmstudio.
 SPEND GUARD (OpenAI cloud + fal/Flux only): request_spend_confirm(action) then pass spend_confirm_id, or confirm_spend=true on the billed tool. Actions: openai_script, openai_topics, openai_tts, flux_images, flux_cover, flux_regen, fal_video. ComfyUI, local TTS, ChatGPT/Claude native, and LM Studio skip this. get_spend_status / get_audit_log. Audit JSONL: user_data/audit.log.
 """.strip()
 
@@ -428,7 +429,7 @@ SETTINGS (get_studio_settings / update_studio_settings)
 - stickman_head_color: studio-wide Bubblehead fill (#RRGGBB). get_stickman_head_color / set_stickman_head_color(color) / reset_stickman_head_color — recolors every pose*.png; shadow auto H−10.4° / L−8.4. Free. Re-render to update finished videos.
 - default_aspect / aspect: '16:9' landscape, '9:16' portrait/shorts, or 'both'
   (Render writes script_final_16x9.mp4 then script_final_9x16.mp4). New jobs
-  inherit Settings default_aspect unless create_video_project(..., aspect=) or
+  inherit Settings default_aspect unless create_project(...) / create_video_project(..., aspect=) or
   set_video_aspect is used.
 - music_volume_pct: 0–100. Loops under the voice for the WHOLE video, including the
   5-second title card. 0% is silent. Default 15%.
@@ -504,6 +505,8 @@ COVER (always the first clip, 5 seconds, per aspect)
 JOBS / LIBRARY
 - list_video_projects / list_library: Studio jobs with status, thumbs, has_cover /
   has_audio / has_video. thumbnail_url hits Studio /api/projects/{id}/thumbnail.
+- create_project(topic, duration_seconds, title, aspect): same as New project in the app.
+  save_script needs the returned id. A taken slug gets a new id; existing projects stay.
 - create_video_project(topic, duration_seconds, title, aspect)
 - get_project(project_id)
 - get_file(project_id, kind=video|audio|cover|script_tagged|illustration|…) or
@@ -586,11 +589,16 @@ YOUTUBE (system browser OAuth, no popup; multiple channels supported)
 - youtube_finish_oauth(code= or url=): if the browser shows a code/redirect URL instead of
   auto-callback, paste it here (same as POST /api/youtube/oauth/code).
 - youtube_status / list_youtube_channels: lists connected channels (each with its own token) and
-  which is_default. set_youtube_channel(channel_id) sets the workspace default.
+  which is_default, plus thumbnail_permission, thumbnail_scopes, youtube_manage_scope, and
+  custom_thumbnail_allowed. set_youtube_channel(channel_id) sets the workspace default.
+  If thumbnail_permission or youtube_manage_scope is false, call youtube_connect and sign in
+  again so the token includes the youtube scope used for custom thumbnails.
 - youtube_disconnect(channel_id?): remove one channel, or all when omitted.
 - update_studio_settings(youtube_auto_upload=true|false, youtube_privacy=private|unlisted|public,
-  hands_off=true|false, hands_off_interval_hours=)
-  sets Studio defaults. Auto-upload default privacy is unlisted. Hands-off does not change that
+  youtube_delete_file_after_upload=true|false, hands_off=true|false, hands_off_interval_hours=)
+  sets Studio defaults. youtube_delete_file_after_upload accepts a boolean or "true"/"false"
+  (default true). true deletes the local mp4 after a successful YouTube upload; false keeps it.
+  Auto-upload default privacy is unlisted. Hands-off does not change that
   default — it overrides youtube_privacy=private on hands-off jobs only.
 - set_project_youtube(project_id, youtube_auto_upload?, youtube_privacy?, youtube_channel_id?)
   overrides auto-upload / channel for ONE job (same as GUI PATCH).
@@ -599,6 +607,9 @@ YOUTUBE (system browser OAuth, no popup; multiple channels supported)
   and pass channel_id (required unless the job already has youtube_channel_id). Prefer aspect
   16:9 or 9:16 when both renders exist. Default privacy is unlisted. Uses stored meta
   youtube_description / youtube_keywords / youtube_hashtags when description/tags are omitted.
+- set_youtube_thumbnail(project_id, aspect?, channel_id?) sets the custom thumbnail on a video
+  already uploaded. Needs thumbnail_permission. If YouTube refuses, phone-verify the channel at
+  https://www.youtube.com/verify and reconnect with youtube_connect.
 
 PROMPTS PAGE KEYS (list_prompts / get_prompts / update_prompt / save_prompts / reset_prompt)
 Overrides live in user_data/prompts.json and apply on the next generate — no restart
@@ -624,7 +635,7 @@ paste jobs[].prompt as-is, then save_illustration_image so the slot appears on P
 
 WORKFLOW
 1. Call get_script_rules (live) and obey every format rule.
-2. create_video_project or get_project. Aspect 16:9 unless Settings default_aspect
+2. create_project (or create_video_project) or get_project. Aspect 16:9 unless Settings default_aspect
    or the user wants 9:16. Layout cover vs billboard from Settings / set_video_layout.
 3. Check get_text_provider.
    If openai or lmstudio: generate_script_via_api (regenerate_pictures=true, regenerate_audio=true by default).
@@ -699,7 +710,7 @@ request_spend_confirm, get_spend_status, get_audit_log,
 get_my_usage, list_api_keys, create_api_key, revoke_api_key, get_queue_status,
 admin_overview, list_failed_jobs, retry_failed_job, run_backup,
 generate_topics, create_topic, list_topics, update_topic, schedule_topic, unschedule_topic, start_topic_pipeline, hands_off, set_hands_off, delete_topic,
-create_video_project, set_video_aspect, list_video_projects, list_library,
+create_project, create_video_project, set_video_aspect, list_video_projects, list_library,
 delete_project, rename_video, get_project,
 generate_script_via_api, save_script,
 list_illustration_jobs, get_image_provider, set_image_provider,
@@ -717,7 +728,7 @@ start_job, pause_job, stop_job, resume_job,
 list_music, set_job_music, shuffle_job_music,
 list_backgrounds, set_project_background,
 youtube_connect, youtube_finish_oauth, youtube_status, youtube_disconnect,
-list_youtube_channels, set_youtube_channel, set_project_youtube, upload_to_youtube,
+list_youtube_channels, set_youtube_channel, set_project_youtube, upload_to_youtube, set_youtube_thumbnail,
 update_studio_settings.
 
 {script_rules}

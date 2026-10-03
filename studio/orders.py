@@ -5,22 +5,27 @@ Admin pages and MCP tools both call these functions so the two cannot drift.
 
 from __future__ import annotations
 
+import logging
+import re
 import shutil
 import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, BinaryIO
-from urllib.parse import quote
-
 from studio.paths import USER_DATA
+
+_log = logging.getLogger("bubblepod.orders")
 
 ORDERS_DB = USER_DATA / "orders.db"
 ORDER_FILES_DIR = USER_DATA / "order_videos"
+ART_THUMBS_DIR = USER_DATA / "order_art_thumbs"
 MAX_MP4_BYTES = 512 * 1024 * 1024
+MAX_THUMB_BYTES = 4 * 1024 * 1024
+_THUMB_NAME = re.compile(r"^[a-z0-9_]{1,40}\.(png|jpg|jpeg|webp|gif)$")
 
 NICHES = (
     "True Crime",
@@ -34,11 +39,14 @@ NICHES = (
     "Custom niche",
 )
 
-PACKAGES: dict[str, dict[str, Any]] = {
-    "starter": {"name": "Starter", "videos": 5, "cents": 29700},
-    "growth": {"name": "Growth", "videos": 10, "cents": 54700},
-    "scale": {"name": "Scale", "videos": 20, "cents": 99700},
+# Defaults until Admin → Pricing saves a catalog. 10-minute videos use the multiplier.
+DEFAULT_PACKAGES: dict[str, dict[str, Any]] = {
+    "starter": {"name": "Starter", "videos": 5, "cents": 4900, "days": 5, "per_day": 1},
+    "growth": {"name": "Growth", "videos": 10, "cents": 8900, "days": 5, "per_day": 2},
+    "scale": {"name": "Scale", "videos": 20, "cents": 19700, "days": 5, "per_day": 4},
 }
+DEFAULT_TEN_MINUTE_MULTIPLIER = Decimal("1.5")
+PACKAGE_KEYS = ("starter", "growth", "scale")
 
 FORMATS = ("16:9", "9:16", "both")
 LENGTHS = ("5", "10")
@@ -68,7 +76,14 @@ CREATE TABLE IF NOT EXISTS orders (
     delivered_at TEXT,
     delivery_note TEXT NOT NULL DEFAULT '',
     delivery_channel TEXT NOT NULL DEFAULT '',
-    delivery_email_error TEXT NOT NULL DEFAULT ''
+    delivery_email_error TEXT NOT NULL DEFAULT '',
+    user_id TEXT NOT NULL DEFAULT '',
+    days INTEGER,
+    per_day INTEGER,
+    approval_notice_id INTEGER,
+    generation_approved_at TEXT,
+    art_style TEXT NOT NULL DEFAULT '',
+    art_style_name TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS videos (
     id TEXT PRIMARY KEY,
@@ -79,6 +94,8 @@ CREATE TABLE IF NOT EXISTS videos (
     mp4_url TEXT,
     position INTEGER NOT NULL,
     created_at TEXT NOT NULL,
+    topic_id TEXT,
+    job_id TEXT,
     FOREIGN KEY (order_id) REFERENCES orders(id)
 );
 CREATE INDEX IF NOT EXISTS idx_orders_email ON orders(email);
@@ -102,16 +119,406 @@ def order_files_dir() -> Path:
     return Path(ORDER_FILES_DIR)
 
 
+def _clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, number))
+
+
+def dollars_to_cents(value: Any) -> int:
+    amount = Decimal(str(value).strip())
+    cents = (amount * Decimal(100)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return int(cents)
+
+
+def _multiplier(value: Any) -> float:
+    try:
+        number = Decimal(str(value if value not in (None, "") else DEFAULT_TEN_MINUTE_MULTIPLIER))
+    except Exception as exc:
+        raise ValueError("10-minute multiplier must be a number.") from exc
+    if number < Decimal("1") or number > Decimal("5"):
+        raise ValueError("10-minute multiplier must be between 1 and 5.")
+    return float(number.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def normalize_order_packages(raw: Any, *, multiplier: Any = None) -> dict[str, Any]:
+    """Validate the admin catalog. Missing packages keep the built-in offer."""
+    stored = raw if isinstance(raw, dict) else {}
+    packages: dict[str, dict[str, Any]] = {}
+    for key in PACKAGE_KEYS:
+        base = DEFAULT_PACKAGES[key]
+        row = stored.get(key) if isinstance(stored.get(key), dict) else {}
+        videos = _clamp_int(row.get("videos"), int(base["videos"]), 1, 100)
+        days = _clamp_int(row.get("days"), int(base["days"]), 1, 60)
+        per_day = _clamp_int(row.get("per_day"), int(base["per_day"]), 1, 20)
+        if "cents" in row and row.get("cents") not in (None, ""):
+            cents = _clamp_int(row.get("cents"), int(base["cents"]), 50, 100_000_00)
+        elif row.get("price") not in (None, ""):
+            try:
+                cents = dollars_to_cents(row.get("price"))
+            except Exception as exc:
+                raise ValueError(f"{base['name']} price must be a dollar amount.") from exc
+            if cents < 50 or cents > 100_000_00:
+                raise ValueError(f"{base['name']} price must be between $0.50 and $100,000.")
+        else:
+            cents = int(base["cents"])
+        paced = per_day * days
+        if videos != paced:
+            raise ValueError(
+                f"{base['name']} lists {videos} videos, but {per_day} per day over {days} days is {paced}."
+            )
+        name = " ".join(str(row.get("name") or base["name"]).split()) or str(base["name"])
+        packages[key] = {
+            "name": name[:40],
+            "videos": videos,
+            "cents": cents,
+            "days": days,
+            "per_day": per_day,
+        }
+    return {"packages": packages, "ten_minute_multiplier": _multiplier(multiplier)}
+
+
+def configured_pricing() -> dict[str, Any]:
+    """Admin-saved catalog, or the built-in Starter / Growth / Scale offer."""
+    from studio.settings import load_settings
+
+    data = load_settings()
+    stored = data.get("order_packages")
+    try:
+        return normalize_order_packages(stored, multiplier=data.get("order_ten_minute_multiplier"))
+    except ValueError:
+        return normalize_order_packages(None)
+
+
+def package_catalog() -> dict[str, dict[str, Any]]:
+    return configured_pricing()["packages"]
+
+
+def save_order_pricing(raw: Any, *, multiplier: Any = None) -> dict[str, Any]:
+    """Persist the video-order catalog on the admin settings store."""
+    from studio.settings import save_settings
+
+    pricing = normalize_order_packages(raw, multiplier=multiplier)
+    save_settings({
+        "order_packages": pricing["packages"],
+        "order_ten_minute_multiplier": pricing["ten_minute_multiplier"],
+    })
+    return public_config()
+
+
+def art_thumbs_dir() -> Path:
+    return Path(ART_THUMBS_DIR)
+
+
+def default_order_art_styles() -> list[dict[str, str]]:
+    """Pipeline styles buyers can pick until an admin saves a catalog."""
+    from studio.art_style import list_art_styles
+
+    return [
+        {"id": row["id"], "name": row["label"], "thumbnail": ""}
+        for row in list_art_styles()
+    ]
+
+
+def _safe_thumb_name(value: Any) -> str:
+    name = str(value or "").strip().lower()
+    if not name or not _THUMB_NAME.fullmatch(name):
+        return ""
+    return name
+
+
+def _thumb_path(name: str) -> Path:
+    """Resolve a stored thumbnail filename. Rejects anything that is not a bare file name."""
+    safe = _safe_thumb_name(name)
+    if not safe:
+        raise LookupError("Thumbnail not found.")
+    root = art_thumbs_dir().resolve()
+    path = (root / safe).resolve()
+    if path.parent != root:
+        raise LookupError("Thumbnail not found.")
+    return path
+
+
+def _sniff_image(data: bytes) -> tuple[str, str]:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png", "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg", "image/jpeg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif", "image/gif"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp", "image/webp"
+    raise ValueError("Thumbnail must be a PNG, JPEG, WEBP, or GIF.")
+
+
+def _thumb_media(path: Path) -> str:
+    return {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+    }.get(path.suffix.lower(), "application/octet-stream")
+
+
+def normalize_order_art_styles(raw: Any, *, thumbnails: dict[str, str] | None = None) -> list[dict[str, str]]:
+    """Validate the buyer catalog. Ids must be pipeline art styles. Thumbnails stay server-side filenames."""
+    rows = raw
+    if isinstance(raw, dict):
+        rows = raw.get("items")
+    if not isinstance(rows, list):
+        raise ValueError("Art styles must be a list.")
+    from studio.art_style import ART_STYLES, normalize_art_style
+
+    kept = thumbnails or {}
+    styles: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("Each art style needs an id and a name.")
+        try:
+            style_id = normalize_art_style(str(row.get("id") or ""))
+        except RuntimeError as exc:
+            raise ValueError(str(exc)) from exc
+        if style_id in seen:
+            raise ValueError(f"Art style {style_id} is listed more than once.")
+        seen.add(style_id)
+        name = " ".join(str(row.get("name") or "").split()) or ART_STYLES[style_id]["label"]
+        if len(name) > 80:
+            raise ValueError("Art style name is too long (80 characters max).")
+        styles.append({
+            "id": style_id,
+            "name": name,
+            "thumbnail": _safe_thumb_name(kept.get(style_id) or ""),
+        })
+    return styles
+
+
+def _stored_art_style_items() -> list[Any] | None:
+    """None when the admin has not saved a catalog yet."""
+    from studio.settings import load_settings
+
+    raw = load_settings().get("order_art_styles")
+    if isinstance(raw, dict) and isinstance(raw.get("items"), list):
+        return raw["items"]
+    if isinstance(raw, list) and raw:
+        return raw
+    return None
+
+
+def configured_art_styles() -> list[dict[str, str]]:
+    """Admin-saved styles, or every pipeline style with no thumbnail yet."""
+    stored = _stored_art_style_items()
+    if stored is None:
+        return default_order_art_styles()
+    from studio.art_style import normalize_art_style
+
+    thumbs: dict[str, str] = {}
+    for row in stored:
+        if not isinstance(row, dict):
+            continue
+        try:
+            canon = normalize_art_style(str(row.get("id") or ""))
+        except RuntimeError:
+            continue
+        thumbs[canon] = str(row.get("thumbnail") or "")
+    try:
+        return normalize_order_art_styles(stored, thumbnails=thumbs)
+    except ValueError:
+        return default_order_art_styles()
+
+
+def _art_style_row(style_id: str) -> dict[str, str]:
+    for row in configured_art_styles():
+        if row["id"] == style_id:
+            return row
+    raise ValueError("Choose an art style from the list.")
+
+
+def _public_art_style(row: dict[str, str]) -> dict[str, str]:
+    thumb = row.get("thumbnail") or ""
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "thumbnail_url": f"/api/orders/art-styles/{row['id']}/thumb" if thumb else "",
+    }
+
+
+def pipeline_art_style_choices() -> list[dict[str, str]]:
+    from studio.art_style import list_art_styles
+
+    return [{"id": row["id"], "name": row["label"]} for row in list_art_styles()]
+
+
+def _persist_art_styles(items: list[dict[str, str]]) -> None:
+    from studio.settings import save_settings
+
+    save_settings({"order_art_styles": {"items": items}})
+
+
+def _delete_thumb_file(name: str) -> None:
+    try:
+        path = _thumb_path(name)
+    except LookupError:
+        return
+    if path.is_file():
+        path.unlink()
+
+
+def save_order_art_styles(raw: Any) -> dict[str, Any]:
+    """Replace the buyer catalog. Existing thumbnail files stay attached by style id."""
+    current = {row["id"]: row.get("thumbnail") or "" for row in configured_art_styles()}
+    items = normalize_order_art_styles(raw, thumbnails=current)
+    kept = {row["id"] for row in items}
+    for style_id, filename in current.items():
+        if style_id not in kept:
+            _delete_thumb_file(filename)
+    _persist_art_styles(items)
+    return public_config()
+
+
+def add_order_art_style(style_id: str, name: str = "") -> dict[str, Any]:
+    from studio.art_style import ART_STYLES, normalize_art_style
+
+    try:
+        canon = normalize_art_style(style_id)
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
+    items = [dict(row) for row in configured_art_styles()]
+    if any(row["id"] == canon for row in items):
+        raise ValueError("That art style is already listed.")
+    label = " ".join((name or "").split()) or ART_STYLES[canon]["label"]
+    if len(label) > 80:
+        raise ValueError("Art style name is too long (80 characters max).")
+    items.append({"id": canon, "name": label, "thumbnail": ""})
+    _persist_art_styles(items)
+    return public_config()
+
+
+def remove_order_art_style(style_id: str) -> dict[str, Any]:
+    from studio.art_style import normalize_art_style
+
+    try:
+        canon = normalize_art_style(style_id)
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
+    items = [dict(row) for row in configured_art_styles()]
+    kept = [row for row in items if row["id"] != canon]
+    if len(kept) == len(items):
+        raise LookupError("That art style is not in the catalog.")
+    gone = next(row for row in items if row["id"] == canon)
+    _delete_thumb_file(str(gone.get("thumbnail") or ""))
+    _persist_art_styles(kept)
+    return public_config()
+
+
+def save_order_art_thumbnail(style_id: str, data: bytes) -> dict[str, Any]:
+    """Store a buyer-facing thumbnail under user_data/order_art_thumbs/{id}.{ext}."""
+    from studio.art_style import normalize_art_style
+
+    blob = bytes(data or b"")
+    if not blob:
+        raise ValueError("Thumbnail file is empty.")
+    if len(blob) > MAX_THUMB_BYTES:
+        raise ValueError("Thumbnail must be 4 MB or smaller.")
+    try:
+        canon = normalize_art_style(style_id)
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
+    ext, _media = _sniff_image(blob)
+    items = [dict(row) for row in configured_art_styles()]
+    row = next((item for item in items if item["id"] == canon), None)
+    if row is None:
+        raise ValueError("Add the art style before uploading a thumbnail.")
+    filename = f"{canon}{ext}"
+    dest = _thumb_path(filename)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    old = str(row.get("thumbnail") or "")
+    dest.write_bytes(blob)
+    if old and old != filename:
+        _delete_thumb_file(old)
+    row["thumbnail"] = filename
+    _persist_art_styles(items)
+    return public_config()
+
+
+def art_style_thumbnail_file(style_id: str) -> tuple[Path, str]:
+    """Public file for one offered style. The id is a catalog key, never a path."""
+    from studio.art_style import normalize_art_style
+
+    try:
+        canon = normalize_art_style(style_id)
+    except RuntimeError as exc:
+        raise LookupError("Thumbnail not found.") from exc
+    row = next((item for item in configured_art_styles() if item["id"] == canon), None)
+    if not row or not row.get("thumbnail"):
+        raise LookupError("Thumbnail not found.")
+    path = _thumb_path(str(row["thumbnail"]))
+    if path.stem != canon or not path.is_file():
+        raise LookupError("Thumbnail not found.")
+    return path, _thumb_media(path)
+
+
+def delivery_line(pkg: dict[str, Any]) -> str:
+    videos = int(pkg["videos"])
+    days = int(pkg["days"])
+    per_day = int(pkg["per_day"])
+    each = "1 video per day" if per_day == 1 else f"{per_day} videos per day"
+    return f"{videos} videos over {days} days, {each}"
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def order_delivery_pace(order: dict[str, Any]) -> dict[str, int]:
+    """Pace for one paid order: stored days/per_day, otherwise the live catalog."""
+    videos = int(order.get("video_count") or 0)
+    days = _optional_int(order.get("days"))
+    per_day = _optional_int(order.get("per_day"))
+    if not days or not per_day:
+        pkg = package_catalog().get(str(order.get("package_key") or "")) or {}
+        if not days:
+            days = _optional_int(pkg.get("days"))
+        if not per_day:
+            per_day = _optional_int(pkg.get("per_day"))
+    per_day_n = per_day or 1
+    days_n = days or max(1, (max(videos, 1) + per_day_n - 1) // per_day_n)
+    return {"video_count": videos, "days": int(days_n), "per_day": int(per_day_n)}
+
+
+def delivery_slots(video_count: int, per_day: int, *, start: datetime | None = None) -> list[str]:
+    """UTC times: per_day videos share a day, then the next calendar day."""
+    origin = start or datetime.now(timezone.utc)
+    if origin.tzinfo is None:
+        origin = origin.replace(tzinfo=timezone.utc)
+    origin = origin.astimezone(timezone.utc)
+    pace = max(1, int(per_day or 1))
+    slots: list[str] = []
+    for index in range(max(0, int(video_count))):
+        slot = origin + timedelta(days=index // pace)
+        slots.append(slot.isoformat())
+    return slots
+
+
 def price_cents(package_key: str, video_length: str) -> int:
-    """1.5x the package dollars for 10-minute videos, rounded half-up to the nearest dollar."""
-    pkg = PACKAGES.get(package_key)
+    """10-minute videos multiply the package price and round half-up to the nearest dollar."""
+    pkg = package_catalog().get(package_key)
     if not pkg:
         raise ValueError("Choose Starter, Growth, or Scale.")
     length = _normalize_length(video_length)
     base = int(pkg["cents"])
     if length == "5":
         return base
-    dollars = (Decimal(base) / Decimal(100)) * Decimal("1.5")
+    factor = Decimal(str(configured_pricing()["ten_minute_multiplier"]))
+    dollars = (Decimal(base) / Decimal(100)) * factor
     rounded = int(dollars.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
     return rounded * 100
 
@@ -138,9 +545,10 @@ def _normalize_format(value: str) -> str:
 
 def _normalize_package(value: str) -> str:
     raw = (value or "").strip().lower()
-    if raw in PACKAGES:
+    catalog = package_catalog()
+    if raw in catalog:
         return raw
-    for key, pkg in PACKAGES.items():
+    for key, pkg in catalog.items():
         if raw == str(pkg["name"]).lower():
             return key
     raise ValueError("Choose a package: Starter, Growth, or Scale.")
@@ -193,11 +601,47 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add order-approval columns on databases created before this feature."""
+    conn.executescript(_SCHEMA)
+    order_cols = _table_columns(conn, "orders")
+    additions = {
+        "user_id": "TEXT NOT NULL DEFAULT ''",
+        "days": "INTEGER",
+        "per_day": "INTEGER",
+        "approval_notice_id": "INTEGER",
+        "generation_approved_at": "TEXT",
+        "art_style": "TEXT NOT NULL DEFAULT ''",
+        "art_style_name": "TEXT NOT NULL DEFAULT ''",
+    }
+    added_notice = "approval_notice_id" not in order_cols
+    for name, decl in additions.items():
+        if name not in order_cols:
+            conn.execute(f"ALTER TABLE orders ADD COLUMN {name} {decl}")
+    if added_notice:
+        # Orders already paid before approval notices existed should not alert again.
+        conn.execute(
+            """
+            UPDATE orders
+            SET approval_notice_id = 0
+            WHERE approval_notice_id IS NULL AND status != 'pending_payment'
+            """
+        )
+    video_cols = _table_columns(conn, "videos")
+    for name, decl in (("topic_id", "TEXT"), ("job_id", "TEXT")):
+        if name not in video_cols:
+            conn.execute(f"ALTER TABLE videos ADD COLUMN {name} {decl}")
+
+
 def init_db() -> None:
     with _LOCK:
         conn = _connect()
         try:
-            conn.executescript(_SCHEMA)
+            _migrate(conn)
             conn.commit()
         finally:
             conn.close()
@@ -208,7 +652,7 @@ def _conn():
     with _LOCK:
         conn = _connect()
         try:
-            conn.executescript(_SCHEMA)
+            _migrate(conn)
             conn.commit()
             conn.execute("BEGIN IMMEDIATE")
             yield conn
@@ -277,6 +721,8 @@ def _admin_video(video: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "position": row["position"],
         "mp4_attached": attached,
         "mp4_url": f"/api/orders/download/{row['id']}" if attached and row["status"] == "ready" else "",
+        "topic_id": row.get("topic_id") or "",
+        "job_id": row.get("job_id") or "",
     }
 
 
@@ -312,6 +758,13 @@ def _admin_order(order: sqlite3.Row | dict[str, Any], videos: list[sqlite3.Row] 
         "email_sent": channel == "email" and not email_error,
         "can_deliver": bool(vids) and all(v["status"] == "ready" and v["mp4_attached"] for v in vids),
         "progress_pct": _progress(vids, row["status"]),
+        "user_id": row.get("user_id") or "",
+        "days": int(row["days"]) if row.get("days") else None,
+        "per_day": int(row["per_day"]) if row.get("per_day") else None,
+        "approval_notice_id": row.get("approval_notice_id"),
+        "generation_approved_at": row.get("generation_approved_at") or "",
+        "art_style": row.get("art_style") or "",
+        "art_style_name": row.get("art_style_name") or "",
         "videos": vids,
     }
 
@@ -320,7 +773,7 @@ def _client_video(video: dict[str, Any], email: str) -> dict[str, Any]:
     ready = video["status"] == "ready" and video.get("mp4_attached")
     url = ""
     if ready:
-        url = f"/api/orders/download/{video['id']}?email={quote(email)}"
+        url = f"/api/orders/download/{video['id']}"
     return {
         "id": video["id"],
         "topic": video.get("topic") or "",
@@ -351,6 +804,8 @@ def _client_order(order: dict[str, Any]) -> dict[str, Any]:
         "video_length_label": order.get("video_length_label") or "",
         "format": order.get("format") or "",
         "format_label": order.get("format_label") or "",
+        "art_style": order.get("art_style") or "",
+        "art_style_name": order.get("art_style_name") or "",
         "amount_cents": order.get("amount_cents"),
         "status": order.get("status"),
         "created_at": order.get("created_at") or "",
@@ -386,13 +841,17 @@ def stripe_status() -> dict[str, Any]:
 
 def public_config() -> dict[str, Any]:
     status = stripe_status()
+    pricing = configured_pricing()
     packages = []
-    for key, pkg in PACKAGES.items():
+    for key, pkg in pricing["packages"].items():
         packages.append(
             {
                 "key": key,
                 "name": pkg["name"],
                 "videos": pkg["videos"],
+                "days": pkg["days"],
+                "per_day": pkg["per_day"],
+                "timeline": delivery_line(pkg),
                 "prices": {
                     "5": price_cents(key, "5"),
                     "10": price_cents(key, "10"),
@@ -403,9 +862,12 @@ def public_config() -> dict[str, Any]:
         "ok": True,
         "stripe_configured": status["configured"],
         "stripe_mode": status["mode"],
+        "ten_minute_multiplier": pricing["ten_minute_multiplier"],
         "niches": list(NICHES),
         "formats": [{"value": "16:9", "label": "16:9"}, {"value": "9:16", "label": "9:16"}, {"value": "both", "label": "Both"}],
         "lengths": [{"value": "5", "label": "5-minute"}, {"value": "10", "label": "10-minute"}],
+        "art_styles": [_public_art_style(row) for row in configured_art_styles()],
+        "pipeline_art_styles": pipeline_art_style_choices(),
         "packages": packages,
         "stripe_error": ""
         if status["configured"]
@@ -431,7 +893,9 @@ def _validate_brief(data: dict[str, Any]) -> dict[str, Any]:
     package_key = _normalize_package(str(data.get("package") or ""))
     length = _normalize_length(str(data.get("video_length") or "5"))
     fmt = _normalize_format(str(data.get("format") or "16:9"))
-    pkg = PACKAGES[package_key]
+    art_style = _normalize_order_art_style(str(data.get("art_style") or ""))
+    art = _art_style_row(art_style)
+    pkg = package_catalog()[package_key]
     return {
         "niche": niche,
         "custom_niche": custom,
@@ -439,15 +903,67 @@ def _validate_brief(data: dict[str, Any]) -> dict[str, Any]:
         "package_key": package_key,
         "package_name": pkg["name"],
         "video_count": int(pkg["videos"]),
+        "days": int(pkg["days"]),
+        "per_day": int(pkg["per_day"]),
         "video_length": length,
         "format": fmt,
+        "art_style": art_style,
+        "art_style_name": art["name"],
         "amount_cents": price_cents(package_key, length),
     }
 
 
-def create_checkout(data: dict[str, Any]) -> dict[str, Any]:
+def _normalize_order_art_style(value: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        raise ValueError("Choose an art style.")
+    from studio.art_style import normalize_art_style
+
+    try:
+        canon = normalize_art_style(raw)
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
+    if canon not in {row["id"] for row in configured_art_styles()}:
+        raise ValueError("Choose an art style from the list.")
+    return canon
+
+
+def _art_style_from_meta(meta: dict[str, Any]) -> tuple[str, str]:
+    """Paid webhook metadata. A missing style does not reject money already captured."""
+    raw = str(meta.get("art_style") or "").strip()
+    if not raw:
+        return "", ""
+    try:
+        style_id = _normalize_order_art_style(raw)
+    except ValueError:
+        return "", ""
+    name = " ".join(str(meta.get("art_style_name") or "").split())
+    if not name:
+        try:
+            name = _art_style_row(style_id)["name"]
+        except ValueError:
+            name = style_id
+    return style_id, name[:80]
+
+
+def _account_user_id(value: str) -> str:
+    cleaned = "".join(ch for ch in (value or "").strip() if ch.isalnum() or ch in ("-", "_"))
+    return cleaned[:80]
+
+
+def _member_id_for_email(email: str) -> str:
+    from studio.members import get_user_by_email
+
+    user = get_user_by_email(email) if (email or "").strip() else None
+    if not user:
+        return ""
+    return _account_user_id(str(user.get("id") or ""))
+
+
+def create_checkout(data: dict[str, Any], *, user_id: str = "") -> dict[str, Any]:
     """Start a one-time Stripe Checkout. Price is computed here, not taken from the client."""
     brief = _validate_brief(data)
+    account_id = _account_user_id(user_id)
     status = stripe_status()
     if not status["configured"]:
         raise RuntimeError(
@@ -461,8 +977,9 @@ def create_checkout(data: dict[str, Any]) -> dict[str, Any]:
             INSERT INTO orders (
                 id, name, email, niche, custom_niche, channel_notes,
                 package_name, package_key, video_count, video_length, format,
-                amount_cents, stripe_session_id, status, reviewed, created_at
-            ) VALUES (?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'pending_payment', 0, ?)
+                amount_cents, stripe_session_id, status, reviewed, created_at,
+                days, per_day, user_id, art_style, art_style_name
+            ) VALUES (?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'pending_payment', 0, ?, ?, ?, ?, ?, ?)
             """,
             (
                 order_id,
@@ -476,6 +993,11 @@ def create_checkout(data: dict[str, Any]) -> dict[str, Any]:
                 brief["format"],
                 brief["amount_cents"],
                 created,
+                brief["days"],
+                brief["per_day"],
+                account_id,
+                brief["art_style"],
+                brief["art_style_name"],
             ),
         )
     try:
@@ -511,7 +1033,8 @@ def _create_stripe_session(order_id: str, brief: dict[str, Any]) -> Any:
     base = resolve_public_base_url().rstrip("/")
     length = length_label(brief["video_length"])
     fmt = format_label(brief["format"])
-    name = f"{brief['package_name']} — {brief['video_count']} {length} videos ({fmt})"
+    style = brief.get("art_style_name") or brief.get("art_style") or ""
+    name = f"{brief['package_name']} — {brief['video_count']} {length} videos ({fmt}, {style})"
     params = {
         "mode": "payment",
         "line_items": [
@@ -542,6 +1065,8 @@ def _create_stripe_session(order_id: str, brief: dict[str, Any]) -> Any:
             "package_key": brief["package_key"],
             "video_length": brief["video_length"],
             "format": brief["format"],
+            "art_style": brief["art_style"],
+            "art_style_name": brief["art_style_name"][:200],
             "niche": brief["niche"][:200],
             "custom_niche": brief["custom_niche"][:200],
             "video_count": str(brief["video_count"]),
@@ -579,6 +1104,8 @@ def _session_snapshot(obj: Any) -> dict[str, Any]:
                 "package_key": _obj_get(meta, "package_key") or "",
                 "video_length": _obj_get(meta, "video_length") or "",
                 "format": _obj_get(meta, "format") or "",
+                "art_style": _obj_get(meta, "art_style") or "",
+                "art_style_name": _obj_get(meta, "art_style_name") or "",
                 "niche": _obj_get(meta, "niche") or "",
                 "custom_niche": _obj_get(meta, "custom_niche") or "",
                 "video_count": _obj_get(meta, "video_count") or "",
@@ -635,7 +1162,17 @@ def fulfill_checkout_session(session: Any) -> dict[str, Any]:
         assert row is not None
         _ensure_video_rows(conn, row)
         paid = _load_admin(conn, row["id"])
-    return {"ok": True, "order_id": paid["id"], "video_count": len(paid["videos"]), "order": paid}
+    notice = _publish_approval_notice(paid)
+    with _conn() as conn:
+        paid = _load_admin(conn, paid["id"])
+    return {
+        "ok": True,
+        "order_id": paid["id"],
+        "video_count": len(paid["videos"]),
+        "order": paid,
+        "awaiting_approval": notice is not None,
+        "notice": notice,
+    }
 
 
 def _expected_amount(row: sqlite3.Row | None, meta: dict[str, str]) -> int:
@@ -657,13 +1194,26 @@ def _check_amount(row: sqlite3.Row | None, snap: dict[str, Any]) -> None:
 
 def _promote_pending(conn: sqlite3.Connection, row: sqlite3.Row, snap: dict[str, Any]) -> None:
     _check_amount(row, snap)
+    pkg = package_catalog().get(str(row["package_key"] or "")) or {}
+    existing_user = _account_user_id(str(row["user_id"] or ""))
+    matched = existing_user or _member_id_for_email(snap["email"])
     conn.execute(
         """
         UPDATE orders
-        SET name = ?, email = ?, stripe_session_id = ?, status = 'paid', reviewed = 0
+        SET name = ?, email = ?, stripe_session_id = ?, status = 'paid', reviewed = 0,
+            days = COALESCE(days, ?), per_day = COALESCE(per_day, ?),
+            user_id = CASE WHEN user_id IS NULL OR user_id = '' THEN ? ELSE user_id END
         WHERE id = ? AND status = 'pending_payment'
         """,
-        (snap["name"], snap["email"], snap["id"], row["id"]),
+        (
+            snap["name"],
+            snap["email"],
+            snap["id"],
+            pkg.get("days"),
+            pkg.get("per_day"),
+            matched,
+            row["id"],
+        ),
     )
 
 
@@ -673,18 +1223,21 @@ def _insert_paid_from_metadata(conn: sqlite3.Connection, snap: dict[str, Any]) -
     package_key = _normalize_package(meta.get("package_key") or "")
     length = _normalize_length(meta.get("video_length") or "5")
     fmt = _normalize_format(meta.get("format") or "16:9")
+    art_style, art_name = _art_style_from_meta(meta)
     niche = (meta.get("niche") or "").strip()
     if niche not in NICHES:
         niche = "Custom niche"
-    pkg = PACKAGES[package_key]
+    pkg = package_catalog()[package_key]
     order_id = (meta.get("order_id") or "").strip() or _new_id("ord_")
+    account_id = _member_id_for_email(snap["email"])
     conn.execute(
         """
         INSERT INTO orders (
             id, name, email, niche, custom_niche, channel_notes,
             package_name, package_key, video_count, video_length, format,
-            amount_cents, stripe_session_id, status, reviewed, created_at
-        ) VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, 'paid', 0, ?)
+            amount_cents, stripe_session_id, status, reviewed, created_at,
+            days, per_day, user_id, art_style, art_style_name
+        ) VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, 'paid', 0, ?, ?, ?, ?, ?, ?)
         """,
         (
             order_id,
@@ -700,6 +1253,11 @@ def _insert_paid_from_metadata(conn: sqlite3.Connection, snap: dict[str, Any]) -
             price_cents(package_key, length),
             snap["id"],
             _now(),
+            int(pkg["days"]),
+            int(pkg["per_day"]),
+            account_id,
+            art_style,
+            art_name,
         ),
     )
     row = _order_row(conn, order_id)
@@ -765,24 +1323,41 @@ def _retrieve_stripe_session(session_id: str) -> Any:
     return stripe.checkout.Session.retrieve(session_id)
 
 
-def list_orders_for_email(email: str) -> dict[str, Any]:
-    target = (email or "").strip().lower()
-    if not target or "@" not in target:
-        raise ValueError("Enter the email you used at checkout.")
+def list_orders_for_user(user: dict[str, Any]) -> dict[str, Any]:
+    """Orders for the signed-in member: stored user id, or the same account email."""
+    uid = _account_user_id(str((user or {}).get("id") or ""))
+    email = str((user or {}).get("email") or "").strip().lower()
+    if not uid:
+        raise ValueError("Sign in to see your orders.")
     with _conn() as conn:
+        if email:
+            conn.execute(
+                """
+                UPDATE orders
+                SET user_id = ?
+                WHERE (user_id IS NULL OR user_id = '')
+                  AND lower(email) = ?
+                  AND status != 'pending_payment'
+                """,
+                (uid, email),
+            )
         rows = conn.execute(
             """
             SELECT * FROM orders
-            WHERE lower(email) = ? AND status != 'pending_payment'
+            WHERE status != 'pending_payment'
+              AND (
+                user_id = ?
+                OR (? != '' AND lower(email) = ?)
+              )
             ORDER BY created_at DESC, id DESC
             """,
-            (target,),
+            (uid, email, email),
         ).fetchall()
         orders = [
             _client_order(_admin_order(row, _videos_for(conn, row["id"])))
             for row in rows
         ]
-    return {"ok": True, "email": target, "orders": orders}
+    return {"ok": True, "user_id": uid, "orders": orders}
 
 
 def list_production_orders() -> dict[str, Any]:
@@ -808,6 +1383,241 @@ def get_production_order(order_id: str) -> dict[str, Any]:
     with _conn() as conn:
         order = _load_admin(conn, (order_id or "").strip())
     return {"ok": True, "order": order}
+
+
+def _publish_approval_notice(order: dict[str, Any]) -> dict[str, Any] | None:
+    """Tell MCP a paid order is waiting. Does not queue topics. Idempotent per order."""
+    if order.get("approval_notice_id") is not None:
+        return None
+    try:
+        from studio.job_notifications import publish_order_awaiting_approval
+
+        facts = _order_generation_facts(order)
+        event = publish_order_awaiting_approval(
+            order_id=str(order.get("id") or ""),
+            package_name=str(order.get("package_name") or ""),
+            video_count=int(order.get("video_count") or 0),
+            niche=str(order.get("niche") or ""),
+            email=str(order.get("email") or ""),
+            name=str(order.get("name") or ""),
+            format=facts["format"],
+            video_length=facts["video_length"],
+            format_label=facts["format_label"],
+            video_length_label=facts["video_length_label"],
+            duration_min=facts["duration_min"],
+            art_style=facts["art_style"],
+            art_style_name=facts["art_style_name"],
+            days=_optional_int(order.get("days")),
+            per_day=_optional_int(order.get("per_day")),
+        )
+    except Exception:
+        _log.exception("order approval notice failed for %s", order.get("id"))
+        return None
+    event_id = _optional_int(event.get("id"))
+    if event_id:
+        with _conn() as conn:
+            conn.execute(
+                """
+                UPDATE orders
+                SET approval_notice_id = ?
+                WHERE id = ? AND approval_notice_id IS NULL
+                """,
+                (event_id, order["id"]),
+            )
+    if event.get("duplicate"):
+        return None
+    clean = dict(event)
+    clean.pop("duplicate", None)
+    return clean
+
+
+def _member_for_order(order: dict[str, Any]) -> dict[str, Any]:
+    """Use the order's studio user, or the member with the same checkout email."""
+    from studio.members import get_user_by_email, get_user_by_id
+
+    uid = str(order.get("user_id") or "").strip()
+    if uid:
+        user = get_user_by_id(uid)
+        if user:
+            return user
+    email = str(order.get("email") or "").strip()
+    user = get_user_by_email(email) if email else None
+    if not user:
+        shown = email or "(no email on the order)"
+        raise ValueError(
+            f"No studio member matches this order ({order.get('id')}). "
+            f"Checkout email {shown} is not a member account. "
+            "Generation was not started and no user was created."
+        )
+    return user
+
+
+def _order_topic_title(order: dict[str, Any], video: dict[str, Any]) -> str:
+    existing = str(video.get("topic") or "").strip()
+    if existing:
+        return existing[:500]
+    niche = niche_label(order) or "Video"
+    position = int(video.get("position") or 0)
+    return f"{niche} video {position}"[:500]
+
+
+def _order_topic_angle(order: dict[str, Any]) -> str:
+    parts: list[str] = []
+    niche = niche_label(order)
+    if niche:
+        parts.append(f"Niche: {niche}.")
+    notes = str(order.get("channel_notes") or "").strip()
+    if notes:
+        parts.append(notes)
+    length = order.get("video_length_label") or length_label(str(order.get("video_length") or "5"))
+    fmt = order.get("format_label") or format_label(str(order.get("format") or "16:9"))
+    package = order.get("package_name") or "video"
+    style = order.get("art_style_name") or order.get("art_style") or ""
+    style_bit = f" Art style: {style}." if style else ""
+    parts.append(f"{length} {fmt} video for a paid {package} order.{style_bit}")
+    return " ".join(parts)[:2000]
+
+
+def _order_generation_facts(order: dict[str, Any]) -> dict[str, Any]:
+    length = str(order.get("video_length") or "")
+    try:
+        duration = float(length) if length else None
+    except ValueError:
+        duration = None
+    return {
+        "art_style": str(order.get("art_style") or ""),
+        "art_style_name": str(order.get("art_style_name") or ""),
+        "video_length": length,
+        "video_length_label": str(order.get("video_length_label") or length_label(length or "5")),
+        "duration_min": duration,
+        "format": str(order.get("format") or ""),
+        "format_label": str(order.get("format_label") or format_label(str(order.get("format") or ""))),
+    }
+
+
+def approve_order_generation(order_id: str, *, now: datetime | None = None) -> dict[str, Any]:
+    """Queue this order's videos on the member account. Explicit approval; safe to call twice."""
+    from studio.topics import schedule_order_topic
+
+    oid = (order_id or "").strip()
+    order = get_production_order(oid)["order"]
+    if order["status"] == "delivered":
+        raise ValueError("This order is already delivered.")
+    videos = list(order.get("videos") or [])
+    if not videos:
+        raise ValueError("This order has no videos to generate.")
+    facts = _order_generation_facts(order)
+    if all(str(video.get("topic_id") or "").strip() for video in videos):
+        pace = order_delivery_pace(order)
+        return {
+            "ok": True,
+            "already_approved": True,
+            "order_id": oid,
+            "user_id": order.get("user_id") or "",
+            "per_day": pace["per_day"],
+            "days": pace["days"],
+            "video_count": len(videos),
+            **facts,
+            "topics": [
+                {
+                    "video_id": video["id"],
+                    "topic_id": video.get("topic_id") or "",
+                    "job_id": video.get("job_id") or "",
+                    "position": video.get("position"),
+                }
+                for video in videos
+            ],
+        }
+    try:
+        user = _member_for_order(order)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "order_id": oid, "topics": []}
+    user_id = str(user.get("id") or "").strip()
+    if not user_id:
+        return {
+            "ok": False,
+            "error": "Matched studio member has no id. Generation was not started.",
+            "order_id": oid,
+            "topics": [],
+        }
+    pace = order_delivery_pace(order)
+    slots = delivery_slots(len(videos), pace["per_day"], start=now)
+    queued: list[dict[str, Any]] = []
+    for index, video in enumerate(videos):
+        existing_topic = str(video.get("topic_id") or "").strip()
+        if existing_topic:
+            queued.append(
+                {
+                    "video_id": video["id"],
+                    "topic_id": existing_topic,
+                    "job_id": video.get("job_id") or "",
+                    "position": video.get("position"),
+                    "scheduled_at": slots[index],
+                    "already_queued": True,
+                }
+            )
+            continue
+        title = _order_topic_title(order, video)
+        result = schedule_order_topic(
+            owner_id=user_id,
+            title=title,
+            angle=_order_topic_angle(order),
+            duration_min=float(order.get("video_length") or 5),
+            scheduled_at=slots[index],
+            order_id=oid,
+            order_video_id=str(video["id"]),
+            aspect=str(order.get("format") or "16:9"),
+            art_style=str(order.get("art_style") or ""),
+        )
+        topic = result.get("topic") or {}
+        topic_id = str(topic.get("id") or "")
+        job_id = str(result.get("job_id") or topic.get("job_id") or "")
+        if not topic_id:
+            raise RuntimeError(f"Could not queue a topic for video {video['id']}.")
+        with _conn() as conn:
+            conn.execute(
+                """
+                UPDATE videos
+                SET topic = ?, topic_id = ?, job_id = ?
+                WHERE id = ? AND (topic_id IS NULL OR topic_id = '')
+                """,
+                (title, topic_id, job_id or None, video["id"]),
+            )
+        queued.append(
+            {
+                "video_id": video["id"],
+                "topic_id": topic_id,
+                "job_id": job_id,
+                "position": video.get("position"),
+                "scheduled_at": result.get("scheduled_at") or slots[index],
+                "already_queued": bool(result.get("already_queued")),
+            }
+        )
+    approved_at = _now()
+    with _conn() as conn:
+        conn.execute(
+            """
+            UPDATE orders
+            SET user_id = ?,
+                generation_approved_at = COALESCE(NULLIF(generation_approved_at, ''), ?),
+                status = CASE WHEN status = 'paid' THEN 'queued' ELSE status END
+            WHERE id = ?
+            """,
+            (user_id, approved_at, oid),
+        )
+        updated = _load_admin(conn, oid)
+    return {
+        "ok": True,
+        "already_approved": False,
+        "order_id": oid,
+        "user_id": user_id,
+        "per_day": pace["per_day"],
+        "days": pace["days"],
+        "video_count": len(videos),
+        **facts,
+        "topics": queued,
+        "order": updated,
+    }
 
 
 def mark_order_reviewed(order_id: str) -> dict[str, Any]:
@@ -1031,32 +1841,36 @@ def _send_delivery_email(order: dict[str, Any]) -> tuple[bool, str, str, str]:
 
     base = resolve_public_base_url().rstrip("/")
     email = (order.get("email") or "").strip()
-    my_orders = f"{base}/my-orders?email={quote(email)}"
+    my_orders = f"{base}/my-orders"
+    style = order.get("art_style_name") or order.get("art_style") or ""
+    style_bit = f" · {style}" if style else ""
     lines = [
         f"Hi {order.get('name') or 'there'},",
         "",
         f"Your {order.get('package_name')} order is ready.",
         f"Order: {order.get('id')}",
         f"Niche: {order.get('niche')}",
-        f"Package: {order.get('package_name')} · {order.get('video_count')} × {order.get('video_length_label')} · {order.get('format_label')}",
+        f"Package: {order.get('package_name')} · {order.get('video_count')} × {order.get('video_length_label')} · {order.get('format_label')}{style_bit}",
         f"Amount paid: ${int(order.get('amount_cents') or 0) / 100:.2f}",
         "",
-        f"My Orders: {my_orders}",
+        f"Sign in and open My Orders to download: {my_orders}",
         "",
-        "Downloads:",
+        "Downloads (sign in with the account on this order):",
     ]
     for video in order.get("videos") or []:
         title = (video.get("topic") or "").strip() or f"Video {video.get('position')}"
-        url = f"{base}/api/orders/download/{video['id']}?email={quote(email)}"
+        url = f"{base}/api/orders/download/{video['id']}"
         lines.append(f"- {title}: {url}")
     lines.append("")
     text = "\n".join(lines)
     if not email_enabled():
+        from studio.mailjet import log_if_unconfigured
+
+        log_if_unconfigured()
         return (
             False,
             "in_app",
-            "Delivered in the app. Email is not configured, so no message was sent. "
-            "The client can download videos from My Orders with their checkout email.",
+            "Delivered in the app. The client can download videos from My Orders after they sign in.",
             "",
         )
     try:
@@ -1080,7 +1894,12 @@ def _send_delivery_email(order: dict[str, Any]) -> tuple[bool, str, str, str]:
     )
 
 
-def resolve_download(video_id: str, email: str = "", *, is_admin: bool = False) -> tuple[Path, str]:
+def resolve_download(
+    video_id: str,
+    user: dict[str, Any] | None = None,
+    *,
+    is_admin: bool = False,
+) -> tuple[Path, str]:
     vid = (video_id or "").strip()
     with _conn() as conn:
         video = _video_row(conn, vid)
@@ -1089,9 +1908,7 @@ def resolve_download(video_id: str, email: str = "", *, is_admin: bool = False) 
         order = _order_row(conn, video["order_id"])
         if not order or order["status"] == "pending_payment":
             raise LookupError("Not found.")
-        owner = (order["email"] or "").strip().lower()
-        given = (email or "").strip().lower()
-        if not is_admin and given != owner:
+        if not is_admin and not _user_owns_order(order, user):
             raise LookupError("Not found.")
         if video["status"] != "ready":
             raise LookupError("Not found." if not is_admin else "This video is not ready for download.")
@@ -1101,6 +1918,19 @@ def resolve_download(video_id: str, email: str = "", *, is_admin: bool = False) 
         topic = (video["topic"] or "").strip()
         stem = _safe_filename(topic) if topic else f"video-{video['position']}"
     return path, f"{stem}.mp4"
+
+
+def _user_owns_order(order: sqlite3.Row | dict[str, Any], user: dict[str, Any] | None) -> bool:
+    if not user:
+        return False
+    data = dict(order)
+    uid = _account_user_id(str(user.get("id") or ""))
+    email = str(user.get("email") or "").strip().lower()
+    order_uid = _account_user_id(str(data.get("user_id") or ""))
+    order_email = str(data.get("email") or "").strip().lower()
+    if uid and order_uid and uid == order_uid:
+        return True
+    return bool(email and order_email and email == order_email)
 
 
 def _safe_filename(value: str) -> str:

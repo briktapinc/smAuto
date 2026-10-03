@@ -31,12 +31,59 @@
     return (Number(cents || 0) / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
   }
 
+  function clearAuthToken() {
+    try {
+      localStorage.removeItem("bubblepod.authToken");
+      localStorage.removeItem("bubblepod_token");
+    } catch (err) { /* ignore */ }
+  }
+
+  function setLogoutVisible(show) {
+    const btn = document.getElementById("order-logout");
+    if (btn) btn.hidden = !show;
+  }
+
+  function setupLogout() {
+    const btn = document.getElementById("order-logout");
+    if (!btn || btn.dataset.bound === "1") return;
+    btn.dataset.bound = "1";
+    btn.addEventListener("click", async () => {
+      try {
+        await api("/api/auth/logout", { method: "POST", body: {} });
+      } catch (err) { /* ignore */ }
+      clearAuthToken();
+      // Same destination as Studio logout: marketing/site home, not /app login.
+      location.replace("/");
+    });
+  }
+
   function showNav() {
     const link = document.getElementById("production-nav");
-    if (!link) return;
+    setupLogout();
+    setLogoutVisible(false);
     api("/api/auth/me").then((me) => {
-      if (me && (me.is_admin || me.desktop_mode)) link.hidden = false;
-    }).catch(() => {});
+      if (link && me && (me.is_admin || me.desktop_mode)) link.hidden = false;
+      if (me && me.role === "buyer") hideStudioLinks();
+      // Any signed-in role (buyer, member, admin) gets Log out on order chrome.
+      if (me && !me.desktop_mode) setLogoutVisible(true);
+    }).catch(() => {
+      setLogoutVisible(false);
+    });
+  }
+
+  function hideStudioLinks() {
+    document.querySelectorAll("a[href]").forEach((anchor) => {
+      let path = "";
+      try {
+        path = new URL(anchor.getAttribute("href"), location.origin).pathname.replace(/\/+$/, "") || "/";
+      } catch (err) {
+        return;
+      }
+      const leaf = path.split("/").filter(Boolean).pop() || "";
+      if (path !== "/" && leaf !== "app") return;
+      if (anchor.classList.contains("brand")) anchor.setAttribute("href", BASE + "/order");
+      else anchor.hidden = true;
+    });
   }
 
   const page = document.body.dataset.page || "";
@@ -127,16 +174,19 @@
     const error = document.getElementById("checkout-error");
     const banner = document.getElementById("stripe-banner");
     const total = document.getElementById("summary-total");
+    const styleRoot = document.getElementById("art-styles");
     const lines = {
       package: document.getElementById("summary-package"),
       length: document.getElementById("summary-length"),
       format: document.getElementById("summary-format"),
+      style: document.getElementById("summary-style"),
       niche: document.getElementById("summary-niche"),
     };
     let config = null;
     let selected = "";
     let length = "5";
     let format = "16:9";
+    let artStyle = "";
 
     function showError(message) {
       error.hidden = false;
@@ -151,17 +201,32 @@
 
     function render() {
       packages.forEach((btn) => {
+        const pkg = (config && config.packages || []).find((item) => item.key === btn.dataset.package);
         const cents = priceFor(btn.dataset.package);
         const slot = btn.querySelector("[data-price]");
         if (slot && cents != null) slot.textContent = money(cents);
+        const videos = btn.querySelector("[data-videos]");
+        if (videos && pkg) videos.textContent = `${pkg.videos} videos`;
+        const pace = btn.querySelector("[data-timeline]");
+        if (pace && pkg && pkg.timeline) pace.textContent = pkg.timeline;
         btn.setAttribute("aria-pressed", btn.dataset.package === selected ? "true" : "false");
       });
       lengths.forEach((btn) => btn.setAttribute("aria-pressed", btn.dataset.length === length ? "true" : "false"));
       formats.forEach((btn) => btn.setAttribute("aria-pressed", btn.dataset.format === format ? "true" : "false"));
       const pkg = (config && config.packages || []).find((item) => item.key === selected);
-      lines.package.textContent = pkg ? `${pkg.name} · ${pkg.videos} videos` : "Select a package";
+      lines.package.textContent = pkg
+        ? `${pkg.name} · ${pkg.videos} videos${pkg.timeline ? ` · ${pkg.timeline}` : ""}`
+        : "Select a package";
       lines.length.textContent = length === "10" ? "10-minute" : "5-minute";
       lines.format.textContent = format === "both" ? "Both" : format;
+      const styles = (config && config.art_styles) || [];
+      const chosen = styles.find((item) => item.id === artStyle);
+      lines.style.textContent = chosen ? chosen.name : "Select an art style";
+      if (styleRoot) {
+        styleRoot.querySelectorAll("[data-art-style]").forEach((btn) => {
+          btn.setAttribute("aria-pressed", btn.dataset.artStyle === artStyle ? "true" : "false");
+        });
+      }
       const custom = niche.value === "Custom niche";
       customWrap.hidden = !custom;
       lines.niche.textContent = custom ? (customNiche.value.trim() || "Custom niche") : niche.value;
@@ -180,6 +245,7 @@
       if (!config) { showError("Prices are still loading. Try again in a moment."); return; }
       if (!config.stripe_configured) { showError(config.stripe_error || "Stripe is not configured."); return; }
       if (!selected) { showError("Choose a package."); return; }
+      if (!artStyle) { showError("Choose an art style."); return; }
       if (niche.value === "Custom niche" && !customNiche.value.trim()) { showError("Enter a custom niche."); return; }
       const btn = document.getElementById("checkout");
       btn.disabled = true;
@@ -193,6 +259,7 @@
             package: selected,
             video_length: length,
             format: format,
+            art_style: artStyle,
           },
         });
         if (!data.url) throw new Error("Stripe did not return a checkout URL.");
@@ -203,8 +270,43 @@
       }
     });
 
+    function paintStyles(styles) {
+      if (!styleRoot) return;
+      styleRoot.textContent = "";
+      if (!styles.length) {
+        const empty = document.createElement("p");
+        empty.className = "hint";
+        empty.textContent = "No art styles are available yet.";
+        styleRoot.append(empty);
+        return;
+      }
+      styles.forEach((style) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "style-pick";
+        btn.dataset.artStyle = style.id;
+        btn.setAttribute("aria-pressed", style.id === artStyle ? "true" : "false");
+        if (style.thumbnail_url) {
+          const img = document.createElement("img");
+          img.alt = "";
+          img.src = BASE + style.thumbnail_url;
+          btn.append(img);
+        } else {
+          const swatch = document.createElement("span");
+          swatch.className = "style-swatch";
+          btn.append(swatch);
+        }
+        const label = document.createElement("strong");
+        label.textContent = style.name || style.id;
+        btn.append(label);
+        btn.addEventListener("click", () => { artStyle = style.id; render(); });
+        styleRoot.append(btn);
+      });
+    }
+
     api("/api/orders/config").then((data) => {
       config = data;
+      paintStyles(data.art_styles || []);
       if (!data.stripe_configured) {
         banner.hidden = false;
         banner.textContent = data.stripe_error || "Stripe is not configured.";
@@ -259,19 +361,15 @@
   }
 
   function initMine() {
-    const form = document.getElementById("lookup");
-    const input = document.getElementById("lookup-email");
     const error = document.getElementById("lookup-error");
     const results = document.getElementById("results");
-    const preset = new URLSearchParams(window.location.search).get("email") || "";
-    if (preset) input.value = preset;
 
     function render(orders) {
       results.textContent = "";
       if (!orders.length) {
         const empty = document.createElement("p");
         empty.className = "hint";
-        empty.textContent = "No orders for that email.";
+        empty.textContent = "No orders on this account yet.";
         results.append(empty);
         return;
       }
@@ -281,7 +379,8 @@
         const heading = document.createElement("h2");
         heading.textContent = `${order.package_name} · ${order.id}`;
         const meta = document.createElement("p");
-        meta.textContent = `${order.niche} · ${order.video_length_label} · ${order.format_label} · ${money(order.amount_cents)} · ${String(order.status || "").replaceAll("_", " ")}`;
+        const styleName = order.art_style_name || order.art_style || "";
+        meta.textContent = `${order.niche} · ${order.video_length_label} · ${order.format_label}${styleName ? ` · ${styleName}` : ""} · ${money(order.amount_cents)} · ${String(order.status || "").replaceAll("_", " ")}`;
         const bar = document.createElement("div");
         bar.className = "bar";
         bar.setAttribute("role", "progressbar");
@@ -320,18 +419,18 @@
       });
     }
 
-    function lookup(event) {
-      if (event) event.preventDefault();
-      error.hidden = true;
-      api("/api/my-orders", { method: "POST", body: { email: input.value } })
-        .then((data) => render(data.orders || []))
-        .catch((err) => {
-          error.hidden = false;
-          error.textContent = err.message || "Lookup failed.";
-        });
-    }
-    form.addEventListener("submit", lookup);
-    if (preset) lookup();
+    error.hidden = true;
+    api("/api/my-orders")
+      .then((data) => render(data.orders || []))
+      .catch((err) => {
+        const message = err.message || "Could not load your orders.";
+        if (/not authenticated|sign in/i.test(message)) {
+          window.location.href = `${BASE}/?next=/my-orders`;
+          return;
+        }
+        error.hidden = false;
+        error.textContent = message;
+      });
   }
 
   function initProduction() {
@@ -397,6 +496,7 @@
         ["Package", `${order.package_name} (${order.video_count})`],
         ["Length", order.video_length_label],
         ["Format", order.format_label],
+        ["Art style", order.art_style_name || order.art_style],
         ["Paid", money(order.amount_cents)],
       ].forEach(([label, value]) => {
         const cell = document.createElement("p");

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Checkout canceled — Bubble Pod</title>
-  <link rel="stylesheet" href="/static/order.css" />
+  <link rel="stylesheet" href="/static/order.css?v=logout1" />
 </head>
 <body data-page="cancel">
   <header class="chrome">
@@ -22,6 +22,7 @@
           <a href="/production" id="production-nav" hidden>Production</a>
         </div>
       </details>
+      <button type="button" id="order-logout" hidden>Log out</button>
     </nav>
   </header>
   <main>
@@ -29,6 +30,6 @@
     <p class="lede">No charge was made. Your package choices are still on the order page.</p>
     <p><a class="btn-yellow" href="/order" style="display:inline-flex;width:auto;color:#081633;background:#ffd638;padding:0.75rem 1rem;border-radius:12px;text-decoration:none;font-weight:800;">Back to order</a></p>
   </main>
-  <script src="/static/order.js"></script>
+  <script src="/static/order.js?v=logout1"></script>
 </body>
 </html>

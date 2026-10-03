@@ -289,3 +289,24 @@ def mcp_settings_payload(*, http_mounted: bool = True) -> dict[str, Any]:
             "Studio trusts the tunnel hop. Docs/OpenAPI (/docs, /redoc, /openapi.json) require Studio login."
         ),
     }
+
+
+def member_mcp_access(*, http_mounted: bool = True) -> dict[str, Any]:
+    """MCP connection info for the signed-in user. No PIN, no ngrok password, no admin tools."""
+    full = mcp_settings_payload(http_mounted=http_mounted)
+    public_mcp = full.get("public_mcp_url") or full.get("http_url") or ""
+    return {
+        "ok": True,
+        "mcp_build": full.get("mcp_build"),
+        "http_mounted": bool(full.get("http_mounted")),
+        "http_url": full.get("http_url") or "",
+        "local_http_url": full.get("local_http_url") or "",
+        "public_mcp_url": public_mcp,
+        "auth": "bearer_api_key",
+        "header": "Authorization: Bearer bp_live_…",
+        "hint": (
+            "Use your own API key as Authorization: Bearer bp_live_…. "
+            "That key is only your Studio account: your jobs and your YouTube channel. "
+            "It is not the admin MCP PIN and it does not use the admin YouTube login."
+        ),
+    }

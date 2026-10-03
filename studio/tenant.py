@@ -39,31 +39,60 @@ def filter_owned(items: list[dict[str, Any]], user: dict[str, Any] | None) -> li
     return [item for item in items if str(item.get("owner_id") or "").strip() == uid]
 
 
+def require_owned_project(user: dict[str, Any] | None, project_id: str) -> dict[str, Any]:
+    """Same ownership rule as the web project routes. Admins may access every job.
+
+    Raises FileNotFoundError when the project is missing and PermissionError
+    when the caller does not own it. MCP tools use this without an HTTP request.
+    """
+    from studio.projects import load_meta
+
+    pid = (project_id or "").strip()
+    if not pid:
+        raise FileNotFoundError("Unknown project")
+    meta = load_meta(pid)
+    if not user_owns_meta(user, meta):
+        raise PermissionError("Not your job")
+    return meta
+
+
+def require_owned_topic(user: dict[str, Any] | None, topic_id: str) -> dict[str, Any]:
+    """Same ownership rule as require_topic_access. Admins may access every topic."""
+    from studio.topics import get_topic_raw
+
+    tid = (topic_id or "").strip()
+    topic = get_topic_raw(tid) if tid else None
+    if not topic:
+        raise FileNotFoundError(f"Unknown topic: {topic_id}")
+    if not user_owns_topic(user, topic):
+        raise PermissionError("Not your topic")
+    return topic
+
+
 def require_project_access(request: Request, project_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
     """Load project meta and ensure the session user owns it (or is admin)."""
     from studio.auth import require_session
-    from studio.projects import load_meta
 
     user = require_session(request)
     try:
-        meta = load_meta(project_id)
+        meta = require_owned_project(user, project_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    if not user_owns_meta(user, meta):
-        raise HTTPException(status_code=403, detail="Not your job")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     return user, meta
 
 
 def require_topic_access(request: Request, topic_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
     from studio.auth import require_session
-    from studio.topics import get_topic_raw
 
     user = require_session(request)
-    topic = get_topic_raw(topic_id)
-    if not topic:
-        raise HTTPException(status_code=404, detail=f"Unknown topic: {topic_id}")
-    if not user_owns_topic(user, topic):
-        raise HTTPException(status_code=403, detail="Not your topic")
+    try:
+        topic = require_owned_topic(user, topic_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     return user, topic
 
 

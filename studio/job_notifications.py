@@ -1,4 +1,4 @@
-"""Notices MCP can wait on when a Studio job finishes."""
+"""Notices MCP can wait on when a Studio job finishes or a paid order needs approval."""
 
 from __future__ import annotations
 
@@ -144,7 +144,152 @@ def publish_job_finished(
         _events.append(event)
         _append(event)
         _cond.notify_all()
+        event_out = dict(event)
+    _email_job_notice(event_out)
+    return event_out
+
+
+def publish_running_job_error(
+    project_id: str,
+    *,
+    error: str,
+    detail: str = "",
+    step: str = "",
+    kind: str = "",
+) -> dict[str, Any] | None:
+    """Tell MCP about an error while the job is still running. Same listener as finish notices."""
+    global _seq
+    err = (error or "").strip()
+    if not err:
+        return None
+    note = (detail or "").strip() or err
+    title = ""
+    try:
+        from studio.projects import load_meta
+
+        meta = load_meta(project_id)
+        title = str(meta.get("title") or meta.get("topic") or "")
+    except Exception:
+        title = ""
+    with _cond:
+        _load()
+        for row in reversed(_events):
+            if row.get("project_id") == project_id and row.get("type") == "job_error" and row.get("error") == err[:800]:
+                return None
+            if row.get("project_id") == project_id:
+                break
+        _seq += 1
+        event = {
+            "id": _seq,
+            "type": "job_error",
+            "status": "running",
+            "running": True,
+            "project_id": project_id,
+            "title": title,
+            "kind": (kind or "")[:40],
+            "step": (step or "")[:80],
+            "detail": note[:800],
+            "error": err[:800],
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "action": (
+                "The job is still running. Read this error and fix what you can. "
+                "Do not start another run of this project until the current one stops."
+            ),
+        }
+        _events.append(event)
+        _append(event)
+        _cond.notify_all()
         return dict(event)
+
+
+def _order_notice_specs(length: str, fmt: str, style: str) -> str:
+    bits = [part for part in (length, fmt, f"art style {style}" if style else "") if part]
+    if not bits:
+        return ""
+    return " (" + ", ".join(bits) + ")"
+
+
+def publish_order_awaiting_approval(
+    *,
+    order_id: str,
+    package_name: str,
+    video_count: int,
+    niche: str,
+    email: str = "",
+    name: str = "",
+    format: str = "",
+    video_length: str = "",
+    format_label: str = "",
+    video_length_label: str = "",
+    duration_min: float | None = None,
+    art_style: str = "",
+    art_style_name: str = "",
+    days: int | None = None,
+    per_day: int | None = None,
+) -> dict[str, Any]:
+    """One notice per order. A repeat call returns the original event and does not append another."""
+    global _seq
+    oid = (order_id or "").strip()
+    if not oid:
+        raise ValueError("order_id is required.")
+    with _cond:
+        _load()
+        for row in _events:
+            if row.get("type") == "order_awaiting_approval" and row.get("order_id") == oid:
+                existing = dict(row)
+                existing["duplicate"] = True
+                return existing
+        _seq += 1
+        event: dict[str, Any] = {
+            "id": _seq,
+            "type": "order_awaiting_approval",
+            "status": "awaiting_approval",
+            "order_id": oid,
+            "package_name": package_name or "",
+            "video_count": int(video_count or 0),
+            "niche": niche or "",
+            "email": email or "",
+            "name": name or "",
+            "format": format or "",
+            "video_length": video_length or "",
+            "format_label": format_label or "",
+            "video_length_label": video_length_label or "",
+            "art_style": art_style or "",
+            "art_style_name": art_style_name or "",
+            "duration_min": duration_min,
+            "generation_started": False,
+            "project_id": "",
+            "detail": (
+                "A paid video order arrived"
+                + _order_notice_specs(video_length_label or video_length, format_label or format, art_style_name or art_style)
+                + ". Generation is NOT started until an admin approves this order."
+            ),
+            "action": (
+                "Call approve_order_generation with this order_id to queue the videos on the member account. "
+                "Generation has not started."
+            ),
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        if days is not None:
+            event["days"] = int(days)
+        if per_day is not None:
+            event["per_day"] = int(per_day)
+        _events.append(event)
+        _append(event)
+        _cond.notify_all()
+        out = dict(event)
+        out["duplicate"] = False
+        return out
+
+
+def _email_job_notice(event: dict[str, Any]) -> None:
+    """Best-effort owner email after the listener lock is released."""
+    try:
+        from studio.email import notify_job_finished
+
+        notify_job_finished(event)
+    except Exception:
+        return
 
 
 def _matching(after_id: int, project_id: str) -> list[dict[str, Any]]:

@@ -82,7 +82,6 @@ PUBLIC_API_PATHS = frozenset({
     "/api/youtube/oauth/callback",
     "/api/orders/config",
     "/api/orders/checkout",
-    "/api/my-orders",
 })
 
 # Authenticated users may hit these even without an active membership.
@@ -109,6 +108,7 @@ MEMBERSHIP_GATED_MCP_TOOLS = frozenset({
     "schedule_topic",
     "start_topic_pipeline",
     "set_hands_off",
+    "create_project",
     "create_video_project",
     "set_video_aspect",
     "rename_video",
@@ -143,6 +143,7 @@ MEMBERSHIP_GATED_MCP_TOOLS = frozenset({
     "set_job_music",
     "set_project_youtube",
     "upload_to_youtube",
+    "set_youtube_thumbnail",
     "create_api_key",
 })
 
@@ -755,6 +756,9 @@ def authorize_mcp_http(request: Request) -> str:
     """
     user = try_jwt_user(request)
     if user:
+        from studio.members import get_user_by_username
+
+        reject_buyer_tools(get_user_by_username(user))
         if mcp_pin_configured():
             pin = extract_mcp_pin(request)
             if pin and not verify_mcp_pin(pin):
@@ -772,6 +776,7 @@ def authorize_mcp_http(request: Request) -> str:
             keyed = resolve_api_key(raw)
             if keyed is None:
                 raise HTTPException(status_code=401, detail="Invalid API key")
+            reject_buyer_tools(keyed)
             _bind_mcp_username(request, keyed.get("username") or "", method="api_key")
             return str(keyed.get("username") or "")
 
@@ -872,7 +877,7 @@ def is_public_path(path: str) -> bool:
         return True
     if path in ("/order", "/order/success", "/order/cancel", "/my-orders"):
         return True
-    if path.startswith("/api/orders/by-session/") or path.startswith("/api/orders/download/"):
+    if path.startswith("/api/orders/by-session/") or path.startswith("/api/orders/art-styles/"):
         return True
     if path.startswith("/billing/") or path.startswith("/pricing"):
         return True
@@ -893,6 +898,88 @@ def is_docs_path(path: str) -> bool:
 
 def is_mcp_path(path: str) -> bool:
     return path == "/mcp" or path.startswith("/mcp/")
+
+
+_BUYER_API_EXACT = frozenset({
+    "/api/auth/me",
+    "/api/auth/logout",
+    "/api/my-orders",
+    "/api/orders/config",
+    "/api/orders/checkout",
+    "/api/health",
+})
+_BUYER_API_PREFIXES = (
+    "/api/orders/by-session/",
+    "/api/orders/art-styles/",
+    "/api/orders/download/",
+)
+_STUDIO_SHELL_PATHS = frozenset({
+    "/",
+    "/app",
+    "/admin",
+    "/pricing",
+    "/production",
+    "/billing/success",
+    "/billing/cancel",
+})
+BUYER_API_DENIED = "Buyers cannot use Studio"
+
+
+def _shell_path(path: str) -> str:
+    raw = (path or "").split("?", 1)[0].split("#", 1)[0]
+    if raw != "/" and raw.endswith("/"):
+        raw = raw.rstrip("/")
+    return raw or "/"
+
+
+def buyer_api_allowed(path: str) -> bool:
+    """Order flow, My orders, and the auth calls needed to know who is signed in."""
+    clean = (path or "").split("?", 1)[0]
+    if clean in _BUYER_API_EXACT:
+        return True
+    return any(clean.startswith(prefix) for prefix in _BUYER_API_PREFIXES)
+
+
+def buyer_api_denial(user: dict[str, Any] | None, path: str) -> str | None:
+    """403 detail when a buyer calls a Studio API. None when the call may proceed.
+
+    Desktop mode skips this gate so the local single-user app keeps working.
+    """
+    if is_desktop_mode():
+        return None
+    from studio.members import is_buyer
+
+    if not is_buyer(user):
+        return None
+    if buyer_api_allowed(path):
+        return None
+    clean = (path or "").split("?", 1)[0]
+    if clean.startswith("/api/") or is_mcp_path(clean) or is_docs_path(clean):
+        return BUYER_API_DENIED
+    return None
+
+
+def buyer_shell_redirect(user: dict[str, Any] | None, path: str) -> str | None:
+    """Order page when a buyer hits the Studio shell. None for members, admins, and desktop."""
+    if is_desktop_mode():
+        return None
+    from studio.members import is_buyer, login_landing_path
+
+    if not is_buyer(user):
+        return None
+    if _shell_path(path) in _STUDIO_SHELL_PATHS:
+        return login_landing_path(user)
+    return None
+
+
+def reject_buyer_tools(user: dict[str, Any] | None) -> None:
+    """Buyers do not get MCP, admin, or production tools."""
+    if is_desktop_mode():
+        return
+    from studio.members import is_buyer
+
+    if is_buyer(user):
+        raise HTTPException(status_code=403, detail=BUYER_API_DENIED)
 
 
 def path_requires_auth(path: str) -> bool:

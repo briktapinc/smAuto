@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Production queue — Bubble Pod</title>
-  <link rel="stylesheet" href="/static/order.css" />
+  <link rel="stylesheet" href="/static/order.css?v=logout1" />
 </head>
 <body data-page="production">
   <header class="chrome">
@@ -22,6 +22,7 @@
           <a href="/production" id="production-nav" aria-current="page">Production</a>
         </div>
       </details>
+      <button type="button" id="order-logout" hidden>Log out</button>
     </nav>
   </header>
   <main>
@@ -30,6 +31,6 @@
     <p id="queue-error" class="error" hidden></p>
     <div id="queue"></div>
   </main>
-  <script src="/static/order.js"></script>
+  <script src="/static/order.js?v=logout1"></script>
 </body>
 </html>

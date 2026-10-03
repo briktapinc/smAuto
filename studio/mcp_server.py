@@ -19,6 +19,7 @@ from studio.illustrations import (
 )
 from studio.music import clear_project_music, library_payload, set_project_music, shuffle_project_music
 from studio.pipeline import (
+    attach_job,
     generate_audio_then_align,
     job_status,
     list_library_items,
@@ -35,7 +36,7 @@ from studio.pipeline import (
 )
 from studio.projects import (
     apply_youtube_publish_meta,
-    create_project,
+    create_project as create_studio_project,
     list_projects,
     load_meta,
     project_art_style,
@@ -102,7 +103,7 @@ from studio.utils_script import (
 )
 from studio import youtube as yt
 
-MCP_BUILD = "2026-09-25-oversight-tools"
+MCP_BUILD = "2026-10-01-order-approval"
 
 # Keep in sync with every @mcp.tool in build_mcp (stdio and FastMCP HTTP /mcp).
 MCP_TOOL_NAMES = (
@@ -145,6 +146,7 @@ MCP_TOOL_NAMES = (
     "attach_order_video_mp4",
     "mark_order_video_ready",
     "deliver_video_order",
+    "approve_order_generation",
     "generate_topics",
     "create_topic",
     "list_topics",
@@ -155,6 +157,7 @@ MCP_TOOL_NAMES = (
     "hands_off",
     "set_hands_off",
     "delete_topic",
+    "create_project",
     "create_video_project",
     "set_video_aspect",
     "list_video_projects",
@@ -230,6 +233,7 @@ MCP_TOOL_NAMES = (
     "set_youtube_channel",
     "set_project_youtube",
     "upload_to_youtube",
+    "set_youtube_thumbnail",
     "update_studio_settings",
 )
 
@@ -299,6 +303,7 @@ def handshake_instructions() -> str:
         "save_illustration_image / save_illustration_images for cover + every line, then start_job / resume_job. "
         "When a pipeline or final render finishes, call listen_job_notifications (optional project_id; "
         "pass the returned cursor as after_id on the next call). "
+        "A job_error notice means the job is still running and hit an error mid-step. "
         "A render_error notice means the render failed and the job is not finished: fix it, then resume_job or render_final_video. "
         "Downloads: get_file(kind=video, aspect=16:9|9:16, mode=url). "
         "Scripts: get_project or get_file(kind=script_tagged). "
@@ -318,13 +323,16 @@ def handshake_instructions() -> str:
         "image_provider (flux|chatgpt|comfyui|external), video_layout, character_size, default_aspect, music_volume_pct, "
         "tts_provider (openai|elevenlabs|local|external; local is Resemble Chatterbox, alias resemble), "
         "voices, fal_key_set, "
-        "youtube_auto_upload/privacy/connected, gpu_lock {busy, holder, waiters}, mcp_build, and mcp_tools. "
+        "youtube_auto_upload/privacy/connected, youtube_delete_file_after_upload "
+        "(true deletes the local mp4 after a successful YouTube upload; default true), "
+        "gpu_lock {busy, holder, waiters}, mcp_build, and mcp_tools. "
         "SPEND GUARD: OpenAI cloud (generate_script_via_api, generate_topics, generate_speech) and "
         "Flux/fal (generate_illustrations_with_flux / generate_illustrations / generate_cover / "
         "regenerate_illustration) require confirm_spend=true OR spend_confirm_id from "
         "request_spend_confirm first. LM Studio, ChatGPT/Claude native, ComfyUI, and local TTS "
         "skip this. get_spend_status / get_audit_log for counters and the JSONL audit trail. "
-        "Jobs: list_library / list_video_projects, create_video_project, get_project, "
+        "Jobs: list_library / list_video_projects, create_project (same as New project in the app; "
+        "save_script needs this id first; does not replace an existing project), create_video_project, get_project, "
         "get_file(project_id, kind=video|audio|cover|script_tagged|illustration|…) or "
         "get_file(path='projects/…') returns text/base64 (max 15MB) or a short-lived "
         "/api/mcp/download/{token} URL for larger binaries — secrets (auth.json, settings.json, "
@@ -404,6 +412,9 @@ def handshake_instructions() -> str:
         "title?, description?, tags?, channel_id?) — when multiple channels are connected, ASK the user "
         "which channel and pass channel_id (required). Uses stored youtube_description / youtube_keywords / "
         "youtube_hashtags from meta when description/tags omitted. "
+        "youtube_status.thumbnail_permission says whether the token can set custom thumbnails; "
+        "youtube_connect requests the youtube scope (reconnect if youtube_manage_scope is false). "
+        "set_youtube_thumbnail(project_id, aspect?, channel_id?) sets the cover on an already uploaded video. "
         "rename_video(project_id, title, update_youtube=true, rename_folder=false) updates "
         "Studio meta title and, when uploaded, the live YouTube title. "
         "save_script also accepts youtube_description, youtube_keywords, youtube_hashtags. "
@@ -418,6 +429,25 @@ def handshake_instructions() -> str:
 
 def studio_settings_payload() -> dict:
     data = public_settings()
+    caller = _mcp_caller_user()
+    if caller and (caller.get("role") or "") != "admin":
+        from studio.youtube import bind_youtube_user
+
+        data["youtube_channel_id"] = ""
+        data["youtube_connected"] = False
+        try:
+            with bind_youtube_user(caller):
+                yt_state = yt.status()
+            data["youtube_connected"] = bool(yt_state.get("connected"))
+            data["youtube_channel_id"] = str(yt_state.get("channel_id") or "")
+            data["youtube_auto_upload"] = bool(yt_state.get("auto_upload"))
+            if yt_state.get("privacy"):
+                data["youtube_privacy"] = yt_state.get("privacy")
+            data["youtube_delete_file_after_upload"] = bool(
+                yt_state.get("delete_file_after_upload")
+            )
+        except Exception:
+            pass
     data["mcp_build"] = MCP_BUILD
     data["mcp_tools"] = list(MCP_TOOL_NAMES)
     data["prompt_keys"] = sorted(PROMPT_KEYS)
@@ -517,7 +547,16 @@ class _AuditToolMiddleware(Middleware if Middleware is not None else object):  #
             except Exception:
                 request = None
             enforce_mcp_tool_membership(name, request)
-            result = await call_next(context)
+            if isinstance(args, dict):
+                _guard_mcp_tool_args(args)
+            from studio.settings import bind_settings_user
+
+            _settings_cm = bind_settings_user(_mcp_caller_user())
+            _settings_cm.__enter__()
+            try:
+                result = await call_next(context)
+            finally:
+                _settings_cm.__exit__(None, None, None)
             return result
         except Exception as exc:
             ok = False
@@ -597,7 +636,10 @@ def _mcp_caller_user() -> dict | None:
         except Exception:
             username = None
     if username:
-        return get_user_by_username(str(username))
+        user = get_user_by_username(str(username))
+        if user and (user.get("role") or "") == "buyer":
+            raise PermissionError("Buyers cannot use Studio tools. error_code=forbidden")
+        return user
     # HTTP without bound user (should be rare after require_mcp_auth)
     admins = [u for u in list_users(include_disabled=False) if (u.get("role") or "") == "admin"]
     return admins[0] if admins else None
@@ -610,6 +652,8 @@ def _require_mcp_user() -> dict:
             "Authenticated Studio user required. Use MCP PIN, Bearer bp_live_… API key, "
             "or Studio JWT. error_code=unauthorized"
         )
+    if (user.get("role") or "") == "buyer":
+        raise PermissionError("Buyers cannot use Studio tools. error_code=forbidden")
     return user
 
 
@@ -620,6 +664,78 @@ def _require_mcp_admin() -> dict:
             "Admin only (owner MCP PIN, admin JWT, or owner API key). error_code=unauthorized"
         )
     return user
+
+
+def _require_mcp_project(project_id: str) -> dict:
+    """Caller must own the project. Admins may read and change every job."""
+    from studio.tenant import require_owned_project
+
+    return require_owned_project(_require_mcp_user(), project_id)
+
+
+def _require_mcp_topic(topic_id: str) -> dict:
+    from studio.tenant import require_owned_topic
+
+    return require_owned_topic(_require_mcp_user(), topic_id)
+
+
+def _mcp_actor() -> tuple[dict, bool]:
+    user = _require_mcp_user()
+    return user, (user.get("role") or "") == "admin"
+
+
+def _guard_mcp_tool_args(args: dict) -> None:
+    """Block MCP tools from another account's project or topic before they run."""
+    user = _mcp_caller_user()
+    pid = str(args.get("project_id") or "").strip()
+    if pid:
+        from studio.tenant import require_owned_project
+
+        require_owned_project(user, pid)
+    tid = str(args.get("topic_id") or "").strip()
+    if tid:
+        from studio.tenant import require_owned_topic
+
+        require_owned_topic(user, tid)
+
+
+def _require_project_path(path: str) -> None:
+    parts = [p for p in str(path or "").replace("\\", "/").split("/") if p and p not in (".", "..")]
+    if "projects" not in parts:
+        return
+    index = parts.index("projects")
+    if index + 1 >= len(parts):
+        return
+    project_id = parts[index + 1]
+    if "." in project_id:
+        return
+    _require_mcp_project(project_id)
+
+
+def _save_caller_production(updates: dict) -> bool:
+    """Members write their own production file. Admins keep the shared settings file.
+
+    Returns True when the shared admin store was updated.
+    """
+    caller = _mcp_caller_user()
+    if caller and (caller.get("role") or "") != "admin":
+        from studio.settings import save_user_production_settings
+
+        uid = str(caller.get("id") or "").strip()
+        if not uid:
+            raise PermissionError(
+                "Authenticated Studio user required. error_code=unauthorized"
+            )
+        save_user_production_settings(uid, updates)
+        return False
+    save_settings(updates)
+    return True
+
+
+def _youtube_as_caller():
+    from studio.youtube import bind_youtube_user
+
+    return bind_youtube_user(_mcp_caller_user())
 
 
 def build_mcp() -> "FastMCP":
@@ -642,16 +758,23 @@ def build_mcp() -> "FastMCP":
         """Search Stickman Automation projects, scripts, and illustration jobs."""
         q = (query or "").strip().lower()
         ids = []
+        caller = _mcp_caller_user()
+        is_admin = bool(caller and (caller.get("role") or "") == "admin")
+        owner_id = str((caller or {}).get("id") or "").strip() or None
         try:
             from studio.topics import list_topics as topics_catalog
 
-            for topic in topics_catalog(kick=False).get("topics") or []:
+            for topic in topics_catalog(
+                kick=False, owner_id=owner_id, is_admin=is_admin
+            ).get("topics") or []:
                 blob = f"{topic.get('id')} {topic.get('title')} {topic.get('angle')} topic".lower()
                 if not q or q in blob:
                     ids.append(f"topic/{topic['id']}")
         except Exception:
             pass
-        for item in list_projects():
+        from studio.tenant import filter_owned
+
+        for item in filter_owned(list_projects(), caller):
             blob = f"{item.get('id')} {item.get('title')} {item.get('topic')}".lower()
             if not q or q in blob:
                 ids.append(item["id"])
@@ -665,11 +788,17 @@ def build_mcp() -> "FastMCP":
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def fetch(id: str) -> dict:
         """Fetch a project or illustration prompt by id from search()."""
+        caller = _mcp_caller_user()
+        is_admin = bool(caller and (caller.get("role") or "") == "admin")
+        owner_id = str((caller or {}).get("id") or "").strip() or None
         if id.startswith("topic/"):
             from studio.topics import list_topics as topics_catalog
 
             tid = id.split("/", 1)[1]
-            for topic in topics_catalog(kick=False).get("topics") or []:
+            _require_mcp_topic(tid)
+            for topic in topics_catalog(
+                kick=False, owner_id=owner_id, is_admin=is_admin
+            ).get("topics") or []:
                 if topic.get("id") == tid:
                     return {
                         "id": id,
@@ -680,6 +809,7 @@ def build_mcp() -> "FastMCP":
             raise RuntimeError(f"Unknown topic: {tid}")
         if "/image/" in id:
             project_id, _, filename = id.partition("/image/")
+            _require_mcp_project(project_id)
             for job in illustration_jobs(project_id)["jobs"]:
                 if job["filename"] == filename or job["filename"] == filename + ".png":
                     return {
@@ -695,6 +825,7 @@ def build_mcp() -> "FastMCP":
                         "metadata": job,
                     }
             raise RuntimeError(f"Unknown illustration id: {id}")
+        _require_mcp_project(id)
         payload = project_payload(id)
         return {
             "id": id,
@@ -736,6 +867,10 @@ def build_mcp() -> "FastMCP":
         HTTP /mcp already requires MCP PIN/JWT; stdio is local. Audit-logged."""
         from studio.mcp_files import get_file_payload
 
+        if (project_id or "").strip():
+            _require_mcp_project(project_id)
+        elif (path or "").strip():
+            _require_project_path(path)
         idx = None if int(index) == -999 else int(index)
         return get_file_payload(
             project_id=project_id or "",
@@ -768,7 +903,7 @@ def build_mcp() -> "FastMCP":
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def get_studio_settings() -> dict:
-        """Live Studio settings: text_provider/script_provider (openai billed API, chatgpt MCP, claude MCP, lmstudio local), lmstudio_base_url, lmstudio_model, image_provider (flux|chatgpt|comfyui|external), comfyui_url, comfyui_workflow_loaded, video_layout, character_size (large/medium/small), default_aspect, music_volume_pct, tts_provider (openai|elevenlabs|local/resemble Chatterbox|external), local_tts status, fal_key_set (optional; flux only), voices, prompt keys, YouTube auto_upload/privacy/connected, auto_scheduler (default on), hands_off / hands_off_interval_hours / hands_off_min_queue, gpu_lock {busy, holder, waiters}, mcp_build, mcp_tools. Prefer set_hands_off / restart_api for walk-away and recycling 7878."""
+        """Live Studio settings: text_provider/script_provider (openai billed API, chatgpt MCP, claude MCP, lmstudio local), lmstudio_base_url, lmstudio_model, image_provider (flux|chatgpt|comfyui|external), comfyui_url, comfyui_workflow_loaded, video_layout, character_size (large/medium/small), default_aspect, music_volume_pct, tts_provider (openai|elevenlabs|local/resemble Chatterbox|external), local_tts status, fal_key_set (optional; flux only), voices, prompt keys, YouTube auto_upload/privacy/connected, youtube_delete_file_after_upload (true deletes the local mp4 after a successful upload; default true), auto_scheduler (default on), hands_off / hands_off_interval_hours / hands_off_min_queue, gpu_lock {busy, holder, waiters}, mcp_build, mcp_tools. Prefer set_hands_off / restart_api for walk-away and recycling 7878."""
         return studio_settings_payload()
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -795,6 +930,7 @@ def build_mcp() -> "FastMCP":
         """Restart Studio uvicorn on http://127.0.0.1:7878 from stdio MCP (does not need the old API to be healthy). Spawns `python run_studio.py` then exits/kills only the 7878 listener. Does not kill Gentle 8766, VoiceSync 8765, or the Electron window (it reattaches). Clears stale gpu.lock if the holder pid is dead. Waits until /api/health returns 200."""
         from studio.restart import restart_studio
 
+        _require_mcp_admin()
         return restart_studio(wait=True)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -802,13 +938,15 @@ def build_mcp() -> "FastMCP":
         """Status of Studio's reserved-URL ngrok tunnel (same as GET /api/ngrok). Includes public_url / mcp_url, local port, whether the Studio-owned process is running, and basic-auth user/password when configured. Does not start or stop the tunnel."""
         from studio.ngrok_tunnel import ngrok_status as tunnel_status
 
-        return tunnel_status(reveal_password=True)
+        user = _require_mcp_user()
+        return tunnel_status(reveal_password=(user.get("role") or "") == "admin")
 
     @mcp.tool
     def start_ngrok() -> dict:
         """Enable (start) the Studio-owned ngrok tunnel to the reserved public URL → local Studio port (same as POST /api/ngrok/start). Uses configured basic auth when set. Only manages the process Studio started — does not touch unrelated ngrok instances."""
         from studio.ngrok_tunnel import start_ngrok as enable_ngrok
 
+        _require_mcp_admin()
         return enable_ngrok()
 
     @mcp.tool
@@ -816,18 +954,19 @@ def build_mcp() -> "FastMCP":
         """Disable (stop) only the Studio-owned ngrok tunnel process (same as POST /api/ngrok/stop). Does not kill unrelated ngrok instances. Reserved URL and basic-auth settings are kept for the next start_ngrok."""
         from studio.ngrok_tunnel import stop_owned_ngrok
 
+        _require_mcp_admin()
         return stop_owned_ngrok()
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def get_text_provider() -> dict:
-        """Return who writes scripts and topic batches: 'openai' (billed chat API), 'chatgpt' (ChatGPT Desktop MCP + save_script), 'claude' (Claude Desktop / Claude Code MCP + save_script), or 'lmstudio' (local OpenAI-compatible API). Alias: script_provider."""
+        """Return who writes scripts and topic batches: 'openai' (billed chat API), 'chatgpt' (ChatGPT Desktop MCP + save_script), 'claude' (Claude Desktop / Claude Code MCP + save_script), 'external' (any MCP client + save_script), or 'lmstudio' (local OpenAI-compatible API). Alias: script_provider."""
         settings = studio_settings_payload()
         provider = settings.get("text_provider") or "openai"
         return {
             "text_provider": provider,
             "script_provider": provider,
-            "options": ["openai", "chatgpt", "claude", "lmstudio"],
-            "native": provider in ("chatgpt", "claude"),
+            "options": ["openai", "chatgpt", "claude", "external", "lmstudio"],
+            "native": provider in ("chatgpt", "claude", "external"),
             "billed": provider == "openai",
             "local": provider == "lmstudio",
             "lmstudio_base_url": settings.get("lmstudio_base_url"),
@@ -837,8 +976,15 @@ def build_mcp() -> "FastMCP":
 
     @mcp.tool
     def set_text_provider(provider: str) -> dict:
-        """Set script/topic writer to openai (billed API), chatgpt, claude (Desktop MCP), or lmstudio (local). Persists as text_provider in settings.json (script_provider is the same value)."""
-        save_settings({"text_provider": normalize_text_provider(provider)})
+        """Set script/topic writer to openai (billed API), chatgpt, claude (Desktop MCP), external (any MCP client), or lmstudio (local). Persists as text_provider (script_provider is the same value). Members save on their own account."""
+        canon = normalize_text_provider(provider)
+        caller = _mcp_caller_user()
+        if caller and (caller.get("role") or "") != "admin":
+            from studio.settings import save_user_production_settings
+
+            save_user_production_settings(str(caller.get("id") or ""), {"text_provider": canon})
+        else:
+            save_settings({"text_provider": canon})
         return get_text_provider()
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -983,7 +1129,7 @@ def build_mcp() -> "FastMCP":
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def list_video_orders() -> dict:
-        """Admin only: paid client video orders, oldest first. Includes name, email, niche, package, video_count, video_length, format, amount_cents, status, and each video's id, topic, status, and mp4_attached. Same queue as the Production page."""
+        """Admin only: paid client video orders, oldest first. Includes name, email, niche, package, video_count, video_length, format, art_style, amount_cents, status, and each video's id, topic, status, and mp4_attached. Same queue as the Production page."""
         from studio.orders import list_production_orders
 
         return _order_admin(list_production_orders)
@@ -1031,6 +1177,13 @@ def build_mcp() -> "FastMCP":
         return _order_admin(deliver_order, order_id)
 
     @mcp.tool
+    def approve_order_generation(order_id: str) -> dict:
+        """Admin only: approve generation for a paid video order from listen_job_notifications (type order_awaiting_approval). The notice and this result include art_style, art_style_name, video_length, duration_min, and format (16:9, 9:16, or both). Queues one topic per video on the ordering member's account and schedules them at the package pace stored on the order (videos per day over the package days; otherwise the live catalog). The first day's videos are due now so the hands-off scheduler can start them; later days are one day apart. Topics and jobs receive that art style, duration, and aspect. If the order has no studio user, the checkout email must match a member. When no member matches, returns ok=false and an error and does not create a user or any topics. A second call returns already_approved and does not queue another set. Generation does not start until this tool is called."""
+        from studio.orders import approve_order_generation as _approve
+
+        return _order_admin(_approve, order_id)
+
+    @mcp.tool
     def generate_topics(
         seed: str = "",
         count: int = 8,
@@ -1045,17 +1198,35 @@ def build_mcp() -> "FastMCP":
             spend_confirm_id=spend_confirm_id,
             detail=f"Generate {count} topics via OpenAI",
         )
-        return invent_topics(seed=seed, count=count, duration_min=duration_min)
+        user, _admin = _mcp_actor()
+        return invent_topics(
+            seed=seed,
+            count=count,
+            duration_min=duration_min,
+            owner_id=user.get("id"),
+        )
 
     @mcp.tool
     def create_topic(title: str, angle: str = "", duration_min: float = 2) -> dict:
         """Save one draft topic (title + optional angle) without calling OpenAI. ChatGPT/Claude should invent topics then call this (and schedule_topic to produce)."""
-        return add_topic(title=title, angle=angle, duration_min=duration_min)
+        user, _admin = _mcp_actor()
+        return add_topic(
+            title=title,
+            angle=angle,
+            duration_min=duration_min,
+            owner_id=user.get("id"),
+        )
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def list_topics(status: str = "") -> dict:
         """List generated topics (title, angle, duration, status draft|queued|running|done, job_id, scheduled_at UTC ISO, scheduled_at_local, due). Also next_due_at, due_count, auto_scheduler, hands_off, timezone. Filter with status. Same cards as the Topics page."""
-        return topics_catalog(status or None, kick=False)
+        user, is_admin = _mcp_actor()
+        return topics_catalog(
+            status or None,
+            kick=False,
+            owner_id=user.get("id"),
+            is_admin=is_admin,
+        )
 
     @mcp.tool
     def update_topic(
@@ -1075,6 +1246,7 @@ def build_mcp() -> "FastMCP":
             kwargs["duration_min"] = duration_min
         if scheduled_at != "":
             kwargs["scheduled_at"] = scheduled_at
+        _require_mcp_topic(topic_id)
         return patch_topic(topic_id, **kwargs)
 
     @mcp.tool
@@ -1087,7 +1259,10 @@ def build_mcp() -> "FastMCP":
         scheduled_at: str = "",
         run_now: bool = False,
     ) -> dict:
-        """Create a Studio job from a saved topic_id, or from title + duration_min + optional angle, then queue the full unsupervised pipeline (script with hook+subscribe → pictures → audio → Gentle → render at Settings default_aspect including both → optional YouTube). scheduled_at is ISO datetime; naive values are this PC's local timezone and are stored as UTC. Empty scheduled_at means now. run_now=true (or run='now') starts as soon as the queue is free. run='queue' waits until scheduled_at. With hands_off on, Studio's ~30s due-picker starts queued topics with scheduled_at <= now, FIFO by scheduled_at, one at a time. Without hands_off, due topics wait. Pause holds the queue. Pictures: flux/comfyui auto-generate; external/chatgpt = MCP save_illustration_image for every slot (missing → EXTERNAL_IMAGES_MISSING). chatgpt/claude text: save_script on the returned job_id in this same turn before walking away."""
+        """Create a Studio job from a saved topic_id, or from title + duration_min + optional angle, then queue the full unsupervised pipeline (script with hook+subscribe → pictures → audio → Gentle → render at Settings default_aspect including both → optional YouTube). scheduled_at is ISO datetime; naive values are this PC's local timezone and are stored as UTC. Empty scheduled_at means now. run_now=true (or run='now') starts as soon as the queue is free.         run='queue' waits until scheduled_at. With hands_off on, Studio's ~30s due-picker starts queued topics with scheduled_at <= now, FIFO by scheduled_at, one at a time. Without hands_off, due topics wait. Pause holds the queue. Pictures: flux/comfyui auto-generate; external/chatgpt = MCP save_illustration_image for every slot (missing → EXTERNAL_IMAGES_MISSING). chatgpt/claude text: save_script on the returned job_id in this same turn before walking away."""
+        user, is_admin = _mcp_actor()
+        if (topic_id or "").strip():
+            _require_mcp_topic(topic_id)
         return enqueue_topic(
             topic_id=topic_id,
             title=title,
@@ -1096,11 +1271,14 @@ def build_mcp() -> "FastMCP":
             run=run,
             scheduled_at=scheduled_at,
             run_now=run_now,
+            owner_id=user.get("id"),
+            is_admin=is_admin,
         )
 
     @mcp.tool
     def unschedule_topic(topic_id: str) -> dict:
         """Cancel a queued/scheduled topic without deleting it. Clears scheduled_at, removes it from the FIFO queue, and returns status to draft. Keeps title, angle, and job_id. Same as POST /api/topics/{id}/unschedule. Fails if the topic is running or done."""
+        _require_mcp_topic(topic_id)
         return clear_topic_schedule(topic_id)
 
     @mcp.tool
@@ -1113,6 +1291,9 @@ def build_mcp() -> "FastMCP":
         run_now: bool = True,
     ) -> dict:
         """Alias of schedule_topic. Defaults to run_now=true so the due picker starts this topic as soon as the queue is free. Pass scheduled_at and run_now=false to queue for a later local datetime."""
+        user, is_admin = _mcp_actor()
+        if (topic_id or "").strip():
+            _require_mcp_topic(topic_id)
         return launch_topic_pipeline(
             topic_id=topic_id,
             title=title,
@@ -1120,6 +1301,8 @@ def build_mcp() -> "FastMCP":
             angle=angle,
             scheduled_at=scheduled_at,
             run_now=run_now,
+            owner_id=user.get("id"),
+            is_admin=is_admin,
         )
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -1142,8 +1325,15 @@ def build_mcp() -> "FastMCP":
             updates["hands_off_interval_hours"] = float(interval_minutes) / 60.0
         if min_queue is not None and int(min_queue) >= 1:
             updates["hands_off_min_queue"] = int(min_queue)
-        save_settings(updates)
         caller = _mcp_caller_user()
+        member = bool(caller and (caller.get("role") or "") != "admin")
+        if member:
+            if not caller.get("id"):
+                raise PermissionError(
+                    "Authenticated Studio user required. error_code=unauthorized"
+                )
+        else:
+            save_settings(updates)
         if caller and caller.get("id"):
             from studio.members import sync_signed_in_hands_off
 
@@ -1155,12 +1345,50 @@ def build_mcp() -> "FastMCP":
     @mcp.tool
     def delete_topic(topic_id: str) -> dict:
         """Remove a topic from user_data/topics.json and the FIFO queue. Does not delete the Studio job if one was already created."""
+        _require_mcp_topic(topic_id)
         return remove_topic(topic_id)
+
+    @mcp.tool
+    def create_project(topic: str, duration_seconds: int, title: str = "", aspect: str = "") -> dict:
+        """Create a Studio project the same way New project does (POST /api/projects).
+
+        save_script, pictures, narration, and render need the returned id. topic is required.
+        duration_seconds must be 15–1800. title is optional. aspect omits to Settings
+        default_aspect (usually 16:9); pass 9:16 or both. If that slug already exists, a new
+        id is assigned. This never replaces or deletes an existing project.
+        """
+        topic = (topic or "").strip()
+        if not topic:
+            raise ValueError("topic is required")
+        try:
+            seconds = int(duration_seconds)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("duration_seconds must be an integer from 15 to 1800") from exc
+        if seconds < 15 or seconds > 1800:
+            raise ValueError("duration_seconds must be an integer from 15 to 1800")
+        caller = _mcp_caller_user()
+        owner_id = (caller or {}).get("id") or None
+        meta = create_studio_project(
+            topic,
+            seconds,
+            (title or "").strip() or None,
+            aspect=aspect or None,
+            owner_id=owner_id,
+        )
+        return attach_job(meta)
 
     @mcp.tool
     def create_video_project(topic: str, duration_seconds: int, title: str = "", aspect: str = "") -> dict:
         """Create a project from a topic and target length. Aspect omits to Settings default_aspect (usually 16:9); pass 9:16 for vertical or both to render 16:9 and 9:16 as separate files."""
-        return create_project(topic, duration_seconds, title or None, aspect=aspect or None)
+        caller = _mcp_caller_user()
+        owner_id = (caller or {}).get("id") or None
+        return create_studio_project(
+            topic,
+            duration_seconds,
+            title or None,
+            aspect=aspect or None,
+            owner_id=owner_id,
+        )
 
     @mcp.tool
     def set_video_aspect(project_id: str, aspect: str) -> dict:
@@ -1170,12 +1398,14 @@ def build_mcp() -> "FastMCP":
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def list_video_projects() -> list:
         """List Studio library jobs (thumbs, cover/audio/video flags, running status). Same cards as the GUI library."""
-        return list_library_items()
+        user, is_admin = _mcp_actor()
+        return list_library_items(owner_id=user.get("id"), is_admin=is_admin)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def list_library() -> dict:
         """Studio job library with thumbnail paths/URLs. Same jobs as list_video_projects."""
-        items = list_library_items()
+        user, is_admin = _mcp_actor()
+        items = list_library_items(owner_id=user.get("id"), is_admin=is_admin)
         settings = studio_settings_payload()
         return {
             "jobs": items,
@@ -1200,6 +1430,7 @@ def build_mcp() -> "FastMCP":
         assets (scripts, audio, frames, billboards, mp4, thumbs, meta), purges queue
         rows, and unlinks Topics that pointed at this job_id. Pass delete_files=False
         only to soft-hide the job while keeping files on disk (still stops a live run)."""
+        _require_mcp_project(project_id)
         return remove_studio_project(project_id, delete_files=delete_files)
 
     @mcp.tool
@@ -1211,6 +1442,7 @@ def build_mcp() -> "FastMCP":
         rename_folder: bool = False,
     ) -> dict:
         """Rename a Studio video job. Sets meta title (YouTube max 100 chars). update_youtube=true also patches the live YouTube listing when meta has a video_id (requires youtube.force-ssl — reconnect if rename fails on permissions). rename_folder=true moves user_data/projects/{id} to a slug of the new title and retargets Topics job_id — refuse while the job is running. topic= optionally updates meta.topic too."""
+        _require_mcp_project(project_id)
         return rename_studio_video(
             project_id,
             title,
@@ -1222,6 +1454,7 @@ def build_mcp() -> "FastMCP":
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def get_project(project_id: str) -> dict:
         """Load a project, both script versions, illustration status, and output paths."""
+        _require_mcp_project(project_id)
         return project_payload(project_id)
 
     @mcp.tool
@@ -1344,18 +1577,23 @@ def build_mcp() -> "FastMCP":
     def set_image_provider(provider: str, project_id: str = "") -> dict:
         """Set image provider to 'flux' (fal-ai/flux-2), 'chatgpt' (native MCP upload), 'comfyui' (local), or 'external' (MCP/agent upload only — like tts_provider=external). If project_id is set, store the override in that job's meta.json; otherwise update the studio default. External/chatgpt: generate pictures yourself then save_illustration_image; missing slots fail with EXTERNAL_IMAGES_MISSING. While a Pictures/illustrations (or cover) job is generating, changing the provider cancels the in-flight image, keeps completed PNGs, and restarts unfinished slots with the new generator."""
         if project_id:
+            _require_mcp_project(project_id)
             return write_project_image_provider(project_id, provider)
         from studio.settings import normalize_image_provider
+        from studio.tenant import user_owns_meta
 
+        caller = _mcp_caller_user()
         prev = normalize_image_provider(load_settings().get("image_provider"))
         new = normalize_image_provider(provider)
-        save_settings({"image_provider": provider})
+        _save_caller_production({"image_provider": new})
         if new != prev:
             try:
                 from studio.pipeline import running_project_ids
                 from studio.projects import set_image_provider as write_job_image_provider
 
                 for pid in running_project_ids():
+                    if caller and not user_owns_meta(caller, load_meta(pid)):
+                        continue
                     st = job_status(pid)
                     step = st.get("step") or ""
                     if step in ("illustrations", "cover") or st.get("busy"):
@@ -1376,6 +1614,7 @@ def build_mcp() -> "FastMCP":
         """Save a ComfyUI API-format workflow JSON string (File → Save (API Format) in ComfyUI). Stored at user_data/comfyui_workflow.json. Rejects the regular nodes/links UI export. GUI upload in Settings also works."""
         from studio.comfyui import save_workflow
 
+        _require_mcp_admin()
         return save_workflow(workflow_json, filename=filename or "workflow.json")
 
     @mcp.tool
@@ -1383,6 +1622,7 @@ def build_mcp() -> "FastMCP":
         """Remove the uploaded ComfyUI API workflow JSON (same as DELETE /api/settings/comfyui-workflow / Settings Remove workflow). ComfyUI jobs fail until you upload again. Does not change image_provider."""
         from studio.comfyui import delete_workflow
 
+        _require_mcp_admin()
         return delete_workflow()
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -1404,8 +1644,9 @@ def build_mcp() -> "FastMCP":
     def set_video_layout(layout: str, project_id: str = "") -> dict:
         """Set video layout to 'cover' (full-bleed) or 'billboard' (16:9 full-bleed subject doodles; TV overlay is composited later). If project_id is set, store the override in that job's meta.json without changing the studio default; otherwise update Settings."""
         if project_id:
+            _require_mcp_project(project_id)
             return write_project_video_layout(project_id, layout)
-        save_settings({"video_layout": layout})
+        _save_caller_production({"video_layout": normalize_video_layout(layout)})
         return studio_settings_payload()
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -1426,8 +1667,9 @@ def build_mcp() -> "FastMCP":
     def set_character_size(size: str, project_id: str = "") -> dict:
         """Set bubble-head character size to 'large' (current, scale 1.0), 'medium' (half), or 'small' (1/3). Feet stay bottom-anchored; the figure shrinks upward. If project_id is set, store the override in that job's meta.json; otherwise update the studio default."""
         if project_id:
+            _require_mcp_project(project_id)
             return write_project_character_size(project_id, size)
-        save_settings({"character_size": size})
+        _save_caller_production({"character_size": normalize_character_size(size)})
         return studio_settings_payload()
 
     @mcp.tool
@@ -1451,6 +1693,7 @@ def build_mcp() -> "FastMCP":
         """Recolor Bubblehead head fill on every pose under user_data/poses (NOT repo poses/ or poses_stock). videoDrawer reads that same folder via BUBBLEPOD_POSES_DIR. color=#RRGGBB. Shadow auto H−10.4°/L−8.4. Clears cached frames/mp4s — call render_final_video. Title-card covers with a baked-in stickman still need regenerate_cover. Free."""
         from studio.pose_colors import apply_head_color, head_color_status
 
+        _require_mcp_admin()
         result = apply_head_color(
             color,
             from_color=(from_color or "").strip() or None,
@@ -1464,6 +1707,7 @@ def build_mcp() -> "FastMCP":
         """Restore stock yellow Bubblehead poses (#FAE02E / #F8AF05) from user_data/poses_stock into poses/, reset stickman_head_color, and clear cached frames/mp4s. Re-render afterward."""
         from studio.pose_colors import head_color_status, restore_stock_poses
 
+        _require_mcp_admin()
         result = restore_stock_poses()
         result["stickman_head"] = head_color_status()
         return result
@@ -1652,12 +1896,13 @@ def build_mcp() -> "FastMCP":
     def set_cover_provider(project_id: str = "", provider: str = "") -> dict:
         """Set cover_provider override: '' (inherit image_provider), manual, external, chatgpt, comfyui, or flux. With project_id sets per-job meta; without project_id updates global Settings. When manual/external/chatgpt, generate_cover/regenerate_cover never spend fal on covers — upload via save_illustration_image / refresh_covers."""
         from studio.projects import set_cover_provider as write_cover_provider
-        from studio.settings import normalize_cover_provider, public_settings, save_settings
+        from studio.settings import normalize_cover_provider
 
         if project_id:
+            _require_mcp_project(project_id)
             return write_cover_provider(project_id, provider)
-        save_settings({"cover_provider": normalize_cover_provider(provider)})
-        return {"ok": True, **public_settings()}
+        _save_caller_production({"cover_provider": normalize_cover_provider(provider)})
+        return {"ok": True, **studio_settings_payload()}
 
     @mcp.tool
     def list_cover_versions(project_id: str, aspect: str = "") -> dict:
@@ -1730,13 +1975,13 @@ def build_mcp() -> "FastMCP":
     def set_fal_video_model(model: str) -> dict:
         """Set the fal image-to-video model used when converting pictures to clips. Pass an id from list_fal_video_models."""
         from studio.fal_video import fal_video_catalog
-        from studio.settings import normalize_fal_video_model, save_settings
+        from studio.settings import normalize_fal_video_model
 
         chosen = normalize_fal_video_model(model)
         if chosen != (model or "").strip():
             ids = [row["id"] for row in fal_video_catalog()]
             raise RuntimeError(f"Unknown fal video model. Choose one of: {', '.join(ids)}")
-        save_settings({"fal_video_model": chosen})
+        _save_caller_production({"fal_video_model": chosen})
         return {"ok": True, "fal_video_model": chosen}
 
     @mcp.tool
@@ -1979,7 +2224,7 @@ def build_mcp() -> "FastMCP":
         after_id: int = 0,
         timeout_sec: int = 30,
     ) -> dict:
-        """Wait for a Studio job to finish or for a render to fail. job_completed means the pipeline or final render succeeded with no render error. render_error means drawing frames, muxing, or ffmpeg failed (including one aspect of a both job) — read error/detail and action, fix that project, then resume_job or render_final_video. job_failed is any other terminal failure of start/resume/render. Pass project_id to listen for one job. Pass after_id=0 the first time, then the returned cursor so you only receive newer notices. An empty list means the wait timed out — call again with the same cursor. timeout_sec is capped at 50."""
+        """Wait for Studio job notices and paid-order notices. order_awaiting_approval means a paid video order arrived and generation is NOT started until you approve it. That notice includes order_id, package_name, video_count, niche, email, name (when present), format, video_length, duration_min, art_style, art_style_name, and generation_started=false. Call approve_order_generation with the order_id to queue the videos with that art style, duration, and format. Leave project_id empty to receive order notices together with job notices; a project_id filter returns only that job. job_error means a job is still running and just recorded an error (one aspect failed, a step warned, and the run has not stopped). job_completed means the pipeline or final render succeeded with no render error. render_error means drawing frames, muxing, or ffmpeg failed (including one aspect of a both job) — read error/detail and action, fix that project, then resume_job or render_final_video. job_failed is any other terminal failure of start/resume/render. Pass after_id=0 the first time, then the returned cursor so you only receive newer notices. An empty list means the wait timed out — call again with the same cursor. timeout_sec is capped at 50."""
         from studio.job_notifications import listen_job_notifications as wait_for_jobs
 
         return wait_for_jobs(
@@ -2033,6 +2278,7 @@ def build_mcp() -> "FastMCP":
         """Start a Studio job pipeline from empty or the first incomplete step. If pipeline slots are full (see BUBBLEPOD_MAX_CONCURRENT_JOBS), enqueues the job and returns queued=true with queue_position. If a worker is already live for this project, attaches without starting a duplicate. Fair round-robin across users when multiple are waiting."""
         from studio.job_queue import request_run
 
+        _require_mcp_project(project_id)
         return request_run(project_id, kind="start")
 
     @mcp.tool
@@ -2040,16 +2286,19 @@ def build_mcp() -> "FastMCP":
         """Resume a Studio job from the last successful pipeline step. Enqueues when concurrent capacity is full (same queue as start_job). If the job is already running, attaches without starting a duplicate thread."""
         from studio.job_queue import request_run
 
+        _require_mcp_project(project_id)
         return request_run(project_id, kind="resume")
 
     @mcp.tool
     def stop_job(project_id: str) -> dict:
         """Stop a running Studio job. Sets running=false immediately. The worker exits at the next pipeline step boundary (does not kill ffmpeg mid-frame). Resume after it has stopped continues from completed artifacts and will not start a second worker while this one is still alive."""
+        _require_mcp_project(project_id)
         return stop_project(project_id)
 
     @mcp.tool
     def pause_job(project_id: str) -> dict:
         """Pause a running Studio job (same cooperative halt as stop_job, marked paused). Sets running=false. The worker exits at the next step boundary. resume_job continues from completed artifacts; if the current step is still finishing, resume attaches to that same thread instead of starting a duplicate."""
+        _require_mcp_project(project_id)
         return pause_project(project_id)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -2084,36 +2333,42 @@ def build_mcp() -> "FastMCP":
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def youtube_status() -> dict:
-        """YouTube connection status: connected accounts/channels, default channel, auto-upload, privacy, and the browser connect URL. No popup. Use list_youtube_channels before upload_to_youtube when multiple channels may be connected."""
-        return yt.status()
+        """YouTube connection status for the signed-in account (admin sees the server channel; a member sees only their own). connected accounts/channels, default channel, auto-upload, privacy, thumbnail_permission (token can call thumbnails.set), youtube_manage_scope, custom_thumbnail_allowed, and the browser connect URL. No popup. Use list_youtube_channels before upload_to_youtube when multiple channels may be connected. Reconnect with youtube_connect if thumbnail_permission is false or youtube_manage_scope is false."""
+        with _youtube_as_caller():
+            return yt.status()
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def list_youtube_channels() -> dict:
-        """List connected YouTube channels/accounts (each may have its own OAuth token). Includes is_default. Call before upload_to_youtube when more than one channel may be connected, then ask the user which channel_id to publish to."""
-        return yt.list_channels()
+        """List this account's connected YouTube channels (each may have its own OAuth token). A member never sees the admin channel. Includes is_default and thumbnail_permission / youtube_manage_scope / custom_thumbnail_allowed. Call before upload_to_youtube when more than one channel may be connected, then ask the user which channel_id to publish to."""
+        with _youtube_as_caller():
+            return yt.list_channels()
 
     @mcp.tool
     def youtube_connect() -> dict:
-        """Start YouTube OAuth to ADD another channel (or the first). Open the returned auth_url or studio_connect_url in your SYSTEM/default browser — MCP cannot show a popup. After sign-in, Studio adds that channel; if Google returns several, call set_youtube_channel to finish. Existing channels stay connected. If the browser shows a code/redirect instead of auto-callback, call youtube_finish_oauth."""
-        return yt.start_connect(open_browser=True)
+        """Start YouTube OAuth on THIS account (a member connect is not the admin channel). Requests the youtube account scope so custom thumbnails can be set (plus force-ssl, upload, and readonly). Open the returned auth_url or studio_connect_url in your SYSTEM/default browser — MCP cannot show a popup. After sign-in, Studio adds that channel; if Google returns several, call set_youtube_channel to finish. Existing channels on this account stay connected. If the browser shows a code/redirect instead of auto-callback, call youtube_finish_oauth. Reconnect an existing channel this way when youtube_status says youtube_manage_scope is false."""
+        with _youtube_as_caller():
+            return yt.start_connect(open_browser=True)
 
     @mcp.tool
     def youtube_finish_oauth(code: str = "", url: str = "") -> dict:
-        """Finish YouTube OAuth by pasting the redirect URL or code from the browser (same as POST /api/youtube/oauth/code). Use when the 127.0.0.1 callback did not auto-complete."""
+        """Finish YouTube OAuth for this account by pasting the redirect URL or code from the browser (same as POST /api/youtube/oauth/code). Use when the 127.0.0.1 callback did not auto-complete."""
         blob = (url or code or "").strip()
         if not blob:
             raise RuntimeError("Pass url= (full redirect) or code= from the Google OAuth page.")
-        return yt.finish_oauth_paste(blob)
+        with _youtube_as_caller():
+            return yt.finish_oauth_paste(blob)
 
     @mcp.tool
     def youtube_disconnect(channel_id: str = "") -> dict:
-        """Disconnect YouTube. Pass channel_id to remove one connected channel; omit to disconnect all. Does not change client id/secret."""
-        return yt.disconnect(channel_id=channel_id)
+        """Disconnect this account's YouTube. Pass channel_id to remove one connected channel; omit to disconnect all of yours. Does not change the admin channel or the client id/secret."""
+        with _youtube_as_caller():
+            return yt.disconnect(channel_id=channel_id)
 
     @mcp.tool
     def set_youtube_channel(channel_id: str, title: str = "") -> dict:
-        """Set the default YouTube channel for uploads (and finish adding a channel after OAuth when Google listed several). channel_id from list_youtube_channels. Same as PUT /api/youtube/channel."""
-        return yt.set_channel(channel_id, title=title)
+        """Set the default YouTube channel for this account (and finish adding a channel after OAuth when Google listed several). channel_id from list_youtube_channels. Same as PUT /api/youtube/channel."""
+        with _youtube_as_caller():
+            return yt.set_channel(channel_id, title=title)
 
     @mcp.tool
     def set_project_youtube(
@@ -2123,6 +2378,7 @@ def build_mcp() -> "FastMCP":
         youtube_channel_id: str = "",
     ) -> dict:
         """Per-job YouTube override (same as PATCH /api/projects/{id}). youtube_auto_upload true|false, youtube_privacy private|unlisted|public, optional youtube_channel_id (which connected channel this job uploads to). Empty strings leave that field unchanged."""
+        _require_mcp_project(project_id)
         return write_project_youtube(
             project_id,
             auto_upload=youtube_auto_upload if youtube_auto_upload != "" else None,
@@ -2145,6 +2401,7 @@ def build_mcp() -> "FastMCP":
         IMPORTANT: When more than one YouTube channel/account is connected, you MUST ask the user which channel to publish to, then pass channel_id from list_youtube_channels (or set youtube_channel_id via set_project_youtube first). Omitting channel_id with multiple channels and no per-job override raises an error — do not guess the channel.
 
         Prefer aspect 16:9 or 9:16 when both exist; otherwise last render / script_final.mp4. privacy_status must be private, unlisted, or public (default unlisted). Title defaults to the job topic/title. Description defaults to meta youtube_description; tags default to meta youtube_keywords. Requires youtube_connect first."""
+        _require_mcp_project(project_id)
         return yt.upload_project_video(
             project_id,
             privacy_status=privacy_status or None,
@@ -2154,6 +2411,22 @@ def build_mcp() -> "FastMCP":
             aspect=aspect or None,
             channel_id=channel_id or None,
             require_channel=True,
+        )
+
+    @mcp.tool
+    def set_youtube_thumbnail(
+        project_id: str,
+        aspect: str = "",
+        channel_id: str = "",
+    ) -> dict:
+        """Set the custom thumbnail on a video that is already on YouTube (does not re-upload the mp4).
+
+        Uses the job cover for aspect 16:9 or 9:16 (default: last render). Requires youtube_connect with the youtube scope (see youtube_status.thumbnail_permission / youtube_manage_scope). If YouTube refuses, the channel must be phone-verified at https://www.youtube.com/verify, then reconnect. channel_id selects which connected channel when more than one exists."""
+        _require_mcp_project(project_id)
+        return yt.set_project_thumbnail(
+            project_id,
+            aspect=aspect or None,
+            channel_id=channel_id or None,
         )
 
     @mcp.tool
@@ -2186,6 +2459,7 @@ def build_mcp() -> "FastMCP":
         youtube_client_secret: str = "",
         youtube_channel_id: str = "",
         youtube_auto_upload: str = "",
+        youtube_delete_file_after_upload: bool | str = "",
         youtube_privacy: str = "",
         auto_scheduler: str = "",
         hands_off: str = "",
@@ -2198,7 +2472,7 @@ def build_mcp() -> "FastMCP":
         rate_limit_api: int = -1,
         rate_limit_login: int = -1,
     ) -> dict:
-        """Store API keys, text_provider/script_provider (openai billed API, chatgpt MCP, claude MCP, or lmstudio local), lmstudio_base_url / lmstudio_model, default image provider (flux, chatgpt, comfyui, or external MCP upload), comfyui_url (default http://127.0.0.1:8188), default video layout (cover or billboard), character_size (large, medium, or small), default_aspect (16:9, 9:16, or both), background music loudness 0–100, tts_provider (openai, elevenlabs, local/resemble Chatterbox, or external), voice settings, YouTube auto-upload (youtube_auto_upload true/false, youtube_privacy private|unlisted|public, youtube_channel_id), auto_scheduler (true/false, default on — only auto-starts due topics while hands_off is also on), hands_off (true/false — generate topics, auto-schedule, run pipeline, YouTube private per job), hands_off_interval_hours (0 = due now FIFO), require_spend_confirm, daily OpenAI/Flux caps (0=unlimited), and rate_limit_api / rate_limit_login. fal_key is optional and only needed for Flux. Empty string / ******** / omitted secrets are ignored and never wipe stored keys. ComfyUI workflows are uploaded in Settings or save_comfyui_workflow. YouTube OAuth is youtube_connect (open the URL in a browser; no popup). Prefer set_youtube_channel after listing channels. Prefer set_hands_off for walk-away. Billed OpenAI/Flux tools still need confirm_spend or spend_confirm_id unless require_spend_confirm is false."""
+        """Store API keys, text_provider/script_provider (openai billed API, chatgpt MCP, claude MCP, or lmstudio local), lmstudio_base_url / lmstudio_model, default image provider (flux, chatgpt, comfyui, or external MCP upload), comfyui_url (default http://127.0.0.1:8188), default video layout (cover or billboard), character_size (large, medium, or small), default_aspect (16:9, 9:16, or both), background music loudness 0–100, tts_provider (openai, elevenlabs, local/resemble Chatterbox, or external), voice settings, YouTube auto-upload (youtube_auto_upload true/false, youtube_privacy private|unlisted|public, youtube_channel_id, youtube_delete_file_after_upload true/false — boolean or "true"/"false"; default true keeps deleting the local mp4 after a successful upload, false retains it), auto_scheduler (true/false, default on — only auto-starts due topics while hands_off is also on), hands_off (true/false — generate topics, auto-schedule, run pipeline, YouTube private per job), hands_off_interval_hours (0 = due now FIFO), require_spend_confirm, daily OpenAI/Flux caps (0=unlimited), and rate_limit_api / rate_limit_login. fal_key is optional and only needed for Flux. Empty string / ******** / omitted secrets are ignored and never wipe stored keys. ComfyUI workflows are uploaded in Settings or save_comfyui_workflow. YouTube OAuth is youtube_connect (open the URL in a browser; no popup). Prefer set_youtube_channel after listing channels. Prefer set_hands_off for walk-away. Billed OpenAI/Flux tools still need confirm_spend or spend_confirm_id unless require_spend_confirm is false."""
         candidate = {
             "openai_api_key": openai_api_key,
             "elevenlabs_api_key": elevenlabs_api_key,
@@ -2255,6 +2529,10 @@ def build_mcp() -> "FastMCP":
             updates["youtube_channel_id"] = youtube_channel_id
         if youtube_auto_upload:
             updates["youtube_auto_upload"] = youtube_auto_upload
+        # Empty string means "leave unchanged" (same as youtube_auto_upload).
+        # Boolean False is a real update and must not be skipped as falsy.
+        if youtube_delete_file_after_upload != "":
+            updates["youtube_delete_file_after_upload"] = youtube_delete_file_after_upload
         if youtube_privacy:
             updates["youtube_privacy"] = youtube_privacy
         if auto_scheduler != "":
@@ -2278,6 +2556,33 @@ def build_mcp() -> "FastMCP":
         if rate_limit_login is not None and int(rate_limit_login) > 0:
             updates["rate_limit_login"] = rate_limit_login
         if updates:
+            caller = _mcp_caller_user()
+            if caller and (caller.get("role") or "") != "admin":
+                from studio.settings import MEMBER_OWN_KEYS, save_user_production_settings
+
+                own = {k: v for k, v in updates.items() if k in MEMBER_OWN_KEYS}
+                if own:
+                    save_user_production_settings(str(caller.get("id") or ""), own)
+                from studio.members import sync_signed_in_hands_off
+
+                sync_signed_in_hands_off(caller.get("id"), updates)
+                with _youtube_as_caller():
+                    yt_kwargs = {}
+                    if "youtube_auto_upload" in updates:
+                        from studio.settings import normalize_youtube_auto_upload
+
+                        yt_kwargs["auto_upload"] = normalize_youtube_auto_upload(updates.get("youtube_auto_upload"))
+                    if updates.get("youtube_privacy"):
+                        yt_kwargs["privacy"] = updates.get("youtube_privacy")
+                    if "youtube_delete_file_after_upload" in updates:
+                        from studio.settings import normalize_bool
+
+                        yt_kwargs["delete_file_after_upload"] = normalize_bool(
+                            updates.get("youtube_delete_file_after_upload"), True
+                        )
+                    if yt_kwargs:
+                        yt.save_owner_youtube_prefs(**yt_kwargs)
+                return studio_settings_payload()
             save_settings(updates)
             caller = _mcp_caller_user()
             if caller and caller.get("id"):

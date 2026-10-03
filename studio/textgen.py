@@ -73,9 +73,14 @@ def native_script_handoff(project_id: str = "", extra: str = "") -> dict[str, An
         "illustration_notes": illustration_notes,
         "script_rules": get_prompt("script.rules"),
         "message": (
-            f"Use {label} Desktop MCP: write the tagged script (topic hook + subscribe outro, "
-            "emotion tags) then save_script. Do not call generate_script_via_api — that spends "
-            "OpenAI tokens."
+            "External via MCP: write the tagged script (topic hook + subscribe outro, emotion tags) "
+            "then save_script. Do not call generate_script_via_api."
+            if provider == "external"
+            else (
+                f"Use {label} Desktop MCP: write the tagged script (topic hook + subscribe outro, "
+                "emotion tags) then save_script. Do not call generate_script_via_api — that spends "
+                "OpenAI tokens."
+            )
         ),
     }
     extra = (extra or "").strip()
@@ -202,7 +207,7 @@ def _escape_raw_controls_in_strings(text: str) -> str:
             j += 1
         if j >= n:
             return True
-        return text[j] in ",:}\]\""
+        return text[j] in ",:}]\""
 
     i = 0
     while i < n:

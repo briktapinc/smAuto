@@ -462,6 +462,12 @@ def reactivate_subscription(user: dict[str, Any]) -> dict[str, Any]:
         sub = stripe.Subscription.modify(sub_id, **params)
 
     _apply_subscription_to_user(user.get("id") or "", sub)
+    from studio.members import update_user
+
+    try:
+        update_user(user["id"], renewal_reminder_for="")
+    except Exception:
+        _log.warning("could not clear renewal reminder marker")
     fresh = get_user_by_id(user["id"]) or user
     return {
         "ok": True,
@@ -471,6 +477,40 @@ def reactivate_subscription(user: dict[str, Any]) -> dict[str, Any]:
         "current_period_end": fresh.get("current_period_end") or "",
         "message": "Subscription will renew as usual.",
     }
+
+
+def renew_subscription(user: dict[str, Any]) -> dict[str, Any]:
+    """Renew through Stripe.
+
+    A membership set to end keeps the same subscription and will be billed again.
+    A lapsed membership opens Checkout. A past-due membership opens the billing
+    portal so the open invoice can be paid.
+    """
+    if (user.get("role") or "") == "admin":
+        return {"ok": True, "skipped": True, "reason": "Admins do not have a billable membership."}
+
+    status = str(user.get("subscription_status") or "none").strip().lower()
+    pending_cancel = bool(user.get("cancel_at_period_end"))
+    if status in ("active", "trialing") and pending_cancel:
+        result = reactivate_subscription(user)
+        result["action"] = "resumed"
+        result["message"] = "Membership will renew. Stripe will bill the next period as usual."
+        return result
+    if status in ("past_due", "unpaid"):
+        portal = create_portal_session(user)
+        portal["action"] = "portal"
+        portal["message"] = "Opening Stripe to pay the open invoice and renew."
+        return portal
+    if status in ("active", "trialing"):
+        return {
+            "ok": True,
+            "skipped": True,
+            "action": "none",
+            "reason": "This membership already renews.",
+        }
+    session = create_checkout_session(user)
+    session["action"] = "checkout"
+    return session
 
 
 def create_refund(*, payment_intent: str = "", charge_id: str = "", amount_cents: int | None = None, reason: str = "") -> dict[str, Any]:

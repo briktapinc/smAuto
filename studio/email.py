@@ -1,11 +1,9 @@
-"""Transactional email (SMTP) + built-in templates for Stickman Automation Studio."""
+"""Transactional email via Mailjet Send API v3.1."""
 
 from __future__ import annotations
 
 import logging
-import smtplib
-import ssl
-from email.message import EmailMessage
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 _log = logging.getLogger("bubblepod.email")
@@ -17,8 +15,10 @@ TEMPLATE_KEYS = (
     "password_changed",
     "subscription_started",
     "subscription_canceled",
+    "subscription_expiring",
     "payment_receipt",
     "payment_failed",
+    "job_finished",
 )
 
 DEFAULT_TEMPLATES: dict[str, dict[str, str]] = {
@@ -67,6 +67,14 @@ DEFAULT_TEMPLATES: dict[str, dict[str, str]] = {
             "You can still browse and delete jobs; subscribe again anytime: {{studio_url}}\n"
         ),
     },
+    "subscription_expiring": {
+        "subject": "Your {{app_name}} membership ends {{period_end}}",
+        "text": (
+            "Hi {{username}},\n\n"
+            "Your {{app_name}} membership ends on {{period_end}} and will not renew.\n"
+            "Renew to keep Studio access: {{renew_url}}\n"
+        ),
+    },
     "payment_receipt": {
         "subject": "Payment received — {{app_name}}",
         "text": (
@@ -87,37 +95,52 @@ DEFAULT_TEMPLATES: dict[str, dict[str, str]] = {
             "Studio: {{studio_url}}\n"
         ),
     },
+    "job_finished": {
+        "subject": "Video job update — {{title}}",
+        "text": (
+            "Hi {{username}},\n\n"
+            "Your {{title}} job is {{status_label}}.\n"
+            "{{detail_line}}"
+            "Open Studio: {{studio_url}}\n"
+        ),
+    },
 }
 
 
 def _settings() -> dict[str, Any]:
-    from studio.settings import load_settings
+    """Admin settings only, so a member overlay cannot blank Mailjet credentials."""
+    from studio.settings import load_settings, settings_owner
 
-    return load_settings()
+    with settings_owner(""):
+        return load_settings()
 
 
 def email_enabled(settings: dict[str, Any] | None = None) -> bool:
+    from studio.mailjet import credentials_present
+
     data = settings or _settings()
     if not _truthy(data.get("email_enabled"), False):
         return False
-    host = (data.get("smtp_host") or "").strip()
-    return bool(host)
+    return credentials_present(data)
 
 
 def email_public_status(settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    from studio.mailjet import credentials_present, from_name, resolved_from_email, sender_domain
+
     data = settings or _settings()
+    domain = sender_domain(data.get("mailjet_sender_domain"))
     return {
         "email_enabled": _truthy(data.get("email_enabled"), False),
-        "smtp_host": (data.get("smtp_host") or "").strip(),
-        "smtp_port": int(data.get("smtp_port") or 587),
-        "smtp_user": (data.get("smtp_user") or "").strip(),
-        "smtp_password_set": bool((data.get("smtp_password") or "").strip()),
-        "smtp_use_tls": _truthy(data.get("smtp_use_tls"), True),
-        "smtp_use_ssl": _truthy(data.get("smtp_use_ssl"), False),
-        "email_from": (data.get("email_from") or "").strip(),
-        "email_from_name": (data.get("email_from_name") or "Stickman Automation").strip() or "Stickman Automation",
+        "mailjet_sender_domain": domain,
+        "mailjet_from_email": resolved_from_email(
+            data.get("mailjet_from_email") or data.get("email_from"),
+            domain,
+        ),
+        "mailjet_from_name": from_name(data.get("mailjet_from_name") or data.get("email_from_name")),
+        "mailjet_api_key_set": bool(str(data.get("mailjet_api_key") or "").strip()),
+        "mailjet_secret_key_set": bool(str(data.get("mailjet_secret_key") or "").strip()),
         "email_reply_to": (data.get("email_reply_to") or "").strip(),
-        "configured": email_enabled(data),
+        "configured": bool(_truthy(data.get("email_enabled"), False) and credentials_present(data)),
     }
 
 
@@ -163,61 +186,38 @@ def list_templates(settings: dict[str, Any] | None = None) -> list[dict[str, Any
     return out
 
 
+def _html_from_text(text: str) -> str:
+    import html as html_lib
+
+    return "<div>" + html_lib.escape(text or "").replace("\n", "<br>\n") + "</div>"
+
+
 def send_email(
     *,
     to: str,
     subject: str,
     text: str,
     html: str | None = None,
+    to_name: str = "",
     settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Send one message via SMTP. Raises RuntimeError on misconfig / SMTP failure."""
+    """Send one message through Mailjet. Raises RuntimeError when it cannot send."""
+    from studio.mailjet import credentials_present, log_if_unconfigured, send_message
+
     data = settings or _settings()
-    if not email_enabled(data):
-        raise RuntimeError("Email is disabled or SMTP host is not configured (Admin → Email).")
-    recipient = (to or "").strip()
-    if not recipient or "@" not in recipient:
-        raise RuntimeError("Recipient email is missing or invalid.")
-    host = (data.get("smtp_host") or "").strip()
-    port = int(data.get("smtp_port") or 587)
-    user = (data.get("smtp_user") or "").strip()
-    password = (data.get("smtp_password") or "").strip()
-    from_addr = (data.get("email_from") or user or "").strip()
-    if not from_addr:
-        raise RuntimeError("Set email_from (or smtp_user) in Admin → Email.")
-    from_name = (data.get("email_from_name") or "Stickman Automation").strip() or "Stickman Automation"
-    reply_to = (data.get("email_reply_to") or "").strip()
-    use_ssl = _truthy(data.get("smtp_use_ssl"), False)
-    use_tls = _truthy(data.get("smtp_use_tls"), True) and not use_ssl
-
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = f"{from_name} <{from_addr}>"
-    msg["To"] = recipient
-    if reply_to:
-        msg["Reply-To"] = reply_to
-    msg.set_content(text or "")
-    if html:
-        msg.add_alternative(html, subtype="html")
-
-    timeout = 30
-    if use_ssl:
-        context = ssl.create_default_context()
-        with smtplib.SMTP_SSL(host, port, timeout=timeout, context=context) as smtp:
-            if user:
-                smtp.login(user, password)
-            smtp.send_message(msg)
-    else:
-        with smtplib.SMTP(host, port, timeout=timeout) as smtp:
-            smtp.ehlo()
-            if use_tls:
-                context = ssl.create_default_context()
-                smtp.starttls(context=context)
-                smtp.ehlo()
-            if user:
-                smtp.login(user, password)
-            smtp.send_message(msg)
-    return {"ok": True, "to": recipient, "subject": subject}
+    if not credentials_present(data):
+        log_if_unconfigured(data)
+        raise RuntimeError("Mailjet is not configured")
+    if not _truthy(data.get("email_enabled"), False):
+        raise RuntimeError("Outbound email is turned off in Admin → Email.")
+    return send_message(
+        to=to,
+        subject=subject,
+        text=text,
+        html=html if html is not None else _html_from_text(text),
+        to_name=to_name,
+        settings=data,
+    )
 
 
 def send_template(
@@ -227,39 +227,59 @@ def send_template(
     *,
     settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    from studio.mailjet import from_name
+
     data = settings or _settings()
     tmpl = get_template(key, data)
     ctx = {
-        "app_name": (data.get("email_from_name") or "Stickman Automation").strip() or "Stickman Automation",
+        "app_name": from_name(data.get("mailjet_from_name") or data.get("email_from_name")),
         "studio_url": _base_url(data) + "/",
         "login_url": _base_url(data) + "/",
         "portal_hint": "Pricing page → Manage / cancel",
         "expires_minutes": "60",
         "period_end_clause": "",
+        "period_end": "",
+        "renew_url": "",
         "amount_clause": "",
         "invoice_line": "",
         "amount": "",
         "currency": "",
         "username": "",
         "reset_url": "",
+        "title": "",
+        "status_label": "",
+        "detail_line": "",
         **(context or {}),
     }
     subject = _render(tmpl["subject"], ctx)
     text = _render(tmpl["text"], ctx)
-    return send_email(to=to, subject=subject, text=text, settings=data)
+    return send_email(
+        to=to,
+        subject=subject,
+        text=text,
+        html=_html_from_text(text),
+        to_name=str((context or {}).get("username") or ""),
+        settings=data,
+    )
 
 
 def _safe_send(key: str, to: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Best-effort send — never raise into Stripe/auth critical paths."""
+    """Best-effort send — never raise into Stripe, auth, or job paths."""
     try:
         if not (to or "").strip():
             return {"ok": False, "skipped": True, "reason": "no_email"}
-        if not email_enabled():
+        data = _settings()
+        from studio.mailjet import credentials_present, log_if_unconfigured
+
+        if not credentials_present(data):
+            log_if_unconfigured(data)
+            return {"ok": False, "skipped": True, "reason": "mailjet_not_configured"}
+        if not _truthy(data.get("email_enabled"), False):
             return {"ok": False, "skipped": True, "reason": "email_disabled"}
-        return send_template(key, to, context)
-    except Exception as exc:
-        _log.warning("email %s to %s failed: %s", key, to, exc)
-        return {"ok": False, "error": str(exc)}
+        return send_template(key, to, context, settings=data)
+    except Exception:
+        _log.error("email %s failed", key)
+        return {"ok": False, "error": "send_failed"}
 
 
 def notify_signup(user: dict[str, Any]) -> dict[str, Any]:
@@ -307,6 +327,108 @@ def notify_subscription_canceled(user: dict[str, Any], *, period_end: str | None
     )
 
 
+# One reminder when a membership is set to end and the period closes within this window.
+RENEWAL_REMINDER_DAYS = 3
+
+
+def parse_period_end(value: Any) -> datetime | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(int(value), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    raw = str(value).strip()
+    if raw.isdigit():
+        try:
+            return datetime.fromtimestamp(int(raw), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def renewal_reminder_due(user: dict[str, Any] | None, *, now: datetime | None = None) -> str | None:
+    """Period-end key when this member should get one renew reminder, else None.
+
+    Only memberships that will not renew (cancel at period end) and still have
+    access. Auto-renewing subscriptions are billed by Stripe and are not emailed.
+    """
+    if not user or user.get("disabled"):
+        return None
+    if (user.get("role") or "") == "admin":
+        return None
+    if not str(user.get("email") or "").strip():
+        return None
+    if not user.get("cancel_at_period_end"):
+        return None
+    status = str(user.get("subscription_status") or "").strip().lower()
+    if status not in ("active", "trialing"):
+        return None
+    end = parse_period_end(user.get("current_period_end"))
+    if end is None:
+        return None
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    delta = end - moment.astimezone(timezone.utc)
+    if delta > timedelta(days=RENEWAL_REMINDER_DAYS) or delta < timedelta(days=-1):
+        return None
+    key = end.isoformat()
+    if str(user.get("renewal_reminder_for") or "") == key:
+        return None
+    return key
+
+
+def _renew_url() -> str:
+    return _base_url() + "/?step=subscription"
+
+
+def notify_subscription_expiring(user: dict[str, Any], *, period_end: str, renew_url: str = "") -> dict[str, Any]:
+    return _safe_send(
+        "subscription_expiring",
+        user.get("email") or "",
+        {
+            "username": user.get("username") or "",
+            "period_end": period_end,
+            "renew_url": renew_url or _renew_url(),
+        },
+    )
+
+
+def send_due_renewal_reminders(*, now: datetime | None = None) -> dict[str, Any]:
+    """Email members whose membership ends within the reminder window. One email per period."""
+    from studio.members import list_user_records, update_user
+
+    if not email_enabled():
+        return {"ok": True, "skipped": True, "reason": "email_disabled", "sent": 0}
+    sent = 0
+    due = 0
+    for user in list_user_records():
+        key = renewal_reminder_due(user, now=now)
+        if not key:
+            continue
+        due += 1
+        end = parse_period_end(user.get("current_period_end"))
+        label = end.strftime("%B %d, %Y").replace(" 0", " ") if end else key[:10]
+        result = notify_subscription_expiring(user, period_end=label)
+        if not result.get("ok"):
+            continue
+        try:
+            update_user(str(user.get("id") or ""), renewal_reminder_for=key)
+        except Exception:
+            _log.error("could not record renewal reminder")
+            continue
+        sent += 1
+    return {"ok": True, "sent": sent, "due": due}
+
+
 def notify_payment_receipt(
     user: dict[str, Any],
     *,
@@ -352,16 +474,53 @@ def notify_payment_failed(
     )
 
 
+def notify_job_finished(event: dict[str, Any]) -> dict[str, Any]:
+    """Email the project owner when a pipeline or final render finishes. Never raises."""
+    try:
+        from studio.members import get_user_by_id
+        from studio.projects import owner_id_for_project
+
+        project_id = str(event.get("project_id") or "").strip()
+        owner_id = owner_id_for_project(project_id) if project_id else None
+        user = get_user_by_id(owner_id) if owner_id else None
+        if not user:
+            return {"ok": False, "skipped": True, "reason": "no_owner"}
+        status = str(event.get("status") or "").strip().lower()
+        label = "complete" if status == "completed" else "ready for another look"
+        detail = str(event.get("detail") or "").strip()
+        detail_line = f"{detail}\n" if detail else ""
+        title = str(event.get("title") or project_id or "your video").strip() or "your video"
+        return _safe_send(
+            "job_finished",
+            user.get("email") or "",
+            {
+                "username": user.get("username") or "",
+                "title": title,
+                "status_label": label,
+                "detail_line": detail_line,
+            },
+        )
+    except Exception:
+        _log.error("job notification email failed")
+        return {"ok": False, "error": "send_failed"}
+
+
 def send_test_email(to: str) -> dict[str, Any]:
+    from studio.mailjet import credentials_present, from_name, log_if_unconfigured
+
     data = _settings()
-    if not email_enabled(data):
-        raise RuntimeError("Enable email and set SMTP host first.")
+    if not credentials_present(data):
+        log_if_unconfigured(data)
+        raise RuntimeError("Mailjet is not configured")
+    if not _truthy(data.get("email_enabled"), False):
+        raise RuntimeError("Turn on outbound email in Admin → Email.")
+    name = from_name(data.get("mailjet_from_name") or data.get("email_from_name"))
     return send_email(
         to=to,
-        subject=f"Test email from {(data.get('email_from_name') or 'Stickman Automation')}",
+        subject=f"Test email from {name}",
         text=(
             "This is a Stickman Automation Studio test message.\n"
-            "If you received it, SMTP settings are working.\n"
+            "Mailjet accepted the send.\n"
         ),
         settings=data,
     )

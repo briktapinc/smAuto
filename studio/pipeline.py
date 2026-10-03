@@ -487,6 +487,8 @@ def list_library_items(
     When owner_id is set and is_admin is False, only that member's jobs are returned.
     archived_only=True returns only archived jobs (for the Archives page).
     """
+    from studio.tts_external import external_audio_present
+
     settings = load_settings()
     host = settings.get("host") or "127.0.0.1"
     if host in ("0.0.0.0", "::", "[::]"):
@@ -530,7 +532,7 @@ def list_library_items(
         )
         yt_info = _youtube_watch_info(item)
         has_youtube = bool(yt_info.get("has_youtube"))
-        has_audio = audio.is_file() and audio.stat().st_size > 1000
+        has_audio = (audio.is_file() and audio.stat().st_size > 1000) or external_audio_present(pid)
         # Existence only — canvas dimension check is too slow for 40+ cards.
         has_cover = cover.is_file() and cover.stat().st_size > 200
         thumb_path = next(
@@ -1167,6 +1169,7 @@ def _set_job(project_id: str, **fields) -> None:
             _close_step_timing(job)
             if "active_step" not in fields:
                 fields = {**fields, "active_step": None}
+        prev_error = str(job.get("error") or "").strip()
         if fields.get("error") and "error_code" not in fields:
             from studio.job_errors import classify_error
 
@@ -1184,6 +1187,13 @@ def _set_job(project_id: str, **fields) -> None:
             elif not running and step != "done":
                 job.pop("progress_pct", None)
         snapshot = dict(job)
+        new_error = str(snapshot.get("error") or "").strip()
+        report_running_error = (
+            "error" in fields
+            and bool(snapshot.get("running"))
+            and bool(new_error)
+            and new_error != prev_error
+        )
     meta = load_meta(project_id)
     stored = {k: snapshot[k] for k in _PERSIST if k in snapshot}
     meta["job"] = stored
@@ -1209,6 +1219,19 @@ def _set_job(project_id: str, **fields) -> None:
         )
     except Exception:
         pass
+    if report_running_error:
+        try:
+            from studio.job_notifications import publish_running_job_error
+
+            publish_running_job_error(
+                project_id,
+                error=str(snapshot.get("error") or ""),
+                detail=str(snapshot.get("detail") or ""),
+                step=str(snapshot.get("step") or ""),
+                kind=str(snapshot.get("kind") or ""),
+            )
+        except Exception:
+            pass
 
 
 def _run_code(script: str, extra: list[str]) -> None:
@@ -1271,6 +1294,9 @@ def start_task(
     token = object()
 
     def run():
+        from studio.settings import bind_settings_for_project
+
+        bind_settings_for_project(project_id).__enter__()
         outcome = "done"
         detail = done_detail
         try:
@@ -2185,6 +2211,60 @@ def _render_one_canvas(
         publish_last_video(project_id, video_path)
 
 
+def _tts_is_external(meta: dict) -> bool:
+    from studio.settings import normalize_tts_provider
+
+    provider = normalize_tts_provider(
+        meta.get("tts_provider")
+        or meta.get("voice_provider")
+        or load_settings().get("tts_provider")
+        or "local",
+        default="local",
+    )
+    return provider == "external"
+
+
+def _ensure_render_audio(project_id: str, *, job_aspect: str, generate_missing_audio: bool) -> None:
+    """Pass the pre-render audio gate.
+
+    A generated wav is enough. External narration (uploaded MP3, or tts_provider
+    external) is also enough: convert it to wav and continue into Gentle instead
+    of raising "Generate audio before rendering."
+    """
+    meta = load_meta(project_id)
+    wav = Path(input_prefix(project_id) + ".wav")
+    shorts_wav = Path(shorts_input_prefix(project_id) + ".wav")
+    missing_full = needs_explainer_assets(job_aspect) and not wav.is_file()
+    missing_shorts = project_generate_9x16(project_id) and not shorts_wav.is_file()
+    if not missing_full and not missing_shorts:
+        _ensure_fresh_alignment(project_id)
+        return
+
+    from studio.tts_external import external_audio_present
+
+    full_uploaded = external_audio_present(project_id, shorts=False)
+    shorts_uploaded = external_audio_present(project_id, shorts=True)
+    upload_covers = (not missing_full or full_uploaded) and (not missing_shorts or shorts_uploaded)
+    uploaded = upload_covers and (full_uploaded or shorts_uploaded)
+    if _tts_is_external(meta) or uploaded or generate_missing_audio:
+        if _tts_is_external(meta) or generate_missing_audio:
+            generate_audio_then_align(project_id)
+            return
+        from studio.tts_external import ensure_spoken_transcript, materialize_external_wav
+
+        if missing_full:
+            ensure_spoken_transcript(project_id, shorts=False)
+            materialize_external_wav(project_id, wav, shorts=False)
+        if missing_shorts:
+            ensure_spoken_transcript(project_id, shorts=True)
+            materialize_external_wav(project_id, shorts_wav, shorts=True)
+        _ensure_fresh_alignment(project_id)
+        return
+    if missing_full:
+        raise RuntimeError("Generate audio before rendering.")
+    raise RuntimeError("Generate 9:16 short audio before rendering.")
+
+
 def render_video(
     project_id: str,
     use_billboards: bool = True,
@@ -2238,19 +2318,11 @@ def render_video(
     room_path = resolve_room_path(meta.get("background_file"))
     print(f"Studio room: {room_path}")
     assign_project_music(project_id, reshuffle=shuffle_music)
-    wav = Path(prefix + ".wav")
-    if needs_explainer_assets(job_aspect) and not wav.is_file():
-        if generate_missing_audio:
-            generate_audio_then_align(project_id)
-        else:
-            raise RuntimeError("Generate audio before rendering.")
-    elif project_generate_9x16(project_id) and not Path(shorts_input_prefix(project_id) + ".wav").is_file():
-        if generate_missing_audio:
-            generate_audio_then_align(project_id)
-        else:
-            raise RuntimeError("Generate 9:16 short audio before rendering.")
-    else:
-        _ensure_fresh_alignment(project_id)
+    _ensure_render_audio(
+        project_id,
+        job_aspect=job_aspect,
+        generate_missing_audio=generate_missing_audio,
+    )
     if not project_alignment_is_fresh(project_id):
         raise RuntimeError(
             "Cannot run scheduler: Gentle json does not match the current script and wav. "

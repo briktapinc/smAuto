@@ -64,6 +64,31 @@ class ExternalTtsTests(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertGreater(out["bytes"], 100)
         self.assertGreater(out.get("duration_seconds") or 0, 0.2)
+        from studio.projects import project_payload
+
+        payload = project_payload(self.pid)
+        self.assertTrue(payload["has_external_audio"])
+        self.assertEqual(payload["audio_source"], "external")
+        self.assertTrue(payload["has_audio"])
+        dest = Path(input_prefix(self.pid)).with_suffix(".wav")
+        if dest.is_file():
+            dest.unlink()
+        self.assertFalse(dest.is_file())
+        called = {}
+
+        def _fake_generate(project_id, provider=None, voice_id=None, progress=True):
+            called["project_id"] = project_id
+            return {"ok": True, "audio_source": "external"}
+
+        import studio.pipeline as pipeline
+
+        original = pipeline.generate_audio_then_align
+        pipeline.generate_audio_then_align = _fake_generate
+        try:
+            pipeline._ensure_render_audio(self.pid, job_aspect="16:9", generate_missing_audio=False)
+        finally:
+            pipeline.generate_audio_then_align = original
+        self.assertEqual(called.get("project_id"), self.pid)
         dest = Path(input_prefix(self.pid)).with_suffix(".wav")
         mat = materialize_external_wav(self.pid, dest)
         self.assertTrue(dest.is_file())

@@ -34,6 +34,7 @@
         <button type="button" data-panel="refunds">Refunds</button>
         <button type="button" data-panel="subscriptions">Subscriptions</button>
         <button type="button" data-panel="stripe">Stripe</button>
+        <button type="button" data-panel="pricing">Pricing</button>
         <button type="button" data-panel="email">Email</button>
         <a href="/">Studio</a>
         <button type="button" id="admin-logout">Log out</button>
@@ -80,6 +81,7 @@
             <label>Role
               <select id="member-role">
                 <option value="member">member (equal access)</option>
+                <option value="buyer">Buyer</option>
                 <option value="admin">admin</option>
               </select>
             </label>
@@ -177,22 +179,45 @@
         <p class="muted">Members subscribe and unsubscribe from Studio → Subscription. Checkout returns there after payment.</p>
       </section>
 
+      <section id="panel-pricing" class="panel">
+        <h2>Video pricing</h2>
+        <p class="muted">Order videos uses these packages. The price is for a 5-minute video. 10-minute videos multiply that price and round to the nearest dollar. Videos must equal videos per day times delivery days.</p>
+        <form id="pricing-form" class="card stack">
+          <label>10-minute multiplier <input id="pricing-multiplier" type="number" min="1" max="5" step="0.01" value="1.5" /></label>
+          <div id="pricing-packages" class="stack"></div>
+          <button type="submit">Save pricing</button>
+          <p id="pricing-status" class="muted"></p>
+        </form>
+        <h3>Art styles</h3>
+        <p class="muted">Buyers pick one of these before checkout. The id must match a pipeline art style. The thumbnail is what they see on Order videos.</p>
+        <div id="art-style-list" class="stack"></div>
+        <form id="art-style-add" class="card stack">
+          <div class="row">
+            <label>Id
+              <input id="art-style-id" list="art-style-ids" placeholder="classic" required />
+            </label>
+            <label>Name
+              <input id="art-style-name" placeholder="Classic (hand-drawn 2D)" required />
+            </label>
+          </div>
+          <datalist id="art-style-ids"></datalist>
+          <button type="submit">Add style</button>
+          <p id="art-style-status" class="muted"></p>
+        </form>
+      </section>
+
       <section id="panel-email" class="panel">
-        <h2>Email (SMTP)</h2>
-        <p class="muted">Used for signup welcome, password reset, membership, and payment receipts. Leave disabled until SMTP is verified.</p>
+        <h2>Email (Mailjet)</h2>
+        <p class="muted">Signup, password reset, membership, payments, order delivery, and finished jobs send through Mailjet. The sender domain is stickmanautomation.com unless you set another domain here.</p>
         <form id="email-form" class="card stack">
           <label class="check"><input type="checkbox" id="email-enabled" /> Enable outbound email</label>
-          <label>SMTP host <input id="smtp-host" placeholder="smtp.hostinger.com" autocomplete="off" /></label>
-          <label>SMTP port <input id="smtp-port" type="number" min="1" max="65535" value="587" /></label>
-          <label>SMTP username <input id="smtp-user" placeholder="noreply@yourdomain.com" autocomplete="off" /></label>
-          <label>SMTP password <input id="smtp-password" type="password" placeholder="********" autocomplete="off" /></label>
-          <div class="row">
-            <label class="check"><input type="checkbox" id="smtp-tls" checked /> STARTTLS</label>
-            <label class="check"><input type="checkbox" id="smtp-ssl" /> SSL (port 465)</label>
-          </div>
-          <label>From address <input id="email-from" placeholder="noreply@yourdomain.com" /></label>
-          <label>From name <input id="email-from-name" placeholder="Stickman Automation" /></label>
-          <label>Reply-To (optional) <input id="email-reply-to" placeholder="support@yourdomain.com" /></label>
+          <label>Mailjet API key <input id="mailjet-api-key" type="password" autocomplete="off" /></label>
+          <label>Mailjet secret key <input id="mailjet-secret-key" type="password" autocomplete="off" /></label>
+          <label>Sender domain <input id="mailjet-sender-domain" placeholder="stickmanautomation.com" autocomplete="off" /></label>
+          <label>From address <input id="mailjet-from-email" placeholder="noreply" autocomplete="off" /></label>
+          <p id="mailjet-from-preview" class="muted"></p>
+          <label>From name <input id="mailjet-from-name" placeholder="Stickman Automation" /></label>
+          <label>Reply-To (optional) <input id="email-reply-to" placeholder="support@stickmanautomation.com" /></label>
           <div class="row">
             <button type="submit">Save email settings</button>
             <button type="button" id="email-test-btn">Send test email</button>
@@ -201,7 +226,7 @@
           <p id="email-status" class="muted"></p>
         </form>
         <h3>Templates</h3>
-        <p class="muted">Edit subject/body. Placeholders: <code>{{username}}</code> <code>{{app_name}}</code> <code>{{studio_url}}</code> <code>{{login_url}}</code> <code>{{reset_url}}</code> <code>{{amount}}</code> <code>{{currency}}</code> <code>{{invoice_line}}</code> <code>{{period_end_clause}}</code> <code>{{amount_clause}}</code> <code>{{expires_minutes}}</code> <code>{{portal_hint}}</code></p>
+        <p class="muted">Edit subject/body. Placeholders: <code>{{username}}</code> <code>{{app_name}}</code> <code>{{studio_url}}</code> <code>{{login_url}}</code> <code>{{reset_url}}</code> <code>{{amount}}</code> <code>{{currency}}</code> <code>{{invoice_line}}</code> <code>{{period_end_clause}}</code> <code>{{period_end}}</code> <code>{{renew_url}}</code> <code>{{amount_clause}}</code> <code>{{expires_minutes}}</code> <code>{{portal_hint}}</code></p>
         <div id="email-templates" class="stack"></div>
         <div class="row" style="margin-top:12px">
           <button type="button" id="email-templates-save">Save templates</button>
@@ -212,6 +237,6 @@
   </div>
 
   <div id="toast" hidden></div>
-  <script src="/static/admin.js"></script>
+  <script src="/static/admin.js?v=buyer1"></script>
 </body>
 </html>

@@ -27,7 +27,38 @@ function setToken(token) {
   } catch { /* ignore */ }
 }
 
+function safeNextPath() {
+  try {
+    const next = new URLSearchParams(location.search).get("next") || "";
+    if (!next.startsWith("/") || next.startsWith("//") || next.includes("\\") || next.includes("://")) return "";
+    if (next.includes("?") || next.includes("#")) return "";
+    return next;
+  } catch {
+    return "";
+  }
+}
+
+function buyerReturnPath() {
+  const next = safeNextPath();
+  if (!next) return "";
+  const clean = next.replace(/\/+$/, "") || "/";
+  if (
+    clean === "/order" ||
+    clean === "/my-orders" ||
+    clean === "/order/success" ||
+    clean === "/order/cancel"
+  ) {
+    return next;
+  }
+  return "";
+}
+
 function goStudio(hash = "") {
+  const next = !hash ? safeNextPath() : "";
+  if (next) {
+    location.replace(withBase(next));
+    return;
+  }
   const base = withBase("/") || "/";
   const url = hash ? `${base.replace(/\/?$/, "/")}${hash.replace(/^\//, "")}` : base;
   location.replace(url);
@@ -76,8 +107,16 @@ function showView(view = "login", message = "") {
   if (view === "signup") $("#signup-user")?.focus();
 }
 
+function isBuyerSession(data) {
+  return (data?.role || "") === "buyer" || data?.redirect === "/order";
+}
+
 async function enterStudio(data) {
   setToken(data?.token || getToken() || "");
+  if (isBuyerSession(data)) {
+    location.replace(withBase(buyerReturnPath() || "/order"));
+    return;
+  }
   goStudio();
 }
 
@@ -95,7 +134,11 @@ async function bootLogin() {
   // or missed setAuthToken) so we never bounce / ↔ /api/auth/me.
   if (getToken()) {
     try {
-      await api("/api/auth/me");
+      const me = await api("/api/auth/me");
+      if (isBuyerSession(me)) {
+        location.replace(withBase(buyerReturnPath() || "/order"));
+        return;
+      }
       goStudio(hash);
       return;
     } catch {

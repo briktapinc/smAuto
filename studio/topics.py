@@ -7,8 +7,9 @@ import logging
 import random
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Iterator
 
 from studio.paths import TOPICS_PATH, ensure_dirs
 from studio.prompts import get_prompt
@@ -232,6 +233,10 @@ def _public(item: dict[str, Any]) -> dict[str, Any]:
         "due": due,
         "due_in_seconds": int((due_dt - now).total_seconds()) if due_dt and status == "queued" else None,
         "error": item.get("error") or None,
+        "order_id": item.get("order_id") or None,
+        "order_video_id": item.get("order_video_id") or None,
+        "aspect": item.get("aspect") or None,
+        "art_style": item.get("art_style") or None,
     }
 
 
@@ -264,7 +269,18 @@ def _script_ready(job_id: str) -> bool:
 
 
 def _prepare_unsupervised_job(job_id: str) -> list[str]:
-    """Gate image backends for walk-away runs. Native text needs save_script first."""
+    """Gate image backends for walk-away runs. Native text needs save_script first.
+
+    Settings reads follow the job owner so a member job uses that member's
+    text provider, image provider, and fal key. Admin jobs stay on the shared store.
+    """
+    from studio.settings import bind_settings_for_project
+
+    with bind_settings_for_project(job_id):
+        return _prepare_unsupervised_job_bound(job_id)
+
+
+def _prepare_unsupervised_job_bound(job_id: str) -> list[str]:
     from studio.comfyui import workflow_public_status
     from studio.illustrations import unsupervised_image_provider_gate_skip_message
     from studio.projects import project_image_provider, set_image_provider
@@ -327,12 +343,14 @@ def _prepare_unsupervised_job(job_id: str) -> list[str]:
 def _apply_hands_off_youtube(job_id: str) -> list[str]:
     """Per-job private auto-upload while hands-off. Does not change Settings defaults."""
     from studio.projects import load_meta, save_meta, set_project_youtube
-    from studio.youtube import is_connected
+    from studio.youtube import bind_project_youtube, is_connected
 
     notes: list[str] = []
     set_project_youtube(job_id, auto_upload=True, privacy="private")
     notes.append("hands-off: this job will auto-upload as private (settings default unchanged).")
-    if not is_connected():
+    with bind_project_youtube(job_id):
+        connected = is_connected()
+    if not connected:
         meta = load_meta(job_id)
         meta["youtube_pending"] = True
         meta["youtube_error"] = None
@@ -497,12 +515,16 @@ def _make_topic(
     status: str = "draft",
     *,
     owner_id: str | None = None,
+    order_id: str | None = None,
+    order_video_id: str | None = None,
+    aspect: str | None = None,
+    art_style: str | None = None,
 ) -> dict[str, Any]:
     title = (title or "").strip()
     if not title:
         raise RuntimeError("Topic title is required.")
     minutes = _duration_min(duration_min)
-    return {
+    topic = {
         "id": uuid.uuid4().hex[:12],
         "owner_id": (owner_id or "").strip() or None,
         "title": title,
@@ -514,6 +536,24 @@ def _make_topic(
         "scheduled_at": None,
         "error": None,
     }
+    linked_order = (order_id or "").strip()
+    linked_video = (order_video_id or "").strip()
+    if linked_order:
+        topic["order_id"] = linked_order
+    if linked_video:
+        topic["order_video_id"] = linked_video
+    if (aspect or "").strip():
+        topic["aspect"] = aspect.strip()
+    if (art_style or "").strip():
+        topic["art_style"] = art_style.strip()
+    return topic
+
+
+def _find_order_video(data: dict[str, Any], order_id: str, video_id: str) -> dict[str, Any] | None:
+    for row in data.get("topics") or []:
+        if str(row.get("order_id") or "") == order_id and str(row.get("order_video_id") or "") == video_id:
+            return row
+    return None
 
 
 def _invent_topics(seed: str, count: int, duration_min: float) -> list[dict[str, str]]:
@@ -767,6 +807,42 @@ def unschedule_topic(topic_id: str) -> dict[str, Any]:
     return payload
 
 
+@contextmanager
+def _topic_settings(topic: dict[str, Any]) -> Iterator[None]:
+    """Use this topic owner's production settings for job creation and gating."""
+    from studio.members import get_user_by_id
+    from studio.settings import bind_settings_user
+
+    oid = str((topic or {}).get("owner_id") or "").strip()
+    user = get_user_by_id(oid) if oid else None
+    with bind_settings_user(user):
+        yield
+
+
+def _stamp_order_on_job(job_id: str, topic: dict[str, Any]) -> None:
+    """Remember which paid order this job belongs to. No-op for ordinary topics."""
+    order_id = str(topic.get("order_id") or "").strip()
+    if not order_id or not (job_id or "").strip():
+        return
+    from studio.aspect import normalize_job_aspect
+    from studio.projects import load_meta, save_meta
+
+    meta = load_meta(job_id)
+    meta["order_id"] = order_id
+    video_id = str(topic.get("order_video_id") or "").strip()
+    if video_id:
+        meta["order_video_id"] = video_id
+    aspect = str(topic.get("aspect") or "").strip()
+    if aspect:
+        meta["aspect"] = normalize_job_aspect(aspect)
+    style = str(topic.get("art_style") or "").strip()
+    if style:
+        from studio.art_style import normalize_art_style
+
+        meta["art_style"] = normalize_art_style(style)
+    save_meta(job_id, meta)
+
+
 def _ensure_job(topic: dict[str, Any]) -> str:
     from studio.projects import create_project, load_meta, save_meta
 
@@ -779,6 +855,7 @@ def _ensure_job(topic: dict[str, Any]) -> str:
             if int(meta.get("duration_seconds") or 0) != seconds:
                 meta["duration_seconds"] = seconds
                 save_meta(existing, meta)
+            _stamp_order_on_job(existing, topic)
             return existing
         except FileNotFoundError:
             topic["job_id"] = None
@@ -792,6 +869,7 @@ def _ensure_job(topic: dict[str, Any]) -> str:
     if not job_id:
         raise RuntimeError("Failed to create a Studio job from this topic.")
     topic["job_id"] = job_id
+    _stamp_order_on_job(job_id, topic)
     return job_id
 
 
@@ -820,7 +898,7 @@ def kick_queue(*, force: bool = False) -> dict[str, Any]:
     """
     from studio.job_queue import max_concurrent_jobs, public_status, request_run, slots_free
     from studio.pipeline import scheduler_blocked_reason
-    from studio.settings import is_native_text_provider, text_provider_label
+    from studio.settings import bind_settings_for_project, is_native_text_provider, text_provider_label
 
     if not force and not hands_off_enabled():
         return {"started": False, "reason": "hands_off_off"}
@@ -873,17 +951,21 @@ def kick_queue(*, force: bool = False) -> dict[str, Any]:
             tid = str(topic["id"])
             data["queue"] = [x for x in data["queue"] if x != tid]
             try:
-                job_id = _ensure_job(topic)
-                notes = _prepare_unsupervised_job(job_id)
+                with _topic_settings(topic):
+                    job_id = _ensure_job(topic)
+                    notes = _prepare_unsupervised_job(job_id)
             except Exception as exc:
                 topic["status"] = "draft"
                 topic["error"] = str(exc)
                 _save(data)
                 continue
-            if is_native_text_provider() and not _script_ready(job_id):
+            with bind_settings_for_project(job_id):
+                native_waiting = is_native_text_provider() and not _script_ready(job_id)
+                native_label = text_provider_label() if native_waiting else ""
+            if native_waiting:
                 topic["status"] = "queued"
                 topic["error"] = (
-                    f"Waiting for save_script ({text_provider_label()} cannot auto-generate). "
+                    f"Waiting for save_script ({native_label} cannot auto-generate). "
                     "Write the tagged script then save_script, or switch text_provider to openai/lmstudio."
                 )
                 if tid not in data["queue"]:
@@ -1032,39 +1114,70 @@ def _pool_count(data: dict[str, Any]) -> int:
 
 
 def hands_off_tick() -> dict[str, Any]:
-    """Replenish drafts, auto-schedule them, leave the due-picker to start jobs."""
-    from studio.settings import is_api_text_provider, is_native_text_provider
+    """Replenish drafts, auto-schedule them, leave the due-picker to start jobs.
+
+    Each hands-off account is gated with that account's text provider and keys.
+    A member job is not inventoried or retargeted with the admin fal key.
+    """
+    from studio.members import get_user_by_id, list_hands_off_owner_ids
+    from studio.settings import (
+        bind_settings_user,
+        hands_off_enabled as settings_hands_off,
+        is_api_text_provider,
+        is_native_text_provider,
+    )
 
     if not hands_off_enabled():
         return {"skipped": True, "reason": "hands_off_off"}
-    min_queue = _hands_off_min_queue()
-    generated: dict[str, Any] | None = None
-    with _lock:
-        data = _load()
-        pool = _pool_count(data)
-    if pool < min_queue and is_api_text_provider():
-        need = max(1, min(8, min_queue - pool))
-        try:
-            from studio.spend_guard import require_spend
 
-            require_spend(
-                "openai_topics",
-                confirm_spend=True,
-                source="hands_off",
-                units=1,
-                detail=f"hands-off auto generate {need} topics",
-            )
-            generated = generate_topics(count=need)
-        except Exception as exc:
-            generated = {"ok": False, "error": str(exc), "count": 0}
-    elif pool < min_queue and is_native_text_provider():
-        generated = {
-            "ok": False,
-            "skipped": True,
-            "reason": "native_text",
-            "count": 0,
-            "message": "hands-off will not auto-generate topics while text_provider is chatgpt/claude.",
-        }
+    min_queue = _hands_off_min_queue()
+    actors: list[tuple[str | None, dict | None, bool]] = []
+    for oid in list_hands_off_owner_ids():
+        user = get_user_by_id(oid)
+        if user:
+            actors.append((oid, user, False))
+    if settings_hands_off() and not actors:
+        # Settings switch with no per-user record: shared admin store, whole catalog.
+        actors.append((None, None, True))
+
+    generated_count = 0
+    generate_error = None
+    generate_skipped = False
+    for oid, user, legacy_all in actors:
+        with bind_settings_user(user):
+            min_queue = _hands_off_min_queue(None if legacy_all else oid)
+            with _lock:
+                data = _load()
+                if legacy_all:
+                    pool = _pool_count(data)
+                else:
+                    uid = str(oid or "")
+                    pool = sum(
+                        1
+                        for topic in (data.get("topics") or [])
+                        if topic.get("status") in ("draft", "queued")
+                        and str(topic.get("owner_id") or "").strip() == uid
+                    )
+            if pool >= min_queue:
+                continue
+            if is_api_text_provider():
+                need = max(1, min(8, min_queue - pool))
+                try:
+                    from studio.spend_guard import require_spend
+
+                    require_spend(
+                        "openai_topics",
+                        confirm_spend=True,
+                        source="hands_off",
+                        units=1,
+                        detail=f"hands-off auto generate {need} topics",
+                    )
+                    generated = generate_topics(count=need, owner_id=oid)
+                    generated_count += int((generated or {}).get("count") or 0)
+                except Exception as exc:
+                    generate_error = str(exc)
+            elif is_native_text_provider():
+                generate_skipped = True
     scheduled: list[str] = []
     scheduled_at_list: list[str] = []
     errors: list[str] = []
@@ -1077,8 +1190,9 @@ def hands_off_tick() -> dict[str, Any]:
         for topic in drafts:
             tid = str(topic.get("id") or "")
             try:
-                job_id = _ensure_job(topic)
-                _prepare_unsupervised_job(job_id)
+                with _topic_settings(topic):
+                    job_id = _ensure_job(topic)
+                    _prepare_unsupervised_job(job_id)
             except Exception as exc:
                 topic["error"] = str(exc)
                 errors.append(f"{tid}: {exc}")
@@ -1097,9 +1211,9 @@ def hands_off_tick() -> dict[str, Any]:
     return {
         "skipped": False,
         "min_queue": min_queue,
-        "generated": (generated or {}).get("count") or 0,
-        "generate_error": (generated or {}).get("error"),
-        "generate_skipped": (generated or {}).get("skipped"),
+        "generated": generated_count,
+        "generate_error": generate_error,
+        "generate_skipped": generate_skipped,
         "scheduled": scheduled,
         "scheduled_at": scheduled_at_list,
         "scheduled_count": len(scheduled),
@@ -1133,6 +1247,9 @@ def schedule_topic(
     run: str = "queue",
     scheduled_at: str = "",
     run_now: bool = False,
+    *,
+    owner_id: str | None = None,
+    is_admin: bool = False,
 ) -> dict[str, Any]:
     """Create a Studio job from a topic (or title) and enqueue it for scheduled_at (local or ISO)."""
     mode = (run or "queue").strip().lower()
@@ -1153,6 +1270,11 @@ def schedule_topic(
             topic = _find(data, tid)
             if not topic:
                 raise FileNotFoundError(f"Unknown topic: {tid}")
+            if not is_admin:
+                uid = (owner_id or "").strip()
+                existing = str(topic.get("owner_id") or "").strip()
+                if not uid or existing != uid:
+                    raise PermissionError("Not your topic")
             if duration_min not in (None, "", 0):
                 topic["duration_min"] = _duration_min(duration_min)
             if title.strip():
@@ -1162,16 +1284,19 @@ def schedule_topic(
         else:
             if not (title or "").strip():
                 raise RuntimeError("Provide topic_id or a title to schedule.")
-            topic = _make_topic(title, angle, duration_min)
+            if not is_admin and not (owner_id or "").strip():
+                raise PermissionError("Sign in to schedule a topic.")
+            topic = _make_topic(title, angle, duration_min, owner_id=owner_id)
             data["topics"].insert(0, topic)
             tid = str(topic["id"])
-        job_id = _ensure_job(topic)
-        try:
-            notes = _prepare_unsupervised_job(job_id)
-        except Exception as exc:
-            topic["error"] = str(exc)
-            _save(data)
-            raise
+        with _topic_settings(topic):
+            job_id = _ensure_job(topic)
+            try:
+                notes = _prepare_unsupervised_job(job_id)
+            except Exception as exc:
+                topic["error"] = str(exc)
+                _save(data)
+                raise
         topic["scheduled_at"] = due_iso
         topic["error"] = None
         if topic.get("status") != "running":
@@ -1262,6 +1387,99 @@ def schedule_topic(
     return payload
 
 
+def schedule_order_topic(
+    *,
+    owner_id: str,
+    title: str,
+    angle: str = "",
+    duration_min: float | int | None = None,
+    scheduled_at: str = "",
+    order_id: str,
+    order_video_id: str,
+    aspect: str = "",
+    art_style: str = "",
+) -> dict[str, Any]:
+    """Queue one paid-order video on a member account. A second call reuses the same topic."""
+    oid = (order_id or "").strip()
+    vid = (order_video_id or "").strip()
+    owner = (owner_id or "").strip()
+    if not oid or not vid:
+        raise RuntimeError("Order id and video id are required.")
+    if not owner:
+        raise RuntimeError("A studio member is required to queue this order.")
+    due_iso = store_scheduled_at(scheduled_at, default_now=not str(scheduled_at or "").strip())
+    notes: list[str] = []
+    with _lock:
+        data = _load()
+        topic = _find_order_video(data, oid, vid)
+        if topic and topic.get("job_id") and topic.get("status") in ("queued", "running", "done"):
+            return {
+                "already_queued": True,
+                "topic": _public(topic),
+                "job_id": topic.get("job_id"),
+                "scheduled_at": topic.get("scheduled_at"),
+                "notes": [],
+                "kicked": {"started": False, "reason": "already_queued"},
+            }
+        if topic is None:
+            topic = _make_topic(
+                title,
+                angle,
+                duration_min,
+                owner_id=owner,
+                order_id=oid,
+                order_video_id=vid,
+                aspect=aspect,
+                art_style=art_style,
+            )
+            data["topics"].insert(0, topic)
+        else:
+            topic["owner_id"] = owner
+            topic["order_id"] = oid
+            topic["order_video_id"] = vid
+            if (aspect or "").strip():
+                topic["aspect"] = aspect.strip()
+            if (art_style or "").strip():
+                topic["art_style"] = art_style.strip()
+            if (title or "").strip():
+                topic["title"] = title.strip()
+            if (angle or "").strip():
+                topic["angle"] = angle.strip()
+            if duration_min not in (None, "", 0):
+                topic["duration_min"] = _duration_min(duration_min)
+        with _topic_settings(topic):
+            job_id = _ensure_job(topic)
+            try:
+                notes = _prepare_unsupervised_job(job_id)
+            except Exception as exc:
+                topic["error"] = str(exc)
+                _save(data)
+                raise
+        topic["scheduled_at"] = due_iso
+        topic["error"] = None
+        if topic.get("status") != "running":
+            topic["status"] = "queued"
+        tid = str(topic["id"])
+        data["queue"] = [x for x in (data.get("queue") or []) if x != tid]
+        data["queue"].append(tid)
+        _save(data)
+        saved = _public(topic)
+    kicked: dict[str, Any] = {"started": False, "reason": "scheduled"}
+    if saved.get("due"):
+        try:
+            kicked = kick_queue(force=False)
+        except Exception as exc:
+            kicked = {"started": False, "reason": "error", "error": str(exc)}
+    return {
+        "already_queued": False,
+        "topic": saved,
+        "job_id": job_id,
+        "scheduled_at": due_iso,
+        "notes": notes,
+        "kicked": kicked,
+    }
+
+
 def start_topic_pipeline(
     topic_id: str = "",
     title: str = "",
@@ -1269,6 +1487,9 @@ def start_topic_pipeline(
     angle: str = "",
     scheduled_at: str = "",
     run_now: bool = True,
+    *,
+    owner_id: str | None = None,
+    is_admin: bool = False,
 ) -> dict[str, Any]:
     """MCP alias: schedule and optionally start immediately."""
     return schedule_topic(
@@ -1279,6 +1500,8 @@ def start_topic_pipeline(
         scheduled_at=scheduled_at,
         run_now=run_now,
         run="now" if run_now else "queue",
+        owner_id=owner_id,
+        is_admin=is_admin,
     )
 
 
@@ -1300,6 +1523,16 @@ def hands_off_status() -> dict[str, Any]:
     from studio.youtube import status as youtube_status
 
     settings = load_settings()
+    from studio.settings import current_settings_owner
+
+    owner_uid = current_settings_owner()
+    owner_prefs = None
+    owner_user = None
+    if owner_uid:
+        from studio.members import get_user_by_id, hands_off_prefs
+
+        owner_prefs = hands_off_prefs(owner_uid)
+        owner_user = get_user_by_id(owner_uid)
     text = current_text_provider()
     image = normalize_image_provider(settings.get("image_provider"))
     tts = normalize_tts_provider(settings.get("tts_provider") or settings.get("voice_provider"))
@@ -1307,7 +1540,13 @@ def hands_off_status() -> dict[str, Any]:
     wf = workflow_public_status()
     yt = {}
     try:
-        yt = youtube_status()
+        if owner_user:
+            from studio.youtube import bind_youtube_user
+
+            with bind_youtube_user(owner_user):
+                yt = youtube_status()
+        else:
+            yt = youtube_status()
     except Exception:
         yt = {"connected": bool(public_settings().get("youtube_connected"))}
     connected = bool(yt.get("connected") or public_settings().get("youtube_connected"))
@@ -1338,13 +1577,22 @@ def hands_off_status() -> dict[str, Any]:
     else:
         tts_note = tts
     walk_away = bool(text_ok and image_ok and tts_ok)
-    catalog = list_topics(kick=False)
+    catalog = list_topics(
+        kick=False,
+        owner_id=owner_uid or None,
+        is_admin=not bool(owner_uid),
+    )
     from studio.gpu_lock import gpu_lock_public
 
     gpu = gpu_lock_public()
-    on = normalize_hands_off(settings.get("hands_off"))
-    interval_hours = normalize_hands_off_interval_hours(settings.get("hands_off_interval_hours"))
-    min_queue = normalize_hands_off_min_queue(settings.get("hands_off_min_queue"))
+    if owner_prefs:
+        on = normalize_hands_off(owner_prefs.get("hands_off"))
+        interval_hours = normalize_hands_off_interval_hours(owner_prefs.get("hands_off_interval_hours"))
+        min_queue = normalize_hands_off_min_queue(owner_prefs.get("hands_off_min_queue"))
+    else:
+        on = normalize_hands_off(settings.get("hands_off"))
+        interval_hours = normalize_hands_off_interval_hours(settings.get("hands_off_interval_hours"))
+        min_queue = normalize_hands_off_min_queue(settings.get("hands_off_min_queue"))
     warnings: list[str] = []
     if image == "chatgpt":
         warnings.append(
@@ -1398,8 +1646,13 @@ def hands_off_status() -> dict[str, Any]:
         "tts_note": tts_note,
         "tts_unsupervised": tts_ok,
         "youtube_connected": connected,
-        "youtube_auto_upload": bool(settings.get("youtube_auto_upload")),
-        "youtube_privacy": settings.get("youtube_privacy") or "unlisted",
+        "youtube_auto_upload": bool(
+            yt.get("auto_upload") if owner_uid else settings.get("youtube_auto_upload")
+        ),
+        "youtube_privacy": (
+            yt.get("privacy") if owner_uid else settings.get("youtube_privacy")
+        )
+        or "unlisted",
         "next_due_at": catalog.get("next_due_at"),
         "next_due_at_local": catalog.get("next_due_at_local"),
         "next_due_topic": catalog.get("next_due_topic"),

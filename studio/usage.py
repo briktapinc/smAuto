@@ -100,6 +100,16 @@ def record_usage(
     return {"ok": True, "entry": entry}
 
 
+def entries_for_user(user_id: str) -> list[dict[str, Any]]:
+    """Ledger rows for one account. Empty when user_id is blank."""
+    uid = (user_id or "").strip()
+    if not uid:
+        return []
+    with _lock:
+        entries = _load()["entries"]
+    return [row for row in entries if str(row.get("user_id") or "") == uid]
+
+
 def sum_usage(
     user_id: str,
     metric: str,

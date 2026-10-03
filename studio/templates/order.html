@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Order videos — Bubble Pod</title>
-  <link rel="stylesheet" href="/static/order.css" />
+  <link rel="stylesheet" href="/static/order.css?v=logout1" />
 </head>
 <body data-page="order">
   <header class="chrome">
@@ -25,6 +25,7 @@
           <a href="/production" id="production-nav" hidden>Production</a>
         </div>
       </details>
+      <button type="button" id="order-logout" hidden>Log out</button>
     </nav>
   </header>
   <main>
@@ -61,18 +62,21 @@
           <div class="packages" role="listbox" aria-label="Package">
             <button type="button" class="package" data-package="starter" aria-pressed="false">
               <strong>Starter</strong>
-              <span>5 videos</span>
-              <span class="price" data-price>$297</span>
+              <span data-videos>5 videos</span>
+              <span class="price" data-price>$49.00</span>
+              <span data-timeline>5 videos over 5 days, 1 video per day</span>
             </button>
             <button type="button" class="package" data-package="growth" aria-pressed="false">
               <strong>Growth</strong>
-              <span>10 videos</span>
-              <span class="price" data-price>$547</span>
+              <span data-videos>10 videos</span>
+              <span class="price" data-price>$89.00</span>
+              <span data-timeline>10 videos over 5 days, 2 videos per day</span>
             </button>
             <button type="button" class="package" data-package="scale" aria-pressed="false">
               <strong>Scale</strong>
-              <span>20 videos</span>
-              <span class="price" data-price>$997</span>
+              <span data-videos>20 videos</span>
+              <span class="price" data-price>$197.00</span>
+              <span data-timeline>20 videos over 5 days, 4 videos per day</span>
             </button>
           </div>
         </section>
@@ -89,12 +93,17 @@
             <button type="button" class="choice" data-format="both" aria-pressed="false">Both</button>
           </div>
         </section>
+        <section class="card">
+          <p class="hint">Art style</p>
+          <div class="styles" id="art-styles" role="listbox" aria-label="Art style"></div>
+        </section>
       </div>
       <aside class="card summary" aria-live="polite">
         <p class="hint">Order summary</p>
         <p id="summary-package">Select a package</p>
         <p id="summary-length">5-minute</p>
         <p id="summary-format">16:9</p>
+        <p id="summary-style">Select an art style</p>
         <p id="summary-niche">True Crime</p>
         <p class="summary-total" id="summary-total">—</p>
         <p id="checkout-error" class="error" hidden></p>
@@ -102,6 +111,6 @@
       </aside>
     </div>
   </main>
-  <script src="/static/order.js"></script>
+  <script src="/static/order.js?v=logout1"></script>
 </body>
 </html>

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Stickman Automation</title>
-  <link rel="stylesheet" href="/static/app.css" />
+  <link rel="stylesheet" href="/static/app.css?v=logout1" />
   <style>
     /* Hide workspace until session boot finishes (no chrome flash on expiry). */
     html:not(.studio-ready) #studio-app { display: none !important; }
@@ -112,6 +112,10 @@
             <small>lip-sync jobs</small>
           </div>
         </div>
+        <button type="button" class="nav-toggle" id="nav-toggle" aria-controls="app-tabs" aria-expanded="false">
+          <span class="nav-toggle-bars" aria-hidden="true"></span>
+          <span class="nav-toggle-label">Menu</span>
+        </button>
         <nav id="app-tabs" class="tab-row util-tabs" aria-label="App">
           <button type="button" data-step="create" id="new-job-tab" class="new-job">New job</button>
           <button type="button" data-step="jobs">Jobs</button>
@@ -130,6 +134,7 @@
           </details>
           <a class="tab-link admin-only" href="/admin" id="admin-link" hidden>Admin</a>
         </nav>
+        <div class="chrome-side">
         <div class="chrome-meta">
           <p id="health-line" class="chrome-gentle">
             <span class="gentle-dot" id="gentle-dot" data-state="unknown" aria-hidden="true"></span>
@@ -149,7 +154,8 @@
             Hands-off
           </label>
           <button type="button" class="restart-api admin-only" id="restart-api" title="Restart Studio API (default port 7878). Gentle and VoiceSync stay up.">Restart API</button>
-          <button type="button" class="restart-api logout-btn" id="logout-btn" title="Sign out of Studio">Log out</button>
+          <button type="button" class="restart-api logout-btn" id="logout-btn" title="Sign out of Studio" hidden>Log out</button>
+        </div>
         </div>
       </div>
     </header>
@@ -170,6 +176,7 @@
       <div id="membership-banner" class="membership-banner" hidden>
         <span class="membership-banner-text" id="membership-banner-text">Membership required for Studio access. All members have equal privileges.</span>
         <button type="button" class="primary" id="membership-checkout">Subscribe</button>
+        <button type="button" class="primary" id="membership-renew" hidden>Renew</button>
         <button type="button" id="membership-portal">Manage billing</button>
         <button type="button" id="membership-open-sub">Subscription</button>
       </div>
@@ -330,6 +337,7 @@
           </div>
           <button type="button" class="thumb-x" id="watch-delete" title="Delete job" aria-label="Delete this job">×</button>
         </div>
+        <p id="watch-rendered" class="meta video-rendered" hidden></p>
         <div class="watch-meta card">
           <div class="watch-head">
             <div>
@@ -387,6 +395,7 @@
                     <option value="openai">OpenAI API (billed)</option>
                     <option value="chatgpt">ChatGPT (MCP)</option>
                     <option value="claude">Claude (MCP)</option>
+                    <option value="external">External via MCP</option>
                     <option value="lmstudio">LM Studio (local)</option>
                   </select>
                 </label>
@@ -624,6 +633,7 @@
             <p id="job-yt-line" class="meta">Connect YouTube in Settings to upload.</p>
           </div>
           <video id="video-player" controls hidden></video>
+          <p id="video-rendered" class="meta video-rendered" hidden></p>
           <label id="video-aspect-pick-wrap" hidden>Play
             <select id="video-aspect-pick"></select>
           </label>
@@ -645,6 +655,7 @@
           <p class="hint" id="sub-hint"></p>
           <div class="row settings-actions" id="sub-actions">
             <button type="button" class="primary" id="sub-subscribe" hidden>Subscribe</button>
+            <button type="button" class="primary" id="sub-renew" hidden>Renew</button>
             <button type="button" class="primary" id="sub-resubscribe" hidden>Resubscribe</button>
             <button type="button" id="sub-manage" hidden>Manage billing</button>
             <button type="button" id="sub-reactivate" hidden>Keep subscription</button>
@@ -705,16 +716,17 @@
               </div>
               <div class="row settings-actions" id="settings-membership-actions">
                 <button type="button" class="primary" id="settings-open-subscription">Open Subscription</button>
+                <button type="button" class="primary" id="settings-membership-renew-action" hidden>Renew</button>
                 <button type="button" class="danger" id="settings-membership-unsubscribe" hidden>Unsubscribe</button>
               </div>
-              <p class="hint">Subscribe, resubscribe, or unsubscribe from the Subscription page. Manage billing opens Stripe’s secure portal for cards and invoices.</p>
+              <p class="hint">Subscribe, renew, or unsubscribe from the Subscription page. Renew resumes a membership that is ending, or opens Stripe Checkout if it has already ended. Manage billing opens Stripe’s portal for cards and invoices.</p>
             </div>
           </details>
 
-          <details class="card settings-card admin-only" id="settings-text-card" hidden>
+          <details class="card settings-card" id="settings-text-card">
             <summary class="lib-heading settings-card-summary">Text generation</summary>
             <div class="settings-fields">
-              <p class="hint settings-lead">Script and topic writer. Edit live prompts on the Prompts tab.</p>
+              <p class="hint settings-lead">Your script and topic writer. This does not change the admin account. Edit live prompts on the Prompts tab.</p>
               <div class="field-group">
                 <label>OpenAI API key
                   <input name="openai_api_key" type="password" placeholder="sk-…" autocomplete="off" />
@@ -726,11 +738,12 @@
                     <option value="openai" selected>OpenAI API (billed)</option>
                     <option value="chatgpt">ChatGPT Desktop (MCP)</option>
                     <option value="claude">Claude Desktop (MCP)</option>
+                    <option value="external">External via MCP</option>
                     <option value="lmstudio">LM Studio (local)</option>
                   </select>
                 </label>
-                <p class="hint">OpenAI API spends chat tokens on scripts and topic batches. LM Studio uses the local OpenAI-compatible server (no OpenAI cloud). ChatGPT and Claude write natively through Desktop MCP (<code>save_script</code>, <code>create_topic</code>) — unless the writer is LM Studio, in which case they should call <code>generate_script_via_api</code>.</p>
-                <label>Auto-draft when writer is ChatGPT/Claude
+                <p class="hint">OpenAI API spends chat tokens on scripts and topic batches. LM Studio uses the local OpenAI-compatible server (no OpenAI cloud). ChatGPT, Claude, and External via MCP write the script themselves (<code>save_script</code>, <code>create_topic</code>) — unless the writer is LM Studio, in which case they should call <code>generate_script_via_api</code>.</p>
+                <label>Auto-draft when writer is ChatGPT, Claude, or External via MCP
                   <select name="script_draft_provider">
                     <option value="" selected>Off (agent writes via save_script)</option>
                     <option value="openai">OpenAI API first draft</option>
@@ -756,10 +769,10 @@
             </div>
           </details>
 
-          <details class="card settings-card admin-only" id="settings-images-card" hidden>
+          <details class="card settings-card" id="settings-images-card">
             <summary class="lib-heading settings-card-summary">Images</summary>
             <div class="settings-fields">
-              <p class="hint settings-lead">Default generator for covers and line illustrations. Jobs can override on Pictures. Flux Dev 2 (<code>fal-ai/flux-2</code>) ≈ <strong>~4.6¢</strong> per ~2MP image; ~10-min video (~56 images) ≈ <strong>~$2.60</strong>; 6 videos/day ≈ <strong>~$15–16/day</strong>.</p>
+              <p class="hint settings-lead">Your default generator for covers and line illustrations. Jobs can override on Pictures. A blank fal key does not use the admin key. Flux Dev 2 (<code>fal-ai/flux-2</code>) ≈ <strong>~4.6¢</strong> per ~2MP image; ~10-min video (~56 images) ≈ <strong>~$2.60</strong>; 6 videos/day ≈ <strong>~$15–16/day</strong>.</p>
               <div class="field-group">
                 <label>fal API key
                   <input name="fal_key" type="password" placeholder="fal-…" autocomplete="off" />
@@ -793,11 +806,12 @@
                   </select>
                 </label>
                 <p class="hint">When covers are <code>manual</code> or <code>chatgpt</code>, line art can still use Flux — Studio will not spend fal on title-cards. Use MCP <code>refresh_covers</code> to upload + re-render in one step.</p>
-              </div>
-              <div class="field-group">
                 <label>ComfyUI URL
                   <input name="comfyui_url" placeholder="http://127.0.0.1:8188" />
                 </label>
+                <p class="hint">Used when the image provider is ComfyUI. The server workflow file is shared; uploading a new graph stays on the admin account.</p>
+              </div>
+              <div class="field-group admin-only" hidden>
                 <div class="row settings-row settings-actions">
                   <label class="grow">Upload ComfyUI API JSON
                     <input type="file" id="comfyui-workflow-file" accept=".json,application/json" />
@@ -811,10 +825,10 @@
             </div>
           </details>
 
-          <details class="card settings-card admin-only" id="settings-voice-card" hidden>
+          <details class="card settings-card" id="settings-voice-card">
             <summary class="lib-heading settings-card-summary">Voice / TTS</summary>
             <div class="settings-fields">
-              <p class="hint settings-lead">Studio-wide default. Each job can override on the Voice step.</p>
+              <p class="hint settings-lead">Your default voice. Each job can still override on the Voice step. A blank ElevenLabs or OpenAI key does not use the admin key.</p>
               <div class="field-group">
                 <label>ElevenLabs API key
                   <input name="elevenlabs_api_key" type="password" placeholder="xi-…" autocomplete="off" />
@@ -834,14 +848,23 @@
                 <label>OpenAI TTS model
                   <input name="openai_tts_model" />
                 </label>
+                <label>OpenAI voice
+                  <input name="openai_voice" placeholder="coral" />
+                </label>
+                <label>ElevenLabs voice id
+                  <input name="elevenlabs_voice_id" placeholder="voice id from ElevenLabs" autocomplete="off" />
+                </label>
+                <label>Local voice
+                  <input name="local_voice" placeholder="default" />
+                </label>
               </div>
             </div>
           </details>
 
-          <details class="card settings-card admin-only" id="settings-video-card" hidden>
+          <details class="card settings-card" id="settings-video-card">
             <summary class="lib-heading settings-card-summary">Video defaults</summary>
             <div class="settings-fields">
-              <p class="hint settings-lead">Applied to new jobs. Override layout and character size on Video; aspect on New job / Video.</p>
+              <p class="hint settings-lead">Applied to your new jobs. Override layout and character size on Video; aspect on New job / Video.</p>
               <div class="field-group">
                 <div class="row settings-row">
                   <label>Video layout
@@ -867,7 +890,7 @@
                 </label>
                 <p class="hint">Cover fills the frame; billboard is a 16:9 TV screen. Bubble-head size scales around the feet so the figure stays bottom-anchored. Both writes two mp4s (16:9 then 9:16).</p>
               </div>
-              <div class="field-group" id="stickman-head-group">
+              <div class="field-group admin-only" id="stickman-head-group" hidden>
                 <p class="settings-subhead">Stickman head color</p>
                 <p class="hint">Recolors the yellow head fill on every file in <code>poses/</code>. Shadow is auto-derived (H - 10.4&deg;, L - 8.4). Outlines stay black.</p>
                 <div class="row settings-row stickman-head-row">
@@ -1208,10 +1231,11 @@
           </div>
         </details>
 
-          <div class="card settings-card settings-save-card admin-only" hidden>
+          <div class="card settings-card settings-save-card">
             <div class="settings-save-inner">
               <button type="submit" class="primary">Save settings</button>
-              <p class="hint">Keys save above. MCP connectors are on the MCP card.</p>
+              <p class="hint admin-only" hidden>Keys save above. MCP connectors are on the MCP card.</p>
+              <p class="hint member-only">Saves text generation, images, voice, video defaults, and your YouTube options for this account only.</p>
             </div>
           </div>
         </form>
@@ -1304,6 +1328,6 @@
       </div>
     </form>
   </dialog>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=logout1"></script>
 </body>
 </html>

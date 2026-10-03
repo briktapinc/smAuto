@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
@@ -18,7 +19,7 @@ from typing import Any, Iterator
 from urllib.parse import parse_qs, urlparse
 
 from studio.aspect import ALL_ASPECTS, normalize_aspect
-from studio.paths import YOUTUBE_ACCOUNTS_PATH, YOUTUBE_TOKEN_PATH, ensure_dirs
+from studio.paths import USERS_DIR, YOUTUBE_ACCOUNTS_PATH, YOUTUBE_TOKEN_PATH, ensure_dirs
 from studio.projects import (
     collect_renders,
     cover_path,
@@ -38,6 +39,7 @@ from studio.settings import (
     YOUTUBE_PRIVACY,
     load_settings,
     normalize_bool,
+    normalize_youtube_auto_upload,
     normalize_youtube_privacy,
     save_settings,
 )
@@ -46,19 +48,158 @@ from studio.thumbs import THUMB_NAME
 _log = logging.getLogger("studio.youtube")
 
 SCOPES = (
-    # force-ssl covers upload + videos.update (title rename). Reconnect after scope changes.
+    # youtube (manage account) is required to set custom thumbnails on some channels,
+    # and also covers videos.update. force-ssl / upload / readonly stay so older tokens
+    # and incremental consent still match. Reconnect after scope changes.
+    "https://www.googleapis.com/auth/youtube",
     "https://www.googleapis.com/auth/youtube.force-ssl",
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",
 )
 
+# thumbnails.set accepts any one of these. The full youtube scope is what new connects request.
+THUMBNAIL_SCOPES = (
+    "https://www.googleapis.com/auth/youtube",
+    "https://www.googleapis.com/auth/youtube.force-ssl",
+    "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtubepartner",
+)
+
+THUMBNAIL_PERMISSION_HINT = (
+    "This YouTube channel cannot set custom thumbnails. "
+    "Phone-verify the channel at https://www.youtube.com/verify "
+    "(YouTube Studio → Custom thumbnails), then call youtube_connect and sign in again "
+    "so the token includes the youtube scope."
+)
+
 _lock = threading.Lock()
-_pending: dict[str, Any] | None = None
 _PENDING_TTL = 15 * 60
+# OAuth in progress, keyed by Google state so two accounts can connect at once.
+_pendings: dict[str, dict[str, Any]] = {}
+# After Google returns several channels, finish-add is stored per owner slot.
+_picks: dict[str, dict[str, Any]] = {}
+
+# Empty string = the shared admin/server YouTube store (legacy youtube_accounts.json).
+_owner_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("youtube_owner_id", default="")
 
 
-_pending_creds: dict[str, Any] | None = None
-_pending_channels: list[dict[str, Any]] = []
+def current_youtube_owner() -> str:
+    """Member user id whose YouTube store is active, or '' for the shared admin store."""
+    return (_owner_ctx.get() or "").strip()
+
+
+@contextmanager
+def youtube_owner(user_id: str | None) -> Iterator[None]:
+    token = _owner_ctx.set((user_id or "").strip())
+    try:
+        yield
+    finally:
+        _owner_ctx.reset(token)
+
+
+@contextmanager
+def bind_youtube_user(user: dict[str, Any] | None) -> Iterator[None]:
+    """Members use their own YouTube file. Admins stay on the shared server store."""
+    uid = ""
+    if user and (user.get("role") or "") != "admin":
+        uid = str(user.get("id") or "").strip()
+    with youtube_owner(uid):
+        yield
+
+
+@contextmanager
+def bind_project_youtube(project_id: str) -> Iterator[None]:
+    """Uploads follow the job owner, so a member job never uses the admin channel."""
+    uid = ""
+    try:
+        meta = load_meta(project_id)
+        oid = str((meta or {}).get("owner_id") or "").strip()
+    except Exception:
+        oid = ""
+    if oid:
+        try:
+            from studio.members import get_user_by_id
+
+            owner = get_user_by_id(oid)
+        except Exception:
+            owner = None
+        if owner and (owner.get("role") or "") != "admin":
+            uid = str(owner.get("id") or "").strip()
+    with youtube_owner(uid):
+        yield
+
+
+def _owner_slot() -> str:
+    return current_youtube_owner() or "_shared"
+
+
+def _accounts_path() -> Path:
+    uid = current_youtube_owner()
+    if not uid:
+        return YOUTUBE_ACCOUNTS_PATH
+    safe = Path(uid).name
+    if safe != uid:
+        raise ValueError(f"Invalid YouTube owner id: {uid!r}")
+    return USERS_DIR / safe / "youtube_accounts.json"
+
+
+def _purge_pendings_locked() -> None:
+    now = time.time()
+    dead = [
+        key
+        for key, item in _pendings.items()
+        if now - float(item.get("created_at") or 0) > _PENDING_TTL
+    ]
+    for key in dead:
+        _pendings.pop(key, None)
+
+
+def _pending_for_slot(state: str = "") -> dict[str, Any] | None:
+    with _lock:
+        _purge_pendings_locked()
+        wanted = (state or "").strip()
+        if wanted and wanted in _pendings:
+            return _pendings[wanted]
+        slot = _owner_slot()
+        mine = [item for item in _pendings.values() if (item.get("owner_slot") or "_shared") == slot]
+        if len(mine) == 1:
+            return mine[0]
+        if not wanted and len(_pendings) == 1:
+            return next(iter(_pendings.values()))
+    return None
+
+
+def _drop_pending(state: str = "") -> None:
+    with _lock:
+        wanted = (state or "").strip()
+        if wanted:
+            _pendings.pop(wanted, None)
+            return
+        slot = _owner_slot()
+        for key, item in list(_pendings.items()):
+            if (item.get("owner_slot") or "_shared") == slot:
+                _pendings.pop(key, None)
+
+
+def _slot_has_pending() -> bool:
+    return _pending_for_slot() is not None
+
+
+def _read_pick() -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    with _lock:
+        blob = _picks.get(_owner_slot()) or {}
+        creds = blob.get("creds")
+        channels = list(blob.get("channels") or [])
+        return (creds if isinstance(creds, dict) else None), channels
+
+
+def _write_pick(creds: dict[str, Any] | None, channels: list[dict[str, Any]] | None = None) -> None:
+    with _lock:
+        slot = _owner_slot()
+        if not creds:
+            _picks.pop(slot, None)
+            return
+        _picks[slot] = {"creds": creds, "channels": list(channels or [])}
 
 
 def _cred_payload_from_creds(creds: Any) -> dict[str, Any]:
@@ -74,7 +215,76 @@ def _cred_payload_from_creds(creds: Any) -> dict[str, Any]:
     }
 
 
+def _granted_scopes(entry: dict[str, Any]) -> list[str]:
+    creds = entry.get("credentials") if isinstance(entry.get("credentials"), dict) else {}
+    raw = creds.get("scopes") or []
+    if isinstance(raw, str):
+        raw = raw.split()
+    return [str(scope).strip() for scope in raw if str(scope).strip()]
+
+
+def thumbnail_permission_view(entry: dict[str, Any]) -> dict[str, Any]:
+    """OAuth thumbnail grant plus the last custom-thumbnail API result. No tokens."""
+    scopes = _granted_scopes(entry)
+    granted_names: list[str] = []
+    for scope in scopes:
+        if scope in THUMBNAIL_SCOPES:
+            name = scope.rstrip("/").rsplit("/", 1)[-1]
+            if name not in granted_names:
+                granted_names.append(name)
+    scope_granted = bool(granted_names)
+    allowed = entry.get("custom_thumbnail_allowed")
+    if not isinstance(allowed, bool):
+        allowed = None
+    manage_scope = "https://www.googleapis.com/auth/youtube" in scopes
+    note = ""
+    if not scope_granted:
+        note = (
+            "Token is missing thumbnail permission. Call youtube_connect and sign in again "
+            "to grant the youtube scope (custom thumbnails)."
+        )
+    elif not manage_scope:
+        note = (
+            "Connected token can upload, but it does not include the youtube account scope "
+            "used for custom thumbnails. Call youtube_connect and sign in again to add it."
+        )
+    elif allowed is False:
+        note = (entry.get("custom_thumbnail_error") or "").strip() or THUMBNAIL_PERMISSION_HINT
+    return {
+        "thumbnail_permission": scope_granted,
+        "thumbnail_scopes": granted_names,
+        "youtube_manage_scope": manage_scope,
+        "custom_thumbnail_allowed": allowed,
+        "thumbnail_permission_note": note,
+    }
+
+
+def _remember_thumbnail_result(channel_id: str, *, allowed: bool, error: str = "") -> None:
+    """Store the last custom-thumbnail outcome on the connected account. No token changes."""
+    cid = (channel_id or "").strip()
+    if not cid:
+        return
+    store = _load_accounts_store()
+    accounts: list[dict[str, Any]] = []
+    changed = False
+    for item in store.get("accounts") or []:
+        if not isinstance(item, dict):
+            continue
+        entry = dict(item)
+        if (entry.get("channel_id") or entry.get("id") or "").strip() == cid:
+            entry["custom_thumbnail_allowed"] = bool(allowed)
+            entry["custom_thumbnail_error"] = "" if allowed else (error or THUMBNAIL_PERMISSION_HINT)
+            changed = True
+        accounts.append(entry)
+    if not changed:
+        return
+    _save_accounts_store(
+        {"version": 1, "default_id": store.get("default_id") or "", "accounts": accounts}
+    )
+
+
 def _public_account(entry: dict[str, Any]) -> dict[str, Any]:
+    thumb = thumbnail_permission_view(entry)
     return {
         "id": entry.get("id") or entry.get("channel_id") or "",
         "channel_id": entry.get("channel_id") or entry.get("id") or "",
@@ -84,6 +294,7 @@ def _public_account(entry: dict[str, Any]) -> dict[str, Any]:
         "thumbnail": entry.get("thumbnail") or "",
         "is_default": bool(entry.get("is_default")),
         "connected_at": entry.get("connected_at") or "",
+        **thumb,
     }
 
 
@@ -92,8 +303,10 @@ def _empty_store() -> dict[str, Any]:
 
 
 def _migrate_legacy_token_locked() -> dict[str, Any]:
-    """One-time: single youtube_token.json + settings channel → accounts store."""
+    """One-time: single youtube_token.json + settings channel → the shared admin store."""
     store = _empty_store()
+    if current_youtube_owner():
+        return store
     if not YOUTUBE_TOKEN_PATH.is_file():
         return store
     try:
@@ -124,13 +337,16 @@ def _migrate_legacy_token_locked() -> dict[str, Any]:
 
 def _load_accounts_store() -> dict[str, Any]:
     ensure_dirs()
-    if YOUTUBE_ACCOUNTS_PATH.is_file():
+    path = _accounts_path()
+    if path.is_file():
         try:
-            data = json.loads(YOUTUBE_ACCOUNTS_PATH.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             data = None
         if isinstance(data, dict) and isinstance(data.get("accounts"), list):
             return data
+    if current_youtube_owner():
+        return _empty_store()
     return _migrate_legacy_token_locked()
 
 
@@ -160,7 +376,12 @@ def _sync_default_settings(store: dict[str, Any]) -> None:
 
 
 def _mirror_default_token(store: dict[str, Any]) -> None:
-    """Keep legacy youtube_token.json as a copy of the default account credentials."""
+    """Keep legacy youtube_token.json as a copy of the shared admin default credentials.
+
+    Member stores never write this file, so a member connect cannot replace the admin token.
+    """
+    if current_youtube_owner():
+        return
     default_id = (store.get("default_id") or "").strip()
     entry = None
     for item in store.get("accounts") or []:
@@ -206,13 +427,80 @@ def _save_accounts_store(store: dict[str, Any]) -> dict[str, Any]:
         accounts[0]["is_default"] = True
         default_id = (accounts[0].get("channel_id") or accounts[0].get("id") or "").strip()
     out = {"version": 1, "default_id": default_id, "accounts": accounts}
-    YOUTUBE_ACCOUNTS_PATH.write_text(json.dumps(out, indent=2), encoding="utf-8")
+    prefs = store.get("prefs") if isinstance(store.get("prefs"), dict) else None
+    if prefs is None and current_youtube_owner():
+        prev = _load_accounts_store()
+        if isinstance(prev.get("prefs"), dict):
+            prefs = prev["prefs"]
+    if isinstance(prefs, dict):
+        out["prefs"] = prefs
+    path = _accounts_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(out, indent=2), encoding="utf-8")
     _mirror_default_token(out)
-    try:
-        _sync_default_settings(out)
-    except Exception:
-        pass
+    if not current_youtube_owner():
+        try:
+            _sync_default_settings(out)
+        except Exception:
+            pass
     return out
+
+
+def owner_youtube_prefs() -> dict[str, Any]:
+    """Auto-upload, privacy, and delete-after for the active YouTube owner.
+
+    The shared admin store reads Settings. A member store keeps its own prefs so
+    saving YouTube never rewrites the admin defaults.
+    """
+    if not current_youtube_owner():
+        settings = load_settings()
+        return {
+            "auto_upload": bool(settings.get("youtube_auto_upload")),
+            "privacy": normalize_youtube_privacy(settings.get("youtube_privacy")),
+            "delete_file_after_upload": normalize_bool(
+                settings.get("youtube_delete_file_after_upload"), True
+            ),
+        }
+    store = _load_accounts_store()
+    prefs = store.get("prefs") if isinstance(store.get("prefs"), dict) else {}
+    return {
+        "auto_upload": normalize_bool(prefs.get("auto_upload"), False),
+        "privacy": normalize_youtube_privacy(prefs.get("privacy") or "unlisted"),
+        "delete_file_after_upload": normalize_bool(prefs.get("delete_file_after_upload"), True),
+    }
+
+
+def save_owner_youtube_prefs(
+    *,
+    auto_upload: Any = None,
+    privacy: str | None = None,
+    delete_file_after_upload: Any = None,
+) -> dict[str, Any]:
+    """Persist YouTube prefs for the active owner. Members never touch settings.json."""
+    if not current_youtube_owner():
+        updates: dict[str, Any] = {}
+        if auto_upload is not None:
+            updates["youtube_auto_upload"] = normalize_youtube_auto_upload(auto_upload)
+        if privacy:
+            updates["youtube_privacy"] = normalize_youtube_privacy(privacy)
+        if delete_file_after_upload is not None:
+            updates["youtube_delete_file_after_upload"] = normalize_bool(
+                delete_file_after_upload, True
+            )
+        if updates:
+            save_settings(updates)
+        return status()
+    store = _load_accounts_store()
+    prefs = dict(store.get("prefs") or {}) if isinstance(store.get("prefs"), dict) else {}
+    if auto_upload is not None:
+        prefs["auto_upload"] = normalize_youtube_auto_upload(auto_upload)
+    if privacy:
+        prefs["privacy"] = normalize_youtube_privacy(privacy)
+    if delete_file_after_upload is not None:
+        prefs["delete_file_after_upload"] = normalize_bool(delete_file_after_upload, True)
+    store["prefs"] = prefs
+    _save_accounts_store(store)
+    return status()
 
 
 def connected_accounts() -> list[dict[str, Any]]:
@@ -275,8 +563,11 @@ def _upsert_account(
         "thumbnail": thumbnail or ((existing or {}).get("thumbnail") or ""),
         "is_default": False,
         "credentials": credentials,
-        "connected_at": _now(),
+        "connected_at": (existing or {}).get("connected_at") or _now(),
     }
+    if existing and "custom_thumbnail_allowed" in existing:
+        entry["custom_thumbnail_allowed"] = existing.get("custom_thumbnail_allowed")
+        entry["custom_thumbnail_error"] = existing.get("custom_thumbnail_error") or ""
     if existing is None:
         accounts.append(entry)
     else:
@@ -413,7 +704,9 @@ def is_connected() -> bool:
         creds = item.get("credentials") or {}
         if isinstance(creds, dict) and (creds.get("refresh_token") or creds.get("token")):
             return True
-    # Legacy single-token file (pre-migration callers / race before first load).
+    # Legacy single-token file belongs to the shared admin store only.
+    if current_youtube_owner():
+        return False
     if YOUTUBE_TOKEN_PATH.is_file():
         try:
             data = json.loads(YOUTUBE_TOKEN_PATH.read_text(encoding="utf-8"))
@@ -481,7 +774,14 @@ def _credentials_from_info(info: dict[str, Any], *, channel_id: str = "") -> Any
         data["client_id"] = cid
     if secret:
         data["client_secret"] = secret
-    creds = Credentials.from_authorized_user_info(data, SCOPES)
+    # Refresh with the scopes this token was actually granted. Passing the wider
+    # SCOPES list (which now includes youtube) would make Google reject refresh
+    # with invalid_scope until the user reconnects.
+    granted = data.get("scopes")
+    if isinstance(granted, str):
+        granted = granted.split()
+    scope_list = [str(s).strip() for s in (granted or []) if str(s).strip()] or list(SCOPES)
+    creds = Credentials.from_authorized_user_info(data, scope_list)
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
         _save_credentials(creds, channel_id=channel_id)
@@ -544,6 +844,8 @@ def _format_http_error(exc: Exception) -> str:
         )
     if "youtubesignuprequired" in blob or "youtubeSignupRequired" in reason:
         return "This Google account has no YouTube channel. Create a channel on YouTube, then reconnect."
+    if "thumbnail" in blob and ("permission" in blob or "forbidden" in blob or "authorized" in blob):
+        return THUMBNAIL_PERMISSION_HINT
     if "forbidden" in blob or "accessnotconfigured" in blob:
         return (
             "YouTube Data API is not enabled or this OAuth client is not allowed. "
@@ -573,14 +875,17 @@ def start_connect(*, open_browser: bool = True) -> dict[str, Any]:
     auth_url, state = flow.authorization_url(
         access_type="offline",
         prompt="consent",
+        include_granted_scopes="true",
     )
     with _lock:
-        global _pending
-        _pending = {
+        _purge_pendings_locked()
+        _pendings[state] = {
             "flow": flow,
             "state": state,
             "redirect_uri": redirect_uri,
             "created_at": time.time(),
+            "owner_id": current_youtube_owner(),
+            "owner_slot": _owner_slot(),
         }
     opened = False
     if open_browser:
@@ -604,16 +909,12 @@ def start_connect(*, open_browser: bool = True) -> dict[str, Any]:
     }
 
 
-def _pending_flow():
-    global _pending
-    with _lock:
-        pending = _pending
+def _pending_flow(state: str = ""):
+    pending = _pending_for_slot(state)
     if not pending:
         return None
     if time.time() - float(pending.get("created_at") or 0) > _PENDING_TTL:
-        with _lock:
-            if _pending is pending:
-                _pending = None
+        _drop_pending(str(pending.get("state") or ""))
         return None
     return pending
 
@@ -638,12 +939,29 @@ def _channels_for_creds(creds: Any) -> list[dict[str, Any]]:
 
 
 def finish_oauth(*, code: str = "", state: str = "", authorization_response: str = "") -> dict[str, Any]:
-    pending = _pending_flow()
+    pending = _pending_flow(state)
     if not pending:
         raise RuntimeError(
             "No YouTube sign-in is in progress (or it expired). Click Connect YouTube "
             "in Settings or open the Studio connect URL in your browser again."
         )
+    owner_id = str(pending.get("owner_id") or "").strip()
+    with youtube_owner(owner_id):
+        return _finish_oauth_for_owner(
+            pending,
+            code=code,
+            state=state,
+            authorization_response=authorization_response,
+        )
+
+
+def _finish_oauth_for_owner(
+    pending: dict[str, Any],
+    *,
+    code: str = "",
+    state: str = "",
+    authorization_response: str = "",
+) -> dict[str, Any]:
     flow = pending["flow"]
     expected = pending.get("state") or ""
     if state and expected and state != expected:
@@ -670,26 +988,19 @@ def finish_oauth(*, code: str = "", state: str = "", authorization_response: str
         # Still store; user may need to reconnect with prompt=consent.
         pass
     payload = _cred_payload_from_creds(creds)
-    with _lock:
-        global _pending, _pending_creds, _pending_channels
-        _pending = None
-        _pending_creds = payload
-        _pending_channels = []
+    _drop_pending(str(expected or ""))
+    _write_pick(payload, [])
     try:
         items = _channels_for_creds(creds)
     except Exception as exc:
         # Keep pending creds so the user can retry channel pick / reconnect.
-        with _lock:
-            _pending_channels = []
+        _write_pick(payload, [])
         raise RuntimeError(f"Signed in, but could not list YouTube channels: {exc}") from exc
-    with _lock:
-        _pending_channels = list(items)
+    _write_pick(payload, list(items))
     existing = connected_accounts()
     make_default = len(existing) == 0
     if not items:
-        with _lock:
-            _pending_creds = None
-            _pending_channels = []
+        _write_pick(None, [])
         raise RuntimeError(
             "This Google account has no YouTube channel. Create a channel on YouTube, then reconnect."
         )
@@ -710,10 +1021,8 @@ def finish_oauth(*, code: str = "", state: str = "", authorization_response: str
             thumbnail=auto.get("thumbnail") or "",
             make_default=True if make_default else False,
         )
-        with _lock:
-            _pending_creds = None
-            _pending_channels = []
-    # else: leave _pending_creds so set_channel can finish adding from pending_channels
+        _write_pick(None, [])
+    # else: leave the pick so set_channel can finish adding from pending channels
     return status()
 
 
@@ -761,34 +1070,22 @@ def disconnect(channel_id: str = "") -> dict[str, Any]:
         _save_accounts_store({"version": 1, "default_id": default_id, "accounts": accounts})
     else:
         _save_accounts_store(_empty_store())
-        if YOUTUBE_TOKEN_PATH.is_file():
+        if not current_youtube_owner() and YOUTUBE_TOKEN_PATH.is_file():
             try:
                 YOUTUBE_TOKEN_PATH.unlink()
             except OSError:
                 pass
-        if YOUTUBE_ACCOUNTS_PATH.is_file():
-            try:
-                # rewritten empty by _save_accounts_store already
-                pass
-            except OSError:
-                pass
-    with _lock:
-        global _pending, _pending_creds, _pending_channels
-        if not wanted:
-            _pending = None
-            _pending_creds = None
-            _pending_channels = []
+    if not wanted:
+        _drop_pending()
+        _write_pick(None, [])
     return status()
 
 
 def set_channel(channel_id: str, title: str = "") -> dict[str, Any]:
     """Set the default upload channel, or finish adding a pending OAuth channel."""
-    global _pending_creds, _pending_channels
     cid = (channel_id or "").strip()
     label = (title or "").strip()
-    with _lock:
-        pending_creds = _pending_creds
-        pending_channels = list(_pending_channels or [])
+    pending_creds, pending_channels = _read_pick()
     if pending_creds and cid:
         match = next((c for c in pending_channels if c.get("id") == cid), None)
         if match is None and pending_channels:
@@ -807,9 +1104,7 @@ def set_channel(channel_id: str, title: str = "") -> dict[str, Any]:
             thumbnail=(match or {}).get("thumbnail") or "",
             make_default=len(existing) == 0,
         )
-        with _lock:
-            _pending_creds = None
-            _pending_channels = []
+        _write_pick(None, [])
         return status()
     if not cid:
         raise RuntimeError("Select a YouTube channel id.")
@@ -840,9 +1135,8 @@ def list_channels(*, force: bool = False) -> dict[str, Any]:
     """Return connected channels (multi-account store). force kept for API compat."""
     del force  # connected store does not need a live Google round-trip
     accounts = connected_accounts()
-    with _lock:
-        pending_channels = list(_pending_channels or [])
-        has_pending = _pending_creds is not None
+    _pending_creds, pending_channels = _read_pick()
+    has_pending = _pending_creds is not None
     channels = [
         {
             "id": a.get("channel_id") or a.get("id") or "",
@@ -850,6 +1144,11 @@ def list_channels(*, force: bool = False) -> dict[str, Any]:
             "custom_url": a.get("custom_url") or "",
             "thumbnail": a.get("thumbnail") or "",
             "is_default": bool(a.get("is_default")),
+            "thumbnail_permission": bool(a.get("thumbnail_permission")),
+            "thumbnail_scopes": list(a.get("thumbnail_scopes") or []),
+            "youtube_manage_scope": bool(a.get("youtube_manage_scope")),
+            "custom_thumbnail_allowed": a.get("custom_thumbnail_allowed"),
+            "thumbnail_permission_note": a.get("thumbnail_permission_note") or "",
         }
         for a in accounts
     ]
@@ -869,15 +1168,16 @@ def status() -> dict[str, Any]:
     store = _load_accounts_store()
     accounts = connected_accounts()
     connected = bool(accounts)
-    pending = _pending_flow() is not None
-    with _lock:
-        pending_pick = _pending_creds is not None and bool(_pending_channels)
-        pending_channels = list(_pending_channels or []) if pending_pick else []
+    pending = _slot_has_pending()
+    pending_creds, pending_channels = _read_pick()
+    pending_pick = pending_creds is not None and bool(pending_channels)
+    if not pending_pick:
+        pending_channels = []
     error = ""
     default = _find_account_entry("", prefer_default=True)
     channel_id = ((default or {}).get("channel_id") or (default or {}).get("id") or "").strip()
     channel_title = ((default or {}).get("channel_title") or "").strip()
-    if not channel_id:
+    if not channel_id and not current_youtube_owner():
         channel_id = (settings.get("youtube_channel_id") or "").strip()
         channel_title = channel_title or (settings.get("youtube_channel_title") or "").strip()
     channels = [
@@ -887,6 +1187,11 @@ def status() -> dict[str, Any]:
             "custom_url": a.get("custom_url") or "",
             "thumbnail": a.get("thumbnail") or "",
             "is_default": bool(a.get("is_default")),
+            "thumbnail_permission": bool(a.get("thumbnail_permission")),
+            "thumbnail_scopes": list(a.get("thumbnail_scopes") or []),
+            "youtube_manage_scope": bool(a.get("youtube_manage_scope")),
+            "custom_thumbnail_allowed": a.get("custom_thumbnail_allowed"),
+            "thumbnail_permission_note": a.get("thumbnail_permission_note") or "",
         }
         for a in accounts
     ]
@@ -914,6 +1219,19 @@ def status() -> dict[str, Any]:
         )
     elif pending_pick:
         msg = "Add another channel: pick it from the list to finish connecting."
+    default_account = next((a for a in accounts if a.get("is_default")), accounts[0] if accounts else {})
+    if not default_account.get("thumbnail_permission"):
+        perm_note = default_account.get("thumbnail_permission_note") or (
+            "No YouTube channel is connected. youtube_connect grants the youtube scope used for custom thumbnails."
+            if not connected
+            else ""
+        )
+    else:
+        perm_note = default_account.get("thumbnail_permission_note") or ""
+    if perm_note and connected and "thumbnail" not in msg.lower():
+        msg = f"{msg} {perm_note}".strip()
+    prefs = owner_youtube_prefs()
+    scope = "member" if current_youtube_owner() else "admin"
     return {
         "ok": True,
         "connected": connected,
@@ -925,17 +1243,20 @@ def status() -> dict[str, Any]:
         "default_channel_id": channel_id,
         "channels": channels,
         "accounts": accounts,
-        "auto_upload": bool(settings.get("youtube_auto_upload")),
-        "delete_file_after_upload": normalize_bool(
-            settings.get("youtube_delete_file_after_upload"), True
-        ),
-        "privacy": normalize_youtube_privacy(settings.get("youtube_privacy")),
+        "scope": scope,
+        "auto_upload": bool(prefs.get("auto_upload")),
+        "delete_file_after_upload": bool(prefs.get("delete_file_after_upload")),
+        "privacy": prefs.get("privacy") or normalize_youtube_privacy(settings.get("youtube_privacy")),
         "privacy_options": list(YOUTUBE_PRIVACY),
+        "thumbnail_permission": bool(default_account.get("thumbnail_permission")),
+        "thumbnail_scopes": list(default_account.get("thumbnail_scopes") or []),
+        "youtube_manage_scope": bool(default_account.get("youtube_manage_scope")),
+        "custom_thumbnail_allowed": default_account.get("custom_thumbnail_allowed"),
+        "thumbnail_permission_note": perm_note,
         "studio_connect_url": connect_page_url(),
         "redirect_uri": oauth_redirect_uri(),
         "error": error,
-        "token_path": str(YOUTUBE_TOKEN_PATH),
-        "accounts_path": str(YOUTUBE_ACCOUNTS_PATH),
+        "accounts_path": str(_accounts_path()),
         "message": msg,
         "account_count": len(accounts),
     }
@@ -946,7 +1267,12 @@ def _file_ok(path: Path, min_bytes: int = 1000) -> bool:
 
 
 def delete_file_after_upload_enabled() -> bool:
-    """Global setting: remove local mp4 + render assets after a successful YouTube upload. Default True."""
+    """Remove local mp4 + render assets after a successful YouTube upload. Default True.
+
+    Members use the prefs on their own YouTube store. The admin uses Settings.
+    """
+    if current_youtube_owner():
+        return bool(owner_youtube_prefs().get("delete_file_after_upload"))
     return normalize_bool(load_settings().get("youtube_delete_file_after_upload"), True)
 
 
@@ -1173,7 +1499,8 @@ def _resolve_privacy(project_id: str, override: str | None) -> str:
     stored = (meta.get("youtube_privacy") or "").strip()
     if stored:
         return normalize_youtube_privacy(stored)
-    return normalize_youtube_privacy(load_settings().get("youtube_privacy"))
+    with bind_project_youtube(project_id):
+        return normalize_youtube_privacy(owner_youtube_prefs().get("privacy"))
 
 
 def _compose_description(meta: dict[str, Any], override: str | None = None) -> str:
@@ -1215,7 +1542,8 @@ def job_auto_upload(project_id: str) -> bool:
     meta = load_meta(project_id)
     if "youtube_auto_upload" in meta and meta["youtube_auto_upload"] is not None:
         return bool(meta["youtube_auto_upload"])
-    return bool(load_settings().get("youtube_auto_upload"))
+    with bind_project_youtube(project_id):
+        return bool(owner_youtube_prefs().get("auto_upload"))
 
 
 def _picked_channel(
@@ -1325,7 +1653,14 @@ def _prepare_youtube_thumbnail(
     return dest
 
 
-def _set_youtube_thumbnail(youtube, video_id: str, thumb_path: Path, *, progress=None) -> dict:
+def _set_youtube_thumbnail(
+    youtube,
+    video_id: str,
+    thumb_path: Path,
+    *,
+    progress=None,
+    channel_id: str = "",
+) -> dict:
     """Upload custom thumbnail; retry once after re-compress. Raises on failure."""
     from googleapiclient.errors import HttpError
     from googleapiclient.http import MediaFileUpload
@@ -1350,6 +1685,7 @@ def _set_youtube_thumbnail(youtube, video_id: str, thumb_path: Path, *, progress
                 videoId=video_id,
                 media_body=MediaFileUpload(str(thumb_path), mimetype="image/jpeg", resumable=False),
             ).execute()
+            _remember_thumbnail_result(channel_id, allowed=True)
             return {"ok": True, "bytes": size, "attempt": attempt}
         except Exception as exc:
             if isinstance(exc, HttpError):
@@ -1357,8 +1693,8 @@ def _set_youtube_thumbnail(youtube, video_id: str, thumb_path: Path, *, progress
             else:
                 last_err = str(exc)
             log.warning("YouTube thumbnail upload failed attempt=%s: %s", attempt, last_err)
-            if attempt == 1:
-                # Re-compress harder and retry once.
+            if attempt == 1 and THUMBNAIL_PERMISSION_HINT not in last_err:
+                # Re-compress harder and retry once. Permission failures will not change.
                 try:
                     from studio.image_normalize import YT_THUMB_MAX_BYTES, write_jpeg_under
 
@@ -1368,10 +1704,84 @@ def _set_youtube_thumbnail(youtube, video_id: str, thumb_path: Path, *, progress
                 except Exception as prep_exc:
                     last_err = f"{last_err}; recompress failed: {prep_exc}"
                     break
+            elif THUMBNAIL_PERMISSION_HINT in last_err:
+                break
+    if THUMBNAIL_PERMISSION_HINT in last_err:
+        _remember_thumbnail_result(channel_id, allowed=False, error=last_err)
     raise RuntimeError(
         f"YouTube thumbnail upload failed after retry: {last_err}. "
         "Video uploaded, but custom thumbnail was not set."
     )
+
+
+def set_project_thumbnail(
+    project_id: str,
+    aspect: str | None = None,
+    channel_id: str | None = None,
+) -> dict[str, Any]:
+    """Set the custom thumbnail on an already-uploaded video. Requires thumbnail permission."""
+    with bind_project_youtube(project_id):
+        return _set_project_thumbnail(project_id, aspect=aspect, channel_id=channel_id)
+
+
+def _set_project_thumbnail(
+    project_id: str,
+    aspect: str | None = None,
+    channel_id: str | None = None,
+) -> dict[str, Any]:
+    if not is_connected():
+        raise RuntimeError(
+            "YouTube is not connected. Open the Studio connect URL in your system browser "
+            f"({connect_page_url()}) — MCP cannot show a popup."
+        )
+    meta = load_meta(project_id)
+    video_id = _stored_youtube_video_id(meta)
+    if not video_id:
+        raise RuntimeError("This job has no YouTube video_id yet. Upload the video first.")
+    wanted = normalize_aspect(aspect) if aspect else None
+    thumbs = _thumb_candidates(project_id, wanted)
+    if not thumbs:
+        raise RuntimeError("No cover/thumbnail file found to upload as the YouTube custom thumbnail.")
+    channel = _picked_channel(project_id, channel_id=channel_id, require_channel=False)
+    title_text = (meta.get("title") or meta.get("topic") or project_id).strip()[:100]
+    tag_list = _resolve_tags(meta)
+    upload_aspect = wanted or meta.get("last_render_aspect") or ""
+    prepared = _prepare_youtube_thumbnail(
+        thumbs[0],
+        project_id,
+        title=title_text,
+        tags=tag_list,
+        aspect=str(upload_aspect or "") or None,
+    )
+    staged_thumb = prepared if prepared.parent.name == "_yt_upload" else None
+    youtube = _youtube_service(channel_id=channel.get("id") or "")
+    try:
+        thumb_meta = _set_youtube_thumbnail(
+            youtube,
+            video_id,
+            prepared,
+            channel_id=channel.get("id") or "",
+        )
+    finally:
+        _cleanup_seo_staging(project_id, staged_thumb)
+    stored = load_meta(project_id)
+    blob = stored.get("youtube") if isinstance(stored.get("youtube"), dict) else {}
+    blob = dict(blob)
+    blob["thumbnail"] = thumb_meta
+    blob["thumbnail_error"] = ""
+    stored["youtube"] = blob
+    stored["youtube_thumbnail_error"] = None
+    save_meta(project_id, stored)
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "video_id": video_id,
+        "url": f"https://youtu.be/{video_id}",
+        "channel_id": channel.get("id") or "",
+        "channel_title": channel.get("title") or "",
+        "thumbnail": thumb_meta,
+        "thumbnail_permission": True,
+    }
 
 
 def upload_project_video(
@@ -1385,6 +1795,7 @@ def upload_project_video(
     *,
     require_channel: bool = False,
     progress=None,
+    _scoped: bool = False,
 ) -> dict[str, Any]:
     """Upload a finished mp4 (preferred aspect, else last render / script_final.mp4). Raises on failure.
 
@@ -1392,6 +1803,20 @@ def upload_project_video(
     When omitted, uses the job override, then the workspace default channel.
     require_channel=True (MCP) refuses ambiguous multi-channel uploads without an explicit id.
     """
+    if not _scoped:
+        with bind_project_youtube(project_id):
+            return upload_project_video(
+                project_id,
+                privacy_status,
+                title,
+                description,
+                tags,
+                aspect,
+                channel_id,
+                require_channel=require_channel,
+                progress=progress,
+                _scoped=True,
+            )
     _require_google()
     from googleapiclient.errors import HttpError
     from googleapiclient.http import MediaFileUpload
@@ -1489,7 +1914,13 @@ def upload_project_video(
                 aspect=str(upload_aspect or "") or None,
             )
             staged_thumb = prepared if prepared.parent.name == "_yt_upload" else None
-            thumb_meta = _set_youtube_thumbnail(youtube, video_id, prepared, progress=progress)
+            thumb_meta = _set_youtube_thumbnail(
+                youtube,
+                video_id,
+                prepared,
+                progress=progress,
+                channel_id=channel.get("id") or "",
+            )
         except Exception as exc:
             # Surface clearly — never silently skip; do not change privacy / stop uploader.
             thumb_error = str(exc)
@@ -1563,8 +1994,11 @@ def _stored_youtube_video_id(meta: dict[str, Any]) -> str:
     return ""
 
 
-def update_uploaded_video_title(project_id: str, title: str) -> dict[str, Any]:
+def update_uploaded_video_title(project_id: str, title: str, *, _scoped: bool = False) -> dict[str, Any]:
     """Update the YouTube listing title for a job that already uploaded. Skips if no video_id."""
+    if not _scoped:
+        with bind_project_youtube(project_id):
+            return update_uploaded_video_title(project_id, title, _scoped=True)
     title_text = (title or "").strip()[:100]
     if not title_text:
         raise RuntimeError("title is required.")
@@ -1631,8 +2065,11 @@ def update_uploaded_video_title(project_id: str, title: str) -> dict[str, Any]:
     }
 
 
-def maybe_auto_upload(project_id: str, progress=None) -> dict[str, Any]:
+def maybe_auto_upload(project_id: str, progress=None, *, _scoped: bool = False) -> dict[str, Any]:
     """After a successful render. Never raises; caller should not fail the mp4."""
+    if not _scoped:
+        with bind_project_youtube(project_id):
+            return maybe_auto_upload(project_id, progress=progress, _scoped=True)
     if not job_auto_upload(project_id):
         return {"skipped": True, "reason": "auto_upload_off"}
     if not is_connected():

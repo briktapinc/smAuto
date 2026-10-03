@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -13,6 +14,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from studio import auth as studio_auth
+
+_log = logging.getLogger("studio.web")
 
 from studio.aspect import DEFAULT_ASPECT, normalize_aspect, normalize_job_aspect
 from studio.backgrounds import catalog_payload as backgrounds_catalog, resolve_background
@@ -313,6 +316,11 @@ class SettingsBody(BaseModel):
     email_from_name: str | None = None
     email_reply_to: str | None = None
     email_templates: dict[str, Any] | None = None
+    mailjet_api_key: str | None = None
+    mailjet_secret_key: str | None = None
+    mailjet_from_email: str | None = None
+    mailjet_from_name: str | None = None
+    mailjet_sender_domain: str | None = None
 
 
 class SpendConfirmBody(BaseModel):
@@ -390,6 +398,12 @@ class YoutubeChannelBody(BaseModel):
 
 class YoutubeDisconnectBody(BaseModel):
     channel_id: str = ""
+
+
+class YoutubePrefsBody(BaseModel):
+    auto_upload: bool | None = None
+    privacy: str = ""
+    delete_file_after_upload: bool | None = None
 
 
 class YoutubeUploadBody(BaseModel):
@@ -475,10 +489,21 @@ class OrderCheckoutBody(BaseModel):
     package: str = ""
     video_length: str = "5"
     format: str = "16:9"
+    art_style: str = ""
 
 
-class MyOrdersBody(BaseModel):
-    email: str = ""
+class OrderPricingBody(BaseModel):
+    packages: dict[str, Any] = {}
+    ten_minute_multiplier: float | None = None
+
+
+class OrderArtStylesBody(BaseModel):
+    styles: list[dict[str, Any]] = []
+
+
+class OrderArtStyleBody(BaseModel):
+    id: str = ""
+    name: str = ""
 
 
 class OrderStatusBody(BaseModel):
@@ -601,8 +626,22 @@ class AuditASGIMiddleware:
             pass
 
 
+# Account pages. Anonymous visitors never receive the template.
+# / and /app serve the login document itself. /order stays open so a guest can start checkout.
+PRIVATE_HTML_PATHS = frozenset({
+    "/my-orders",
+    "/admin",
+    "/pricing",
+    "/production",
+})
+
+
 class AuthASGIMiddleware:
-    """JWT for /api + docs/OpenAPI. Pure ASGI so multipart uploads are not buffered."""
+    """JWT for /api + docs/OpenAPI. Pure ASGI so multipart uploads are not buffered.
+
+    Also refuses private HTML (My orders, admin, pricing, production) before the
+    template is read. Studio may be requested as /my-orders or /app/my-orders.
+    """
 
     def __init__(self, app):
         self.app = app
@@ -611,14 +650,25 @@ class AuthASGIMiddleware:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
+        path = _strip_studio_prefix(scope.get("path") or "")
+        if len(path) > 1 and path.endswith("/"):
+            path = path.rstrip("/")
+        if path != (scope.get("path") or ""):
+            scope["path"] = path
+            scope["raw_path"] = path.encode("utf-8")
         # Electron/.exe desktop: single-user local app — skip JWT, membership, tenant gates.
         if studio_auth.is_desktop_mode():
             await self.app(scope, receive, send)
             return
-        path = scope.get("path") or ""
         if studio_auth.is_mcp_path(path):
             await self.app(scope, receive, send)
             return
+        if path in PRIVATE_HTML_PATHS:
+            request = Request(scope, receive=receive)
+            blocked = _block_anonymous_page(request, path)
+            if blocked is not None:
+                await blocked(scope, receive, send)
+                return
         if studio_auth.path_requires_auth(path):
             request = Request(scope, receive=receive)
             tokens = studio_auth.extract_tokens(request)
@@ -641,6 +691,16 @@ class AuthASGIMiddleware:
                 body = JSONResponse({"detail": last_detail}, status_code=last_status)
                 await body(scope, receive, send)
                 return
+            try:
+                buyer_user = studio_auth.require_session(request)
+            except HTTPException:
+                buyer_user = None
+            if buyer_user is not None:
+                buyer_detail = studio_auth.buyer_api_denial(buyer_user, path)
+                if buyer_detail:
+                    body = JSONResponse({"detail": buyer_detail}, status_code=403)
+                    await body(scope, receive, send)
+                    return
             if studio_auth.path_requires_membership(path, scope.get("method") or "GET"):
                 try:
                     from studio.members import user_has_access
@@ -695,7 +755,21 @@ class AuthASGIMiddleware:
                             body = JSONResponse({"detail": detail}, status_code=exc.status_code)
                             await body(scope, receive, send)
                             return
-        await self.app(scope, receive, send)
+        settings_cm = None
+        if studio_auth.path_requires_auth(path):
+            from studio.settings import bind_settings_user
+
+            try:
+                session_user = studio_auth.require_session(request)
+            except Exception:
+                session_user = None
+            settings_cm = bind_settings_user(session_user)
+            settings_cm.__enter__()
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            if settings_cm is not None:
+                settings_cm.__exit__(None, None, None)
 
 
 class McpAuthASGIMiddleware:
@@ -781,6 +855,24 @@ def _studio_prefix() -> str:
     return studio_url_prefix()
 
 
+def _strip_studio_prefix(path: str) -> str:
+    """Map /app/my-orders → /my-orders when Studio is mounted under a prefix.
+
+    Nginx usually strips the prefix before proxying. Direct requests still
+    arrive with it, and both must hit the same auth gate.
+    """
+    prefix = _studio_prefix()
+    raw = path or "/"
+    if not prefix:
+        return raw
+    if raw == prefix:
+        return "/"
+    marker = prefix + "/"
+    if raw.startswith(marker):
+        return raw[len(prefix) :] or "/"
+    return raw
+
+
 def _pref_path(path: str) -> str:
     """Prefix a root-absolute path when Studio is under a subpath (e.g. /app)."""
     prefix = _studio_prefix()
@@ -821,6 +913,20 @@ def _render_html(page: Path, *, cache_control: str = "no-store") -> HTMLResponse
     return HTMLResponse(html, headers=headers)
 
 
+def _buyer_page_redirect(request: Request, path: str):
+    """Send a signed-in buyer to the order page instead of the Studio shell."""
+    if studio_auth.is_desktop_mode():
+        return None
+    try:
+        user = studio_auth.require_session(request)
+    except HTTPException:
+        return None
+    target = studio_auth.buyer_shell_redirect(user, path)
+    if not target:
+        return None
+    return _redir(target)
+
+
 def _session_ok(request: Request) -> bool:
     """True when the request carries a valid Studio session (cookie or Bearer)."""
     if studio_auth.is_desktop_mode():
@@ -830,6 +936,30 @@ def _session_ok(request: Request) -> bool:
         return True
     except HTTPException:
         return False
+
+
+def _client_wants_html(request: Request) -> bool:
+    """True for a browser navigation. Other clients get 401 instead of a redirect."""
+    accept = (request.headers.get("accept") or "").lower()
+    if "text/html" in accept or "application/xhtml" in accept:
+        return True
+    if (request.headers.get("sec-fetch-dest") or "").lower() == "document":
+        return True
+    return (request.headers.get("sec-fetch-mode") or "").lower() == "navigate"
+
+
+def _block_anonymous_page(request: Request, next_path: str) -> Response | None:
+    """Stop a private HTML page before its template is read.
+
+    Browsers are sent to the login document with ?next= so sign-in returns them
+    to the page. Non-browser clients receive 401. None means the page may render.
+    """
+    if studio_auth.is_desktop_mode() or _session_ok(request):
+        return None
+    target = next_path if str(next_path).startswith("/") else f"/{next_path}"
+    if _client_wants_html(request):
+        return _redir(f"/?next={target}")
+    return JSONResponse({"detail": "Not authenticated"}, status_code=401)
 
 
 def _redir(path: str, status_code: int = 303) -> RedirectResponse:
@@ -961,6 +1091,17 @@ def create_app() -> FastAPI:
                 pass
             time.sleep(SCHEDULER_INTERVAL_SEC)
 
+    def _renewal_reminder_loop() -> None:
+        time.sleep(20)
+        while True:
+            try:
+                from studio.email import send_due_renewal_reminders
+
+                send_due_renewal_reminders()
+            except Exception:
+                pass
+            time.sleep(15 * 60)
+
     @asynccontextmanager
     async def studio_lifespan(app):
         inner_cm = None
@@ -972,6 +1113,7 @@ def create_app() -> FastAPI:
         threading.Thread(target=_gentle_boot, daemon=True, name="gentle-boot").start()
         threading.Thread(target=_ngrok_boot, daemon=True, name="ngrok-boot").start()
         threading.Thread(target=_topic_scheduler_loop, daemon=True, name="topic-scheduler").start()
+        threading.Thread(target=_renewal_reminder_loop, daemon=True, name="renewal-reminders").start()
         try:
             from studio.restart import clear_stale_gpu_lock
 
@@ -1056,42 +1198,80 @@ def create_app() -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request):
         # SaaS: never ship the workspace shell to logged-out browsers.
-        if not studio_auth.is_desktop_mode() and not _session_ok(request):
-            login = TEMPLATES_DIR / "login.html"
-            if login.is_file():
-                return _render_html(login)
-            raise HTTPException(status_code=401, detail="Sign in required")
+        # Buyers never see the workspace — they stay on the order page.
+        if not studio_auth.is_desktop_mode():
+            bounced = _buyer_page_redirect(request, "/")
+            if bounced is not None:
+                return bounced
+            if not _session_ok(request):
+                login = TEMPLATES_DIR / "login.html"
+                if login.is_file():
+                    return _render_html(login)
+                raise HTTPException(status_code=401, detail="Sign in required")
         index = TEMPLATES_DIR / "index.html"
         return _render_html(index)
 
+    @app.get("/app", response_class=HTMLResponse)
+    @app.get("/app/", response_class=HTMLResponse)
+    def studio_app_alias(request: Request):
+        if not studio_auth.is_desktop_mode():
+            bounced = _buyer_page_redirect(request, "/app")
+            if bounced is not None:
+                return bounced
+        return home(request)
+
     @app.get("/admin", response_class=HTMLResponse)
-    def admin_home():
+    def admin_home(request: Request):
         if studio_auth.is_desktop_mode():
             return _redir("/")
+        bounced = _buyer_page_redirect(request, "/admin")
+        if bounced is not None:
+            return bounced
+        blocked = _block_anonymous_page(request, "/admin")
+        if blocked is not None:
+            return blocked
+        if not _request_is_admin(request):
+            return HTMLResponse(
+                "<!doctype html><meta charset='utf-8'><title>Admin</title>"
+                "<p>Admin access is required.</p><p><a href='/'>Studio</a></p>",
+                status_code=403,
+            )
         page = TEMPLATES_DIR / "admin.html"
         if not page.is_file():
             raise HTTPException(404, "Admin UI missing")
         return _render_html(page)
 
     @app.get("/pricing", response_class=HTMLResponse)
-    def pricing_home():
+    def pricing_home(request: Request):
         if studio_auth.is_desktop_mode():
             return _redir("/")
+        bounced = _buyer_page_redirect(request, "/pricing")
+        if bounced is not None:
+            return bounced
+        blocked = _block_anonymous_page(request, "/pricing")
+        if blocked is not None:
+            return blocked
         page = TEMPLATES_DIR / "pricing.html"
         if not page.is_file():
             raise HTTPException(404, "Pricing page missing")
         return _render_html(page)
 
     @app.get("/billing/success", response_class=HTMLResponse)
-    def billing_success():
+    def billing_success(request: Request):
         if studio_auth.is_desktop_mode():
             return _redir("/")
+        bounced = _buyer_page_redirect(request, "/billing/success")
+        if bounced is not None:
+            return bounced
         return _redir("/?step=subscription&checkout=success")
 
     @app.get("/billing/cancel", response_class=HTMLResponse)
-    def billing_cancel():
+    def billing_cancel(request: Request):
         if studio_auth.is_desktop_mode():
             return _redir("/")
+        bounced = _buyer_page_redirect(request, "/billing/cancel")
+        if bounced is not None:
+            return bounced
         return _redir("/?step=subscription&checkout=canceled")
 
     @app.post("/api/auth/login")
@@ -1124,7 +1304,7 @@ def create_app() -> FastAPI:
     @app.post("/api/auth/signup")
     def auth_signup(body: SignupBody, response: Response):
         _reject_desktop_saas("Sign-up")
-        from studio.members import create_user, ensure_members_store, public_session
+        from studio.members import SIGNUP_ROLE, create_user, ensure_members_store, public_session
         from studio.settings import load_settings, normalize_registration_mode
 
         settings = load_settings()
@@ -1151,7 +1331,7 @@ def create_app() -> FastAPI:
                 username=body.username,
                 password=body.password,
                 email=body.email,
-                role="member",
+                role=SIGNUP_ROLE,
                 subscription_status="none",
             )
         except ValueError as exc:
@@ -1225,9 +1405,12 @@ def create_app() -> FastAPI:
         if user is None and username:
             user = get_user_by_username(username)
         if user and (user.get("email") or "").strip():
-            token, _exp = create_reset_token(user["id"], ttl_minutes=DEFAULT_TTL_MINUTES)
-            reset_url = f"{_base_url()}/#reset={token}"
-            notify_password_reset(user, reset_url, expires_minutes=DEFAULT_TTL_MINUTES)
+            try:
+                token, _exp = create_reset_token(user["id"], ttl_minutes=DEFAULT_TTL_MINUTES)
+                reset_url = f"{_base_url()}/#reset={token}"
+                notify_password_reset(user, reset_url, expires_minutes=DEFAULT_TTL_MINUTES)
+            except Exception:
+                pass
         return {
             "ok": True,
             "message": "If that account has an email on file, a reset link was sent.",
@@ -1445,6 +1628,28 @@ def create_app() -> FastAPI:
         except Exception as exc:
             raise _err(exc)
 
+    @app.post("/api/billing/renew")
+    def billing_renew(request: Request):
+        """Resume a membership that is ending, or open Stripe Checkout / the portal."""
+        _reject_desktop_saas("Renew subscription")
+        from studio.members import get_user_by_id, public_session
+        from studio.stripe_billing import public_billing_config, renew_subscription, stripe_configured
+
+        user = studio_auth.require_session(request)
+        if (user.get("role") or "") == "admin":
+            return {"ok": True, "skipped": True, "reason": "Admins already have full access."}
+        try:
+            result = renew_subscription(user)
+            fresh = get_user_by_id(user["id"]) or user
+            return {
+                **result,
+                **public_session(fresh),
+                "stripe_configured": stripe_configured(),
+                "catalog": public_billing_config(),
+            }
+        except Exception as exc:
+            raise _err(exc)
+
     @app.post("/api/billing/ensure-catalog")
     def billing_ensure_catalog(request: Request):
         _reject_desktop_saas("Billing catalog")
@@ -1497,7 +1702,10 @@ def create_app() -> FastAPI:
         return _render_html(page)
 
     @app.get("/my-orders", response_class=HTMLResponse)
-    def my_orders_page():
+    def my_orders_page(request: Request):
+        blocked = _block_anonymous_page(request, "/my-orders")
+        if blocked is not None:
+            return blocked
         page = TEMPLATES_DIR / "my_orders.html"
         if not page.is_file():
             raise HTTPException(404, "My orders page missing")
@@ -1505,6 +1713,12 @@ def create_app() -> FastAPI:
 
     @app.get("/production", response_class=HTMLResponse)
     def production_page(request: Request):
+        bounced = _buyer_page_redirect(request, "/production")
+        if bounced is not None:
+            return bounced
+        blocked = _block_anonymous_page(request, "/production")
+        if blocked is not None:
+            return blocked
         if not _request_is_admin(request):
             return HTMLResponse(
                 "<!doctype html><meta charset='utf-8'><title>Production</title>"
@@ -1522,12 +1736,25 @@ def create_app() -> FastAPI:
 
         return public_config()
 
-    @app.post("/api/orders/checkout")
-    def orders_checkout(body: OrderCheckoutBody):
-        from studio.orders import create_checkout
+    @app.put("/api/admin/order-pricing")
+    def admin_order_pricing(body: OrderPricingBody, request: Request):
+        studio_auth.require_admin(request)
+        from studio.orders import save_order_pricing
 
         try:
-            return create_checkout(body.model_dump())
+            return save_order_pricing(body.packages, multiplier=body.ten_minute_multiplier)
+        except Exception as exc:
+            raise _order_http(exc) from exc
+
+    @app.post("/api/orders/checkout")
+    def orders_checkout(body: OrderCheckoutBody, request: Request):
+        from studio.orders import create_checkout
+
+        user_id = ""
+        if _session_ok(request):
+            user_id = str(studio_auth.require_session(request).get("id") or "")
+        try:
+            return create_checkout(body.model_dump(), user_id=user_id)
         except Exception as exc:
             raise _order_http(exc) from exc
 
@@ -1540,21 +1767,76 @@ def create_app() -> FastAPI:
         except Exception as exc:
             raise _order_http(exc) from exc
 
-    @app.post("/api/my-orders")
-    def my_orders_lookup(body: MyOrdersBody):
-        from studio.orders import list_orders_for_email
+    @app.get("/api/my-orders")
+    def my_orders_lookup(request: Request):
+        from studio.orders import list_orders_for_user
+
+        user = studio_auth.require_session(request)
+        try:
+            return list_orders_for_user(user)
+        except Exception as exc:
+            raise _order_http(exc) from exc
+
+    @app.get("/api/orders/art-styles/{style_id}/thumb")
+    def order_art_style_thumb(style_id: str):
+        from studio.orders import art_style_thumbnail_file
 
         try:
-            return list_orders_for_email(body.email)
+            path, media = art_style_thumbnail_file(style_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return FileResponse(path, media_type=media, headers={"Cache-Control": "public, max-age=300"})
+
+    @app.put("/api/admin/order-art-styles")
+    def admin_save_art_styles(body: OrderArtStylesBody, request: Request):
+        studio_auth.require_admin(request)
+        from studio.orders import save_order_art_styles
+
+        try:
+            return save_order_art_styles(body.styles)
+        except Exception as exc:
+            raise _order_http(exc) from exc
+
+    @app.post("/api/admin/order-art-styles")
+    def admin_add_art_style(body: OrderArtStyleBody, request: Request):
+        studio_auth.require_admin(request)
+        from studio.orders import add_order_art_style
+
+        try:
+            return add_order_art_style(body.id, body.name)
+        except Exception as exc:
+            raise _order_http(exc) from exc
+
+    @app.delete("/api/admin/order-art-styles/{style_id}")
+    def admin_remove_art_style(style_id: str, request: Request):
+        studio_auth.require_admin(request)
+        from studio.orders import remove_order_art_style
+
+        try:
+            return remove_order_art_style(style_id)
+        except Exception as exc:
+            raise _order_http(exc) from exc
+
+    @app.post("/api/admin/order-art-styles/{style_id}/thumbnail")
+    async def admin_art_style_thumbnail(style_id: str, request: Request, file: UploadFile = File(...)):
+        studio_auth.require_admin(request)
+        from studio.orders import save_order_art_thumbnail
+
+        try:
+            data = await file.read()
+            return save_order_art_thumbnail(style_id, data)
         except Exception as exc:
             raise _order_http(exc) from exc
 
     @app.get("/api/orders/download/{video_id}")
-    def order_video_download(video_id: str, request: Request, email: str = ""):
+    def order_video_download(video_id: str, request: Request):
         from studio.orders import resolve_download
 
+        if not _session_ok(request):
+            raise HTTPException(status_code=401, detail="Sign in to download this video.")
+        user = studio_auth.require_session(request)
         try:
-            path, filename = resolve_download(video_id, email, is_admin=_request_is_admin(request))
+            path, filename = resolve_download(video_id, user, is_admin=_request_is_admin(request))
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return FileResponse(path, media_type="video/mp4", filename=filename)
@@ -1987,8 +2269,13 @@ def create_app() -> FastAPI:
 
         try:
             user = studio_auth.require_session(request)
-            report = cost_report(limit_projects=limit)
-            if (user.get("role") or "") != "admin":
+            is_admin = (user.get("role") or "") == "admin"
+            report = cost_report(
+                limit_projects=limit,
+                owner_id=None if is_admin else user.get("id"),
+                is_admin=is_admin,
+            )
+            if not is_admin:
                 projects = filter_owned(report.get("projects") or [], user)
                 chart = filter_owned(report.get("chart") or [], user)
                 report = {**report, "projects": projects, "chart": chart}
@@ -2099,7 +2386,41 @@ def create_app() -> FastAPI:
 
     @app.put("/api/settings")
     def put_settings(body: SettingsBody, request: Request):
-        studio_auth.require_admin(request)
+        user = studio_auth.require_session(request)
+        if (user.get("role") or "") != "admin":
+            from studio.settings import MEMBER_OWN_KEYS, save_user_production_settings
+
+            raw = body.model_dump()
+            updates = {
+                k: v
+                for k, v in raw.items()
+                if v is not None and k in MEMBER_OWN_KEYS
+            }
+            if updates:
+                try:
+                    save_user_production_settings(str(user.get("id") or ""), updates)
+                except (RuntimeError, ValueError) as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+            youtube_sent = (
+                body.youtube_auto_upload is not None
+                or bool(body.youtube_privacy)
+                or body.youtube_delete_file_after_upload is not None
+            )
+            if youtube_sent:
+                try:
+                    with yt.bind_youtube_user(user):
+                        yt.save_owner_youtube_prefs(
+                            auto_upload=body.youtube_auto_upload,
+                            privacy=body.youtube_privacy or None,
+                            delete_file_after_upload=body.youtube_delete_file_after_upload,
+                        )
+                except Exception as exc:
+                    _log.exception("Member YouTube preferences failed to save")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"YouTube preferences failed to save: {exc}",
+                    ) from exc
+            return settings_for_user(user)
         raw = body.model_dump()
         # Booleans / zeros must survive scrub; secrets ignore empty/********.
         updates = scrub_secret_updates({k: v for k, v in raw.items() if v is not None})
@@ -2115,6 +2436,8 @@ def create_app() -> FastAPI:
                 "smtp_password",
                 "stripe_secret_key",
                 "stripe_webhook_secret",
+                "mailjet_api_key",
+                "mailjet_secret_key",
             ):
                 if is_placeholder_secret(updates.get(key)):
                     updates.pop(key, None)
@@ -2208,6 +2531,16 @@ def create_app() -> FastAPI:
             updates["email_from_name"] = body.email_from_name
         if body.email_reply_to is not None:
             updates["email_reply_to"] = body.email_reply_to
+        if body.mailjet_api_key is not None and not is_placeholder_secret(body.mailjet_api_key):
+            updates["mailjet_api_key"] = body.mailjet_api_key.strip()
+        if body.mailjet_secret_key is not None and not is_placeholder_secret(body.mailjet_secret_key):
+            updates["mailjet_secret_key"] = body.mailjet_secret_key.strip()
+        if body.mailjet_from_email is not None:
+            updates["mailjet_from_email"] = body.mailjet_from_email.strip()
+        if body.mailjet_from_name is not None:
+            updates["mailjet_from_name"] = body.mailjet_from_name.strip()
+        if body.mailjet_sender_domain is not None:
+            updates["mailjet_sender_domain"] = body.mailjet_sender_domain.strip()
         if body.email_templates is not None:
             updates["email_templates"] = body.email_templates
         if updates:
@@ -2335,25 +2668,49 @@ def create_app() -> FastAPI:
 
         return comfyui_status()
 
+    @app.get("/api/me/mcp")
+    def get_my_mcp(request: Request):
+        """MCP URL and this user's API keys. Does not expose the admin PIN or ngrok password."""
+        user = studio_auth.require_session(request)
+        from studio.api_keys import list_keys_for_user
+        from studio.mcp_install import member_mcp_access
+
+        payload = member_mcp_access(http_mounted=mcp_app is not None)
+        payload["keys"] = list_keys_for_user(str(user.get("id") or ""))
+        payload["scope"] = "admin" if (user.get("role") or "") == "admin" else "member"
+        return payload
+
     @app.get("/api/youtube")
-    def get_youtube():
+    def get_youtube(request: Request):
+        user = studio_auth.require_session(request)
         try:
-            return yt.status()
+            with yt.bind_youtube_user(user):
+                return yt.status()
         except Exception as exc:
             raise _err(exc)
 
     @app.get("/api/youtube/connect")
-    def get_youtube_connect():
+    def get_youtube_connect(request: Request):
         try:
-            payload = yt.start_connect(open_browser=False)
+            user = studio_auth.require_session(request)
+        except HTTPException:
+            return HTMLResponse(
+                yt._error_html("Sign in to Studio before connecting YouTube. That keeps this channel on your account."),
+                status_code=401,
+            )
+        try:
+            with yt.bind_youtube_user(user):
+                payload = yt.start_connect(open_browser=False)
             return RedirectResponse(payload["auth_url"], status_code=302)
         except Exception as exc:
             return HTMLResponse(yt._error_html(str(exc)), status_code=400)
 
     @app.post("/api/youtube/connect")
-    def post_youtube_connect():
+    def post_youtube_connect(request: Request):
+        user = studio_auth.require_session(request)
         try:
-            return yt.start_connect(open_browser=True)
+            with yt.bind_youtube_user(user):
+                return yt.start_connect(open_browser=True)
         except Exception as exc:
             raise _err(exc)
 
@@ -2363,35 +2720,59 @@ def create_app() -> FastAPI:
         return HTMLResponse(html, status_code=200 if ok else 400)
 
     @app.post("/api/youtube/oauth/code")
-    def youtube_oauth_code(body: YoutubeCodeBody):
+    def youtube_oauth_code(body: YoutubeCodeBody, request: Request):
+        user = studio_auth.require_session(request)
         try:
-            return yt.finish_oauth_paste(body.url or body.code)
+            with yt.bind_youtube_user(user):
+                return yt.finish_oauth_paste(body.url or body.code)
         except Exception as exc:
             raise _err(exc)
 
     @app.post("/api/youtube/disconnect")
-    def youtube_disconnect(body: YoutubeDisconnectBody = YoutubeDisconnectBody()):
-        return yt.disconnect(channel_id=body.channel_id or "")
+    def youtube_disconnect(request: Request, body: YoutubeDisconnectBody = YoutubeDisconnectBody()):
+        user = studio_auth.require_session(request)
+        with yt.bind_youtube_user(user):
+            return yt.disconnect(channel_id=body.channel_id or "")
 
     @app.put("/api/youtube/channel")
-    def youtube_channel(body: YoutubeChannelBody):
+    def youtube_channel(body: YoutubeChannelBody, request: Request):
+        user = studio_auth.require_session(request)
         try:
-            return yt.set_channel(body.channel_id, title=body.title)
+            with yt.bind_youtube_user(user):
+                return yt.set_channel(body.channel_id, title=body.title)
+        except Exception as exc:
+            raise _err(exc)
+
+    @app.put("/api/youtube/prefs")
+    def youtube_prefs(request: Request, body: YoutubePrefsBody):
+        user = studio_auth.require_session(request)
+        try:
+            with yt.bind_youtube_user(user):
+                return yt.save_owner_youtube_prefs(
+                    auto_upload=body.auto_upload,
+                    privacy=body.privacy or None,
+                    delete_file_after_upload=body.delete_file_after_upload,
+                )
         except Exception as exc:
             raise _err(exc)
 
     @app.post("/api/projects/{project_id}/youtube")
-    def youtube_upload(project_id: str, body: YoutubeUploadBody):
+    def youtube_upload(project_id: str, body: YoutubeUploadBody, request: Request):
+        user, _meta = None, None
+        from studio.tenant import require_project_access
+
+        user, _meta = require_project_access(request, project_id)
         try:
-            return yt.upload_project_video(
-                project_id,
-                privacy_status=body.privacy_status or None,
-                title=body.title or None,
-                description=body.description or None,
-                tags=body.tags if body.tags is not None else body.keywords,
-                aspect=body.aspect or None,
-                channel_id=body.channel_id or None,
-            )
+            with yt.bind_youtube_user(user):
+                return yt.upload_project_video(
+                    project_id,
+                    privacy_status=body.privacy_status or None,
+                    title=body.title or None,
+                    description=body.description or None,
+                    tags=body.tags if body.tags is not None else body.keywords,
+                    aspect=body.aspect or None,
+                    channel_id=body.channel_id or None,
+                )
         except FileNotFoundError as exc:
             raise HTTPException(404, str(exc))
         except Exception as exc:
@@ -2555,7 +2936,8 @@ def create_app() -> FastAPI:
             raise _err(exc)
 
     @app.post("/api/topics/schedule")
-    def post_topics_schedule(body: ScheduleTopicBody):
+    def post_topics_schedule(body: ScheduleTopicBody, request: Request):
+        user = studio_auth.require_session(request)
         try:
             return schedule_topic(
                 topic_id=body.topic_id,
@@ -2565,9 +2947,13 @@ def create_app() -> FastAPI:
                 run=body.run,
                 scheduled_at=body.scheduled_at,
                 run_now=body.run_now,
+                owner_id=user.get("id"),
+                is_admin=(user.get("role") or "") == "admin",
             )
         except FileNotFoundError as exc:
             raise HTTPException(404, str(exc))
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
         except Exception as exc:
             raise _err(exc)
 
@@ -2596,7 +2982,8 @@ def create_app() -> FastAPI:
             raise _err(exc)
 
     @app.post("/api/topics/{topic_id}/schedule")
-    def post_topic_schedule(topic_id: str, body: ScheduleTopicBody = ScheduleTopicBody()):
+    def post_topic_schedule(topic_id: str, request: Request, body: ScheduleTopicBody = ScheduleTopicBody()):
+        user = studio_auth.require_session(request)
         try:
             return schedule_topic(
                 topic_id=topic_id,
@@ -2606,9 +2993,13 @@ def create_app() -> FastAPI:
                 run=body.run,
                 scheduled_at=body.scheduled_at,
                 run_now=body.run_now,
+                owner_id=user.get("id"),
+                is_admin=(user.get("role") or "") == "admin",
             )
         except FileNotFoundError as exc:
             raise HTTPException(404, str(exc))
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
         except Exception as exc:
             raise _err(exc)
 

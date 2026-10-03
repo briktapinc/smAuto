@@ -368,6 +368,13 @@ def collect_renders(project_id: str) -> dict[str, Any]:
                 "frames": frames_dirname(asp),
             }
         )
+        rendered_at = str(blob.get("updated_at") or "").strip()
+        if ready and not rendered_at:
+            try:
+                rendered_at = datetime.fromtimestamp(video.stat().st_mtime, timezone.utc).isoformat()
+            except OSError:
+                rendered_at = ""
+        blob["rendered_at"] = rendered_at if ready else ""
         out[asp] = blob
     return out
 
@@ -822,6 +829,35 @@ def rename_video(
     return out
 
 
+def _owner_youtube_defaults(owner_id: str | None, settings: dict[str, Any]) -> tuple[bool, str]:
+    """New jobs copy the owner's YouTube prefs. Admin jobs copy the shared Settings defaults."""
+    auto = normalize_youtube_auto_upload(settings.get("youtube_auto_upload"))
+    privacy = normalize_youtube_privacy(settings.get("youtube_privacy"))
+    uid = (owner_id or "").strip()
+    if not uid:
+        return auto, privacy
+    try:
+        from studio.members import get_user_by_id
+        from studio.youtube import bind_youtube_user, owner_youtube_prefs
+
+        owner = get_user_by_id(uid)
+        if not owner or (owner.get("role") or "") == "admin":
+            return auto, privacy
+        with bind_youtube_user(owner):
+            prefs = owner_youtube_prefs()
+        return bool(prefs.get("auto_upload")), normalize_youtube_privacy(prefs.get("privacy"))
+    except Exception:
+        return auto, privacy
+
+
+def _initial_youtube_auto(owner_id: str | None, settings: dict[str, Any]) -> bool:
+    return _owner_youtube_defaults(owner_id, settings)[0]
+
+
+def _initial_youtube_privacy(owner_id: str | None, settings: dict[str, Any]) -> str:
+    return _owner_youtube_defaults(owner_id, settings)[1]
+
+
 def create_project(
     topic: str,
     duration_seconds: int,
@@ -862,8 +898,8 @@ def create_project(
         "art_style": "classic",
         "include_bubblehead": True,
         "background_file": (default_background() or {}).get("filename") or "",
-        "youtube_auto_upload": normalize_youtube_auto_upload(settings.get("youtube_auto_upload")),
-        "youtube_privacy": normalize_youtube_privacy(settings.get("youtube_privacy")),
+        "youtube_auto_upload": _initial_youtube_auto(owner_id, settings),
+        "youtube_privacy": _initial_youtube_privacy(owner_id, settings),
         "youtube_description": "",
         "youtube_keywords": [],
         "youtube_hashtags": [],
@@ -1441,15 +1477,19 @@ def project_payload(project_id: str) -> dict[str, Any]:
         cover_prompt = ""
     has_video = any(item.get("ready") for item in renders.values())
     yt_info = youtube_watch_info(meta)
+    from studio.tts_external import external_audio_present
+
+    external_main = external_audio_present(project_id, shorts=False)
+    external_shorts = external_audio_present(project_id, shorts=True)
     payload = {
         **meta,
         "script_tagged": tagged.read_text(encoding="utf-8") if tagged.is_file() else "",
         "script_raw": raw.read_text(encoding="utf-8") if raw.is_file() else "",
         "lines": lines,
-        "has_audio": audio.is_file(),
+        "has_audio": audio.is_file() or external_main,
         "has_alignment": prefix.with_suffix(".json").is_file(),
         "has_shorts_script": shorts_prefix.with_suffix(".txt").is_file(),
-        "has_shorts_audio": shorts_audio.is_file(),
+        "has_shorts_audio": shorts_audio.is_file() or external_shorts,
         "has_shorts_alignment": shorts_prefix.with_suffix(".json").is_file(),
         "generate_9x16": project_generate_9x16(meta),
         "has_video": has_video,
@@ -1500,7 +1540,7 @@ def project_payload(project_id: str) -> dict[str, Any]:
         "archived_at": meta.get("archived_at"),
         "background_file": project_background_file(project_id),
         "audio_source": _project_audio_source_label(meta),
-        "has_external_audio": (project_dir(project_id) / "narration_external.mp3").is_file(),
+        "has_external_audio": external_main,
         "youtube_auto_upload": project_youtube_auto_upload(project_id),
         "youtube_privacy": project_youtube_privacy(project_id),
         "youtube": meta.get("youtube"),

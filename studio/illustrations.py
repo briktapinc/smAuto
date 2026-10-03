@@ -1972,6 +1972,12 @@ def fit_illustration_to_canvas(path: Path, aspect: str, layout: str = "cover") -
 
 
 def _configure_fal():
+    """Return a fal client authenticated with the active settings key.
+
+    SyncClient(key=...) sends the key on this call only. It does not write
+    FAL_KEY into the process environment, so a member key cannot leak into
+    a later unscoped load_settings / save_settings of the shared file.
+    """
     try:
         import fal_client
     except ImportError as exc:
@@ -1981,8 +1987,10 @@ def _configure_fal():
         raise RuntimeError(
             "fal API key is not set. Add it in Settings, or set FAL_KEY / FAL_API_KEY."
         )
-    os.environ["FAL_KEY"] = key
-    return fal_client
+    client_cls = getattr(fal_client, "SyncClient", None)
+    if client_cls is None:
+        raise RuntimeError("fal-client has no SyncClient; upgrade fal-client.")
+    return client_cls(key=key)
 
 
 def ensure_fal_ready() -> None:

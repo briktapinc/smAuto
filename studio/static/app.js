@@ -64,6 +64,17 @@ function withBase(path) {
   return path;
 }
 
+function isBuyerSession(session) {
+  if (!session || desktopMode || session.desktop_mode) return false;
+  return session.role === "buyer" || session.redirect === "/order";
+}
+
+function redirectBuyer(session) {
+  if (!isBuyerSession(session)) return false;
+  location.replace(withBase("/order"));
+  return true;
+}
+
 function applyDesktopModeUi() {
   document.body.classList.add("desktop-mode", "is-admin");
   document.body.classList.remove("is-member", "membership-locked");
@@ -71,7 +82,6 @@ function applyDesktopModeUi() {
   [
     "#login-gate",
     "#subscription-tab",
-    "#logout-btn",
     "#membership-banner",
     "#settings-membership-card",
     "#settings-account-card",
@@ -79,6 +89,7 @@ function applyDesktopModeUi() {
     const el = $(sel);
     if (el) el.hidden = true;
   });
+  setLogoutVisible(false);
   $$(".admin-only").forEach((el) => {
     if (el.id === "admin-link") {
       el.hidden = true;
@@ -123,6 +134,7 @@ function showLoginGate(message = "", view = "login") {
   if (app) app.hidden = true;
   if (gate) gate.hidden = false;
   document.documentElement.classList.remove("studio-ready");
+  setLogoutVisible(false);
   const show = (id) => {
     ["#login-form", "#signup-form", "#forgot-form", "#reset-form"].forEach((sel) => {
       const el = $(sel);
@@ -144,12 +156,20 @@ function showLoginGate(message = "", view = "login") {
   if (view === "reset") $("#reset-pass")?.focus();
 }
 
+function setLogoutVisible(visible) {
+  // SaaS only — desktop single-user mode has no multi-account session to leave.
+  // Buyers are redirected to /order, but if they somehow keep Studio chrome, keep Log out.
+  const btn = $("#logout-btn");
+  if (btn) btn.hidden = desktopMode ? true : !visible;
+}
+
 function showStudioApp() {
   const app = $("#studio-app");
   const gate = $("#login-gate");
   if (gate) gate.hidden = true;
   if (app) app.hidden = false;
   document.documentElement.classList.add("studio-ready");
+  setLogoutVisible(true);
 }
 function toast(msg, bad = false) {
   const banner = $("#run-status");
@@ -709,6 +729,13 @@ function jobLabel(item) {
   return item.title || item.topic || item.id;
 }
 
+function jobIsRendering(item) {
+  if (!(item?.running || item?.busy)) return false;
+  const step = String(item.step || item.job?.step || item.active_step || item.job?.active_step || "").toLowerCase();
+  const kind = String(item.kind || item.job?.kind || "").toLowerCase();
+  return step === "render" || kind === "render";
+}
+
 function jobState(item) {
   if (item.queued || item.queue?.status === "queued") {
     const pos = item.queue_position || item.queue?.queue_position;
@@ -801,6 +828,7 @@ function cardHtml(item, compact = false, { selectable = false, selected = false,
   const portrait = (item.aspect || "16:9") === "9:16";
   const label = esc(jobLabel(item));
   const state = ytOnly ? "on YouTube" : jobState(item);
+  const renderedWhen = renderedDatesLabel(item);
   const stamp = encodeURIComponent(item.updated_at || item.id);
   const check = selectable
     ? `<input type="checkbox" class="card-check" data-select="${esc(item.id)}" ${selected ? "checked" : ""} aria-label="Select ${label}" onclick="event.stopPropagation()">`
@@ -822,6 +850,7 @@ function cardHtml(item, compact = false, { selectable = false, selected = false,
     <div class="yt-info">
       <strong>${label}</strong>
       <small>${esc(item.aspect || "16:9")} · ${esc(state)}</small>
+      ${renderedWhen ? `<small class="rendered-at">${esc(renderedWhen)}</small>` : ""}
     </div>
   </div>
   </div>`;
@@ -934,7 +963,7 @@ function renderJobsQueue() {
   updatePager("#jobs-pager", "#jobs-page-label", "#jobs-prev", "#jobs-next", pageData.page, pageData.pages, pageData.total);
   list.innerHTML = pageData.items.map((item) => {
     const queued = !!(item.queued || item.queue?.status === "queued");
-    const pulse = item.running ? "running" : (queued ? "queued" : (item.paused || item.job?.step === "paused" ? "paused" : (item.job?.step === "stopped" ? "stopped" : "")));
+    const pulse = jobIsRendering(item) ? "rendering" : (item.running ? "running" : (queued ? "queued" : (item.paused || item.job?.step === "paused" ? "paused" : (item.job?.step === "stopped" ? "stopped" : ""))));
     const startOff = (canStart(item) && !membershipLocked) ? "" : "disabled";
     const stopOff = canStop(item) ? "" : "disabled";
     const resumeOff = (canResume(item) && !membershipLocked) ? "" : "disabled";
@@ -1210,6 +1239,41 @@ function fillAspectPick(select, wrap, selected) {
   }).join("");
 }
 
+function formatRenderedAt(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function renderedDatesLabel(source) {
+  const renders = source?.renders || {};
+  const ready = ["16:9", "9:16"].filter((asp) => renders[asp]?.ready);
+  const bits = ready.map((asp) => {
+    const when = formatRenderedAt(renders[asp].rendered_at || renders[asp].updated_at);
+    if (!when) return "";
+    return ready.length > 1 ? `${asp} · ${when}` : when;
+  }).filter(Boolean);
+  if (!bits.length) return "";
+  return `Last rendered ${bits.join("  ·  ")}`;
+}
+
+function fillRenderedDates() {
+  const text = current ? renderedDatesLabel(current) : "";
+  ["#watch-rendered", "#video-rendered"].forEach((sel) => {
+    const el = $(sel);
+    if (!el) return;
+    el.hidden = !text;
+    el.textContent = text;
+  });
+}
+
 function fillRenderAspectStatus() {
   const el = $("#render-aspect-status");
   if (!el || !current) return;
@@ -1217,6 +1281,7 @@ function fillRenderAspectStatus() {
   const a16 = renders["16:9"]?.ready;
   const a9 = renders["9:16"]?.ready;
   el.textContent = `${a16 ? "16:9 ready" : "16:9 not rendered"} · ${a9 ? "9:16 ready" : "9:16 not rendered"}`;
+  fillRenderedDates();
 }
 
 function fillVideoPlayer(id, { autoplay = false } = {}) {
@@ -2557,7 +2622,9 @@ $("#script-text-provider")?.addEventListener("change", async (e) => {
       ? "Scripts and topics will use the billed OpenAI API."
       : p === "lmstudio"
         ? "Scripts and topics will use LM Studio's local API."
-        : `${textProviderLabel()} Desktop MCP will write scripts and topics (save_script / create_topic).`);
+        : p === "external"
+          ? "External MCP will write scripts and topics (save_script / create_topic)."
+          : `${textProviderLabel()} Desktop MCP will write scripts and topics (save_script / create_topic).`);
   } catch (err) {
     toast(err.message, true);
     syncTextProviderUi();
@@ -3506,19 +3573,21 @@ function textProviderLabel() {
   const p = textProvider();
   if (p === "chatgpt") return "ChatGPT";
   if (p === "claude") return "Claude";
+  if (p === "external") return "External";
   if (p === "lmstudio") return "LM Studio";
   return "OpenAI";
 }
 
 function isNativeTextProvider() {
   const p = textProvider();
-  return p === "chatgpt" || p === "claude";
+  return p === "chatgpt" || p === "claude" || p === "external";
 }
 
 function generateButtonLabel() {
   const p = textProvider();
   if (p === "chatgpt") return "Generate with ChatGPT";
   if (p === "claude") return "Generate with Claude";
+  if (p === "external") return "Write via MCP";
   if (p === "lmstudio") return "Generate with LM Studio";
   return "";
 }
@@ -3541,7 +3610,9 @@ function syncTextProviderUi() {
       ? "OpenAI writes the tagged script. Hook = 9:16 short; subscribe closes 16:9."
       : p === "lmstudio"
         ? "LM Studio writes the tagged script. Hook = 9:16 short; subscribe closes 16:9."
-        : `${label} MCP writes the script (save_script). Generate returns the playbook — no OpenAI tokens.`;
+        : p === "external"
+          ? "External MCP writes the script (save_script). Generate returns the playbook — no OpenAI tokens."
+          : `${label} MCP writes the script (save_script). Generate returns the playbook — no OpenAI tokens.`;
   }
   const topicsBtn = $("#topics-generate");
   if (topicsBtn) {
@@ -3553,7 +3624,9 @@ function syncTextProviderUi() {
       ? "Uses the live topics.generate prompt (edit it on Prompts). Drafts save to user_data/topics.json. Set a date and time, then Schedule. Studio starts due queued topics about every 30 seconds, one at a time."
       : p === "lmstudio"
         ? "Uses the live topics.generate prompt via LM Studio (no OpenAI cloud). Set a date and time, then Schedule. Studio starts due queued topics about every 30 seconds, one at a time."
-        : `${label} invents topics in Desktop MCP, then create_topic / schedule_topic with a date and time. This button returns the playbook and does not call the OpenAI API.`;
+        : p === "external"
+          ? "External MCP invents topics, then create_topic / schedule_topic with a date and time. This button returns the playbook and does not call the OpenAI API."
+          : `${label} invents topics in Desktop MCP, then create_topic / schedule_topic with a date and time. This button returns the playbook and does not call the OpenAI API.`;
   }
 }
 
@@ -5526,14 +5599,13 @@ async function boot() {
 
 async function checkSession() {
   try {
-    await api("/api/auth/me");
-    return true;
+    return await api("/api/auth/me");
   } catch {
     // Drop stale Bearer so the next / load is not stuck in a reload loop when the
     // HttpOnly cookie is still valid (or when both are expired and login.html loads).
     setAuthToken("");
     try { localStorage.removeItem("bubblepod_token"); } catch { /* ignore */ }
-    return false;
+    return null;
   }
 }
 
@@ -5562,13 +5634,14 @@ async function startApp() {
     showLoginGate("", "reset");
     return;
   }
-  const ok = await checkSession();
-  if (!ok) {
+  const me = await checkSession();
+  if (!me) {
     // Already cleared localStorage in checkSession. Reload so the server can serve
     // login-only HTML (or workspace if the HttpOnly cookie alone is still valid).
     location.replace(withBase("/") + (hash || ""));
     return;
   }
+  if (redirectBuyer(me)) return;
   showStudioApp();
   await boot();
   try { await refreshMembershipUi(); } catch { /* ignore */ }
@@ -5585,6 +5658,7 @@ $("#login-form")?.addEventListener("submit", async (e) => {
   try {
     const data = await api("/api/auth/login", { method: "POST", body: { username, password } });
     setAuthToken(data.token || "");
+    if (redirectBuyer(data)) return;
     showStudioApp();
     await boot();
     await refreshMembershipUi(data);
@@ -5664,6 +5738,7 @@ $("#reset-form")?.addEventListener("submit", async (e) => {
     setAuthToken(data.token || "");
     location.hash = "";
     window.__resetToken = "";
+    if (redirectBuyer(data)) return;
     showStudioApp();
     await boot();
     await refreshMembershipUi(data);
@@ -5694,6 +5769,7 @@ $("#signup-form")?.addEventListener("submit", async (e) => {
       },
     });
     setAuthToken(data.token || "");
+    if (redirectBuyer(data)) return;
     showStudioApp();
     await boot();
     await refreshMembershipUi(data);
@@ -5733,6 +5809,7 @@ function subscriptionActions(me) {
       label: `Admin · ${status}`,
       hint: "Admins always have Studio access. Configure Stripe in Admin → Stripe.",
       subscribe: false,
+      renew: false,
       resubscribe: false,
       manage: false,
       unsubscribe: false,
@@ -5744,6 +5821,7 @@ function subscriptionActions(me) {
       label: `${status} · billing offline`,
       hint: "Stripe is not configured yet. Ask an admin to connect billing in Admin → Stripe.",
       subscribe: false,
+      renew: false,
       resubscribe: false,
       manage: false,
       unsubscribe: false,
@@ -5751,14 +5829,18 @@ function subscriptionActions(me) {
     };
   }
   if (pendingCancel && ["active", "trialing"].includes(status)) {
+    const when = periodEndLabel(me.current_period_end);
     return {
       label: `${status} · ends soon`,
-      hint: "Unsubscribe scheduled. You keep access until the period ends. Choose Keep subscription to stay on the plan.",
+      hint: when
+        ? `Your membership ends on ${when} and will not renew. Renew to keep access.`
+        : "Your membership is set to end and will not renew. Renew to keep access.",
       subscribe: false,
+      renew: true,
       resubscribe: false,
       manage: true,
       unsubscribe: false,
-      reactivate: true,
+      reactivate: false,
     };
   }
   if (status === "trialing") {
@@ -5766,6 +5848,7 @@ function subscriptionActions(me) {
       label: "Trialing · full access",
       hint: "Your trial is active. Unsubscribe anytime before it ends, or keep the plan and you’ll be billed when the trial converts.",
       subscribe: false,
+      renew: false,
       resubscribe: false,
       manage: true,
       unsubscribe: true,
@@ -5777,6 +5860,7 @@ function subscriptionActions(me) {
       label: "Active · full access",
       hint: "Your membership is active. Manage billing for cards/invoices, or Unsubscribe to end at the period close.",
       subscribe: false,
+      renew: false,
       resubscribe: false,
       manage: true,
       unsubscribe: true,
@@ -5786,20 +5870,34 @@ function subscriptionActions(me) {
   if (status === "past_due" || status === "unpaid") {
     return {
       label: `${status} · locked`,
-      hint: "Payment needs attention. Update your card in Manage billing, or resubscribe if the plan ended.",
+      hint: "Payment needs attention. Renew opens Stripe so you can pay the open invoice.",
       subscribe: false,
-      resubscribe: true,
+      renew: true,
+      resubscribe: false,
       manage: true,
       unsubscribe: true,
       reactivate: false,
     };
   }
-  if (status === "canceled" || status === "incomplete_expired" || status === "incomplete") {
+  if (status === "canceled" || status === "incomplete_expired") {
     return {
       label: `${status} · locked`,
-      hint: "Subscribe again to unlock create, edit, topics, and renders. Browse and delete stay available.",
+      hint: "Renew to unlock create, edit, topics, and renders. Browse and delete stay available.",
       subscribe: false,
-      resubscribe: true,
+      renew: true,
+      resubscribe: false,
+      manage: true,
+      unsubscribe: false,
+      reactivate: false,
+    };
+  }
+  if (status === "incomplete") {
+    return {
+      label: `${status} · locked`,
+      hint: "Finish checkout to start the membership. Browse and delete stay available.",
+      subscribe: false,
+      renew: true,
+      resubscribe: false,
       manage: true,
       unsubscribe: false,
       reactivate: false,
@@ -5811,11 +5909,19 @@ function subscriptionActions(me) {
       ? "You’re signed in. Manage billing anytime from this page."
       : "Subscribe to unlock Studio. Every member gets the same privileges.",
     subscribe: !access,
+    renew: false,
     resubscribe: false,
     manage: true,
     unsubscribe: false,
     reactivate: false,
   };
+}
+
+function periodEndLabel(value) {
+  if (!value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value).slice(0, 10);
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
 }
 
 function renderSubscriptionPage(me) {
@@ -5847,6 +5953,7 @@ function renderSubscriptionPage(me) {
   if (hint) hint.textContent = actions.hint;
   const map = {
     "sub-subscribe": actions.subscribe,
+    "sub-renew": actions.renew,
     "sub-resubscribe": actions.resubscribe,
     "sub-manage": actions.manage,
     "sub-unsubscribe": actions.unsubscribe,
@@ -5912,6 +6019,22 @@ async function unsubscribeMembership() {
   return data;
 }
 
+async function renewMembership() {
+  const data = await api("/api/billing/renew", { method: "POST", body: {} });
+  if (data.url) {
+    location.href = data.url;
+    return data;
+  }
+  if (data.skipped && data.reason) {
+    toast(data.reason);
+    return data;
+  }
+  toast(data.message || "Membership will renew.");
+  await refreshMembershipUi(data);
+  if ($("#view-subscription")?.classList.contains("on")) renderSubscriptionPage(data);
+  return data;
+}
+
 async function reactivateMembership() {
   const data = await api("/api/billing/reactivate", { method: "POST", body: {} });
   toast(data.message || "Subscription will renew.");
@@ -5965,7 +6088,11 @@ async function refreshMembershipUi(session) {
   const isPastDue = !isAdmin && (status === "past_due" || status === "unpaid");
   const canSubscribe = !isAdmin && stripeOk && !["active", "trialing"].includes(status);
   const canManage = !isAdmin && stripeOk;
-  const showBanner = !isAdmin && stripeOk && (needsPay || isTrial || isPastDue);
+  const pendingCancel = !isAdmin && !!me.cancel_at_period_end && ["active", "trialing"].includes(status);
+  const canRenew = !isAdmin && stripeOk && (
+    pendingCancel || ["canceled", "past_due", "unpaid", "incomplete", "incomplete_expired"].includes(status)
+  );
+  const showBanner = !isAdmin && stripeOk && (needsPay || isTrial || isPastDue || pendingCancel);
 
   membershipLocked = needsPay;
   const banner = $("#membership-banner");
@@ -5979,12 +6106,17 @@ async function refreshMembershipUi(session) {
       const price = amount != null ? `$${(Number(amount) / 100).toFixed(2)} ${cur}/${interval}` : "membership";
       const text = $("#membership-banner-text");
       if (text) {
-        if (isTrial) {
+        if (pendingCancel) {
+          const when = periodEndLabel(me.current_period_end);
+          text.textContent = when
+            ? `Your membership ends on ${when} and will not renew.`
+            : "Your membership is set to end and will not renew.";
+        } else if (isTrial) {
           text.textContent =
             `Trial active (${price}). Open Subscription to manage or unsubscribe before it converts.`;
         } else if (isPastDue) {
           text.textContent =
-            `Payment issue (${status}). Update your card or resubscribe on Subscription (${price}).`;
+            `Payment issue (${status}). Renew to pay the open invoice (${price}).`;
         } else {
           text.textContent =
             `Membership required (${price}). Browse and delete stay open — subscribe to create, edit, generate topics, or render.`;
@@ -6019,13 +6151,17 @@ async function refreshMembershipUi(session) {
       : "Manage billing";
   }
   if (bannerCheckout) {
-    bannerCheckout.hidden = !canSubscribe;
+    bannerCheckout.hidden = !canSubscribe || canRenew;
     bannerCheckout.textContent = checkoutBtn?.textContent || "Subscribe";
   }
   if (bannerPortal) {
     bannerPortal.hidden = !canManage;
     bannerPortal.textContent = "Manage billing";
   }
+  const bannerRenew = $("#membership-renew");
+  if (bannerRenew) bannerRenew.hidden = !canRenew;
+  const settingsRenew = $("#settings-membership-renew-action");
+  if (settingsRenew) settingsRenew.hidden = !canRenew;
   const settingsUnsub = $("#settings-membership-unsubscribe");
   if (settingsUnsub) {
     const pendingCancel = !!me.cancel_at_period_end;
@@ -6036,6 +6172,11 @@ async function refreshMembershipUi(session) {
   if (memLead) {
     if (!stripeOk) {
       memLead.textContent = "Billing is not configured yet. Ask an admin to connect Stripe.";
+    } else if (pendingCancel) {
+      const when = periodEndLabel(me.current_period_end);
+      memLead.textContent = when
+        ? `Your membership ends on ${when}. Renew to keep access.`
+        : "Your membership is set to end. Renew to keep access.";
     } else if (isTrial) {
       memLead.textContent = "Your trial is active. Open Subscription to unsubscribe or manage billing.";
     } else if (needsPay || isPastDue) {
@@ -6115,6 +6256,18 @@ $("#sub-unsubscribe")?.addEventListener("click", async () => {
 $("#sub-reactivate")?.addEventListener("click", async () => {
   try { await reactivateMembership(); } catch (err) { toast(err.message, true); }
 });
+$("#sub-renew")?.addEventListener("click", async () => {
+  try { await renewMembership(); } catch (err) {
+    const box = $("#sub-error"); if (box) { box.hidden = false; box.textContent = err.message; }
+    toast(err.message, true);
+  }
+});
+$("#membership-renew")?.addEventListener("click", async () => {
+  try { await renewMembership(); } catch (err) { toast(err.message, true); }
+});
+$("#settings-membership-renew-action")?.addEventListener("click", async () => {
+  try { await renewMembership(); } catch (err) { toast(err.message, true); }
+});
 
 $("#logout-btn")?.addEventListener("click", async () => {
   if (desktopMode) return;
@@ -6190,6 +6343,26 @@ $("#costs-next")?.addEventListener("click", () => {
   renderCostsTable();
 });
 
+function setupAppNav() {
+  const toggle = document.querySelector("#nav-toggle");
+  const chrome = document.querySelector(".chrome");
+  const tabs = document.querySelector("#app-tabs");
+  if (!toggle || !chrome || !tabs) return;
+  function setOpen(open) {
+    chrome.classList.toggle("nav-open", open);
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    toggle.querySelector(".nav-toggle-label").textContent = open ? "Close" : "Menu";
+  }
+  toggle.addEventListener("click", () => setOpen(!chrome.classList.contains("nav-open")));
+  tabs.addEventListener("click", (event) => {
+    if (!event.target.closest("button[data-step], a[href]")) return;
+    if (window.matchMedia("(max-width: 900px)").matches) setOpen(false);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && chrome.classList.contains("nav-open")) setOpen(false);
+  });
+}
+
 function setupOrdersMenu() {
   document.querySelectorAll("details.nav-menu").forEach((menu) => {
     const summary = menu.querySelector("summary");
@@ -6204,6 +6377,14 @@ function setupOrdersMenu() {
 
     function place() {
       if (!menu.closest(".tab-row") || !menu.open) return;
+      if (window.matchMedia("(max-width: 900px)").matches) {
+        panel.style.position = "static";
+        panel.style.width = "100%";
+        panel.style.top = "auto";
+        panel.style.left = "auto";
+        panel.style.right = "auto";
+        return;
+      }
       const rect = summary.getBoundingClientRect();
       const width = 200;
       const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8));
@@ -6259,5 +6440,6 @@ function setupOrdersMenu() {
   });
 }
 
+setupAppNav();
 setupOrdersMenu();
 startApp();

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import contextvars
 import json
 import os
-from typing import Any
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Iterator
 
-from studio.paths import SETTINGS_PATH, YOUTUBE_TOKEN_PATH, ensure_dirs, load_repo_dotenv
+from studio.paths import SETTINGS_PATH, USERS_DIR, YOUTUBE_TOKEN_PATH, ensure_dirs, load_repo_dotenv
 
 DEFAULT_LISTEN_HOST = "127.0.0.1"
 DEFAULT_LISTEN_PORT = 7878
@@ -23,6 +26,8 @@ SECRET_KEYS = frozenset({
     "stripe_webhook_secret",
     "smtp_password",
     "registration_invite_code",
+    "mailjet_api_key",
+    "mailjet_secret_key",
 })
 REDACTION_PLACEHOLDER = "********"
 REDACTION_TOKENS = frozenset({
@@ -82,11 +87,12 @@ COVER_PROVIDER_LABELS = {
 COMFYUI_DEFAULT_URL = "http://127.0.0.1:8188"
 STUDIO_IMAGE_PROVIDERS = frozenset({"flux", "comfyui"})
 AGENT_IMAGE_PROVIDERS = frozenset({"chatgpt", "external", "manual"})
-TEXT_PROVIDERS = ("openai", "chatgpt", "claude", "lmstudio")
+TEXT_PROVIDERS = ("openai", "chatgpt", "claude", "external", "lmstudio")
 TEXT_PROVIDER_LABELS = {
     "openai": "OpenAI",
     "chatgpt": "ChatGPT",
     "claude": "Claude",
+    "external": "External",
     "lmstudio": "LM Studio",
 }
 LMSTUDIO_DEFAULT_BASE_URL = "http://127.0.0.1:1234/v1"
@@ -195,6 +201,17 @@ DEFAULTS = {
     "email_from_name": "Stickman Automation",
     "email_reply_to": "",
     "email_templates": {},
+    # Mailjet Send API (admin store only; never copied onto a member).
+    "mailjet_api_key": "",
+    "mailjet_secret_key": "",
+    "mailjet_from_email": "",
+    "mailjet_from_name": "",
+    "mailjet_sender_domain": "",
+    # Done-for-you video packages (Admin → Pricing). Empty uses the built-in offer.
+    "order_packages": {},
+    "order_ten_minute_multiplier": 1.5,
+    # Buyer-facing art styles (Admin → Pricing). {} means the pipeline catalog; {"items": [...]} is the saved list.
+    "order_art_styles": {},
 }
 
 
@@ -251,13 +268,20 @@ def normalize_text_provider(value: str | None, default: str = "openai") -> str:
         "localllm": "lmstudio",
         "localstudio": "lmstudio",
         "openaicompatible": "lmstudio",
+        "external": "external",
+        "externalmcp": "external",
+        "externalviamcp": "external",
+        "mcp": "external",
+        "viamcp": "external",
+        "agent": "external",
     }
     if raw in aliases:
         return aliases[raw]
     if not raw:
         return default if default in TEXT_PROVIDERS else "openai"
     raise RuntimeError(
-        f"Unknown text provider: {value}. Use openai (billed API), chatgpt, claude (Desktop MCP), or lmstudio (local)."
+        f"Unknown text provider: {value}. Use openai (billed API), chatgpt, claude, "
+        "external (via MCP), or lmstudio (local)."
     )
 
 
@@ -273,7 +297,7 @@ def is_native_text_provider(value: str | None = None) -> bool:
         provider = normalize_text_provider(value) if value not in (None, "") else current_text_provider()
     except RuntimeError:
         provider = current_text_provider()
-    return provider in ("chatgpt", "claude")
+    return provider in ("chatgpt", "claude", "external")
 
 
 def is_api_text_provider(value: str | None = None) -> bool:
@@ -488,6 +512,28 @@ def normalize_youtube_auto_upload(value: Any, default: bool = False) -> bool:
     if raw in ("0", "false", "no", "off"):
         return False
     return default
+
+
+def normalize_youtube_delete_file_after_upload(value: Any, default: bool = True) -> bool:
+    """Same tokens as youtube_auto_upload. Unknown values are rejected (not coerced).
+
+    Empty / missing stays at the default (True). Booleans pass through.
+    Strings true/false, yes/no, on/off, and 1/0 are accepted.
+    """
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    raw = str(value).strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise RuntimeError(
+        "youtube_delete_file_after_upload must be a boolean or "
+        '"true"/"false" (also yes/no, on/off, 1/0). '
+        f"Got: {value!r}."
+    )
 
 
 def normalize_auto_scheduler(value: Any, default: bool = True) -> bool:
@@ -745,8 +791,32 @@ def studio_url_prefix(settings: dict[str, Any] | None = None) -> str:
     return ""
 
 
+# Secrets captured the first time settings load. Later os.environ writes
+# (a member fal/OpenAI/ElevenLabs key used for one call) must not become
+# the shared admin key on the next save_settings.
+_FROZEN_SECRET_ENV: dict[str, str] | None = None
+_SECRET_ENV_NAMES = ("OPENAI_API_KEY", "ELEVENLABS_API_KEY", "FAL_KEY", "FAL_API_KEY")
+
+
+def _freeze_secret_env() -> dict[str, str]:
+    global _FROZEN_SECRET_ENV
+    if _FROZEN_SECRET_ENV is None:
+        _FROZEN_SECRET_ENV = {name: os.environ.get(name, "") for name in _SECRET_ENV_NAMES}
+    return _FROZEN_SECRET_ENV
+
+
+def _frozen_secret(*names: str) -> str:
+    frozen = _freeze_secret_env()
+    for name in names:
+        val = (frozen.get(name) or "").strip()
+        if val:
+            return val
+    return ""
+
+
 def _env_overrides() -> dict[str, Any]:
     load_repo_dotenv()
+    _freeze_secret_env()
     mapping = {
         "openai_api_key": "OPENAI_API_KEY",
         "elevenlabs_api_key": "ELEVENLABS_API_KEY",
@@ -767,7 +837,10 @@ def _env_overrides() -> dict[str, Any]:
     }
     out: dict[str, Any] = {}
     for key, env in mapping.items():
-        val = os.environ.get(env, "").strip()
+        if env in _SECRET_ENV_NAMES:
+            val = _frozen_secret(env)
+        else:
+            val = os.environ.get(env, "").strip()
         if val:
             out[key] = val
     public = _first_env("PUBLIC_BASE_URL", "BUBBLEPOD_PUBLIC_BASE_URL", "LAZYKH_PUBLIC_BASE_URL")
@@ -782,7 +855,7 @@ def _env_overrides() -> dict[str, Any]:
             out["port"] = normalize_listen_port(port_raw)
         except Exception:
             pass
-    fal = os.environ.get("FAL_KEY", "").strip() or os.environ.get("FAL_API_KEY", "").strip()
+    fal = _frozen_secret("FAL_KEY", "FAL_API_KEY")
     if fal:
         out["fal_key"] = fal
     if os.environ.get("EMAIL_ENABLED", "").strip().lower() in ("1", "true", "yes", "on"):
@@ -793,16 +866,184 @@ def _env_overrides() -> dict[str, Any]:
     return out
 
 
+# Seed only when the admin settings file has the field blank. A saved value wins.
+_MAILJET_ENV = (
+    ("mailjet_api_key", "MAILJET_API_KEY"),
+    ("mailjet_secret_key", "MAILJET_SECRET_KEY"),
+    ("mailjet_from_email", "MAILJET_FROM_EMAIL"),
+    ("mailjet_from_name", "MAILJET_FROM_NAME"),
+    ("mailjet_sender_domain", "MAILJET_SENDER_DOMAIN"),
+)
+
+
+def _seed_mailjet_env(data: dict[str, Any], stored: dict[str, Any]) -> None:
+    load_repo_dotenv()
+    for key, env in _MAILJET_ENV:
+        if str(stored.get(key) or "").strip():
+            continue
+        val = os.environ.get(env, "").strip()
+        if val:
+            data[key] = val
+
+
+_settings_owner: contextvars.ContextVar[str] = contextvars.ContextVar("studio_settings_owner", default="")
+
+# Production choices a member keeps on their own account. Server control
+# (ports, ngrok, PIN, Stripe, rate limits, the shared pose color) stays admin-only.
+MEMBER_OWN_KEYS = frozenset({
+    "text_provider",
+    "script_draft_provider",
+    "openai_model",
+    "openai_api_key",
+    "lmstudio_base_url",
+    "lmstudio_model",
+    "image_provider",
+    "fal_key",
+    "fal_video_model",
+    "cover_provider",
+    "comfyui_url",
+    "tts_provider",
+    "voice_provider",
+    "openai_tts_model",
+    "elevenlabs_api_key",
+    "elevenlabs_model",
+    "openai_voice",
+    "elevenlabs_voice_id",
+    "local_voice",
+    "video_layout",
+    "character_size",
+    "default_aspect",
+    "music_volume_pct",
+})
+_MEMBER_SECRET_KEYS = frozenset({"openai_api_key", "fal_key", "elevenlabs_api_key"})
+
+
+def current_settings_owner() -> str:
+    return (_settings_owner.get() or "").strip()
+
+
+@contextmanager
+def settings_owner(user_id: str | None) -> Iterator[None]:
+    token = _settings_owner.set((user_id or "").strip())
+    try:
+        yield
+    finally:
+        _settings_owner.reset(token)
+
+
+@contextmanager
+def bind_settings_user(user: dict[str, Any] | None) -> Iterator[None]:
+    """Members read and write their own text, image, voice, and video defaults."""
+    uid = ""
+    if user and (user.get("role") or "") != "admin":
+        uid = str(user.get("id") or "").strip()
+    with settings_owner(uid):
+        yield
+
+
+@contextmanager
+def bind_settings_for_project(project_id: str) -> Iterator[None]:
+    uid = ""
+    try:
+        from studio.projects import load_meta
+
+        meta = load_meta(project_id)
+        oid = str((meta or {}).get("owner_id") or "").strip()
+    except Exception:
+        oid = ""
+    if oid:
+        try:
+            from studio.members import get_user_by_id
+
+            owner = get_user_by_id(oid)
+        except Exception:
+            owner = None
+        if owner and (owner.get("role") or "") != "admin":
+            uid = str(owner.get("id") or "").strip()
+    with settings_owner(uid):
+        yield
+
+
+def _user_settings_path(user_id: str) -> Path:
+    uid = (user_id or "").strip()
+    if not uid or Path(uid).name != uid:
+        raise ValueError(f"Invalid settings user id: {user_id!r}")
+    return USERS_DIR / uid / "studio_settings.json"
+
+
+def _read_user_settings(user_id: str) -> dict[str, Any]:
+    path = _user_settings_path(user_id)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _overlay_member_production(data: dict[str, Any]) -> dict[str, Any]:
+    """Replace admin production choices with this member's file.
+
+    API keys fall back to empty, not the admin key or the server env key.
+    Unset choices fall back to built-in defaults, not the admin's Settings.
+    """
+    uid = current_settings_owner()
+    if not uid:
+        return data
+    try:
+        saved = _read_user_settings(uid)
+    except ValueError:
+        return data
+    out = dict(data)
+    for key in MEMBER_OWN_KEYS:
+        if key in _MEMBER_SECRET_KEYS:
+            out[key] = str(saved.get(key) or "").strip()
+            continue
+        raw = saved.get(key) if key in saved else None
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            if key in DEFAULTS:
+                out[key] = DEFAULTS[key]
+            continue
+        out[key] = raw
+    return out
+
+
+def save_user_production_settings(user_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+    """Persist only this member's text, image, voice, and video defaults."""
+    uid = (user_id or "").strip()
+    if not uid:
+        raise ValueError("user_id is required")
+    kept = {k: v for k, v in updates.items() if k in MEMBER_OWN_KEYS}
+    kept = scrub_secret_updates(kept)
+    current = _read_user_settings(uid)
+    for key, value in kept.items():
+        if key in _MEMBER_SECRET_KEYS and is_placeholder_secret(value):
+            continue
+        current[key] = value
+    path = _user_settings_path(uid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
+    with settings_owner(uid):
+        return load_settings()
+
+
 def load_settings() -> dict[str, Any]:
     load_repo_dotenv()
     ensure_dirs()
     data = dict(DEFAULTS)
+    stored: dict[str, Any] = {}
     if SETTINGS_PATH.is_file():
         try:
-            data.update(json.loads(SETTINGS_PATH.read_text(encoding="utf-8")))
+            loaded = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
-            pass
+            loaded = None
+        if isinstance(loaded, dict):
+            stored = loaded
+            data.update(loaded)
+    _seed_mailjet_env(data, stored)
     data.update(_env_overrides())
+    data = _overlay_member_production(data)
     data["image_provider"] = normalize_image_provider(data.get("image_provider"))
     data["fal_video_model"] = normalize_fal_video_model(data.get("fal_video_model"))
     try:
@@ -903,7 +1144,11 @@ def load_settings() -> dict[str, Any]:
 
 
 def save_settings(updates: dict[str, Any]) -> dict[str, Any]:
-    data = load_settings()
+    token = _settings_owner.set("")
+    try:
+        data = load_settings()
+    finally:
+        _settings_owner.reset(token)
     incoming = scrub_secret_updates(dict(updates))
     if "text_provider" not in incoming and "script_provider" in incoming:
         incoming["text_provider"] = incoming["script_provider"]
@@ -959,7 +1204,7 @@ def save_settings(updates: dict[str, Any]) -> dict[str, Any]:
             elif key == "youtube_auto_upload":
                 data[key] = normalize_youtube_auto_upload(value)
             elif key == "youtube_delete_file_after_upload":
-                data[key] = normalize_bool(value, True)
+                data[key] = normalize_youtube_delete_file_after_upload(value, True)
             elif key == "auto_scheduler":
                 data[key] = normalize_auto_scheduler(value)
             elif key == "hands_off":
@@ -1079,7 +1324,24 @@ def public_settings() -> dict[str, Any]:
     data["email_from"] = str(data.get("email_from") or "")
     data["email_from_name"] = str(data.get("email_from_name") or "Stickman Automation")
     data["email_reply_to"] = str(data.get("email_reply_to") or "")
-    data["email_configured"] = bool(data["email_enabled"] and data["smtp_host"])
+    api_key = str(data.get("mailjet_api_key") or "").strip()
+    secret = str(data.get("mailjet_secret_key") or "").strip()
+    from studio.mailjet import from_name as mailjet_from_name
+    from studio.mailjet import resolved_from_email, sender_domain as mailjet_domain
+
+    domain = mailjet_domain(data.get("mailjet_sender_domain"))
+    data["mailjet_api_key_set"] = bool(api_key)
+    data["mailjet_secret_key_set"] = bool(secret)
+    data["mailjet_api_key"] = REDACTION_PLACEHOLDER if api_key else ""
+    data["mailjet_secret_key"] = REDACTION_PLACEHOLDER if secret else ""
+    data["mailjet_sender_domain"] = domain
+    data["mailjet_from_name"] = mailjet_from_name(
+        data.get("mailjet_from_name") or data.get("email_from_name")
+    )
+    raw_from = str(data.get("mailjet_from_email") or "")
+    data["mailjet_from_email"] = raw_from
+    data["mailjet_from_resolved"] = resolved_from_email(raw_from or data.get("email_from"), domain)
+    data["email_configured"] = bool(data["email_enabled"] and api_key and secret)
     try:
         from studio.email import list_templates
 
@@ -1184,8 +1446,8 @@ def public_settings() -> dict[str, Any]:
     data["text_provider_note"] = (
         "openai bills the OpenAI chat API for scripts and topic batches. "
         "lmstudio calls the local OpenAI-compatible server (default http://127.0.0.1:1234/v1) — no OpenAI cloud. "
-        "chatgpt and claude write natively through Desktop MCP (save_script / create_topic) "
-        "and never call OpenAI chat. When text_provider is lmstudio, ChatGPT/Claude MCP should call "
+        "chatgpt, claude, and external write natively through MCP (save_script / create_topic) "
+        "and never call OpenAI chat. When text_provider is lmstudio, MCP clients should call "
         "generate_script_via_api / generate_topics instead of writing the body themselves."
     )
     data["video_layouts"] = list(VIDEO_LAYOUTS)
@@ -1273,6 +1535,18 @@ def public_settings() -> dict[str, Any]:
         "Hands-off scheduler spends without per-call confirm while hands_off is enabled. "
         "Daily caps of 0 mean unlimited."
     )
+    if current_settings_owner():
+        for key in (
+            "mailjet_api_key",
+            "mailjet_secret_key",
+            "mailjet_api_key_set",
+            "mailjet_secret_key_set",
+            "mailjet_from_email",
+            "mailjet_from_name",
+            "mailjet_sender_domain",
+            "mailjet_from_resolved",
+        ):
+            data.pop(key, None)
     return data
 
 
@@ -1322,6 +1596,19 @@ _MEMBER_SETTINGS_KEYS = frozenset({
     "flux_model",
     "fal_video_model",
     "fal_video_models",
+    "openai_model",
+    "openai_tts_model",
+    "openai_api_key",
+    "openai_api_key_set",
+    "elevenlabs_api_key",
+    "elevenlabs_api_key_set",
+    "elevenlabs_model",
+    "fal_key",
+    "fal_key_set",
+    "lmstudio_base_url",
+    "lmstudio_model",
+    "script_draft_provider",
+    "comfyui_url",
 })
 
 
@@ -1350,4 +1637,29 @@ def settings_for_user(user: dict[str, Any] | None) -> dict[str, Any]:
         data["signed_in_as"] = (user or {}).get("username") or data.get("auth_username") or ""
         data["is_admin"] = True
         return data
-    return member_safe_settings((user or {}).get("username") or "")
+    data = member_safe_settings((user or {}).get("username") or "")
+    try:
+        from studio.youtube import bind_youtube_user, is_connected, owner_youtube_prefs
+
+        with bind_settings_user(user):
+            scoped = member_safe_settings((user or {}).get("username") or "")
+            data.update(scoped)
+        with bind_youtube_user(user):
+            prefs = owner_youtube_prefs()
+            data["youtube_auto_upload"] = bool(prefs.get("auto_upload"))
+            data["youtube_privacy"] = prefs.get("privacy")
+            data["youtube_delete_file_after_upload"] = bool(prefs.get("delete_file_after_upload"))
+            data["youtube_connected"] = bool(is_connected())
+            # Real channel for this member. The settings form has no
+            # youtube_channel_id field, so saving the page cannot blank it.
+            try:
+                from studio.youtube import status as youtube_status
+
+                channel = youtube_status()
+                data["youtube_channel_id"] = str(channel.get("channel_id") or "")
+                data["youtube_connected"] = bool(channel.get("connected"))
+            except Exception:
+                data["youtube_channel_id"] = ""
+    except Exception:
+        pass
+    return data

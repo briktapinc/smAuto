@@ -183,7 +183,7 @@ async function loadMembers() {
         ${rows.map((u) => `
           <tr>
             <td><strong>${esc(u.username)}</strong><br><span class="muted">${esc(u.email || "—")}</span></td>
-            <td>${esc(u.role)}</td>
+            <td>${esc(u.role === "buyer" ? "Buyer" : u.role)}</td>
             <td>${badge(!!u.has_access, u.has_access ? "full access" : "locked")}</td>
             <td>${esc(u.subscription_status || "none")}</td>
             <td class="muted">${esc(u.stripe_customer_id || "—")}</td>
@@ -332,6 +332,7 @@ $$(".top nav [data-panel]").forEach((btn) => {
         ["Subscription", (r) => esc(r.subscription_id || "")],
       ]);
       if (name === "stripe") await loadStripeForm();
+      if (name === "pricing") await loadPricingForm();
       if (name === "email") await loadEmailForm();
     } catch (err) {
       toast(err.message, true);
@@ -461,18 +462,23 @@ let emailTemplateState = {};
 async function loadEmailForm() {
   const settings = await api("/api/settings");
   $("#email-enabled").checked = !!settings.email_enabled;
-  $("#smtp-host").value = settings.smtp_host || "";
-  $("#smtp-port").value = settings.smtp_port || 587;
-  $("#smtp-user").value = settings.smtp_user || "";
-  $("#smtp-password").placeholder = settings.smtp_password_set ? "******** (set — enter new to change)" : "SMTP password";
-  $("#smtp-tls").checked = settings.smtp_use_tls !== false;
-  $("#smtp-ssl").checked = !!settings.smtp_use_ssl;
-  $("#email-from").value = settings.email_from || "";
-  $("#email-from-name").value = settings.email_from_name || "Stickman Automation";
+  $("#mailjet-api-key").value = "";
+  $("#mailjet-api-key").placeholder = settings.mailjet_api_key_set
+    ? "******** (set — enter new to change)"
+    : "Mailjet API key";
+  $("#mailjet-secret-key").value = "";
+  $("#mailjet-secret-key").placeholder = settings.mailjet_secret_key_set
+    ? "******** (set — enter new to change)"
+    : "Mailjet secret key";
+  $("#mailjet-sender-domain").value = settings.mailjet_sender_domain || "stickmanautomation.com";
+  $("#mailjet-from-email").value = settings.mailjet_from_email || "";
+  $("#mailjet-from-name").value = settings.mailjet_from_name || "Stickman Automation";
   $("#email-reply-to").value = settings.email_reply_to || "";
+  const resolved = settings.mailjet_from_resolved || "noreply@stickmanautomation.com";
+  $("#mailjet-from-preview").textContent = `Messages send from ${resolved}.`;
   $("#email-status").textContent = settings.email_configured
-    ? "Email is enabled and SMTP host is set."
-    : "Email is off or incomplete — messages will be skipped until configured.";
+    ? `Outbound email is on. Mailjet sends as ${resolved}.`
+    : "Save the Mailjet API key and secret, then enable outbound email.";
   emailTemplateState = settings.email_templates || {};
   renderEmailTemplates();
 }
@@ -503,21 +509,20 @@ $("#email-form")?.addEventListener("submit", async (e) => {
   e.preventDefault();
   const body = {
     email_enabled: $("#email-enabled").checked,
-    smtp_host: $("#smtp-host").value.trim(),
-    smtp_port: Number($("#smtp-port").value || 587),
-    smtp_user: $("#smtp-user").value.trim(),
-    smtp_use_tls: $("#smtp-tls").checked,
-    smtp_use_ssl: $("#smtp-ssl").checked,
-    email_from: $("#email-from").value.trim(),
-    email_from_name: $("#email-from-name").value.trim(),
+    mailjet_sender_domain: $("#mailjet-sender-domain").value.trim(),
+    mailjet_from_email: $("#mailjet-from-email").value.trim(),
+    mailjet_from_name: $("#mailjet-from-name").value.trim(),
     email_reply_to: $("#email-reply-to").value.trim(),
   };
-  const pw = $("#smtp-password").value.trim();
-  if (pw && pw !== "********") body.smtp_password = pw;
+  const apiKey = $("#mailjet-api-key").value.trim();
+  if (apiKey && apiKey !== "********") body.mailjet_api_key = apiKey;
+  const secret = $("#mailjet-secret-key").value.trim();
+  if (secret && secret !== "********") body.mailjet_secret_key = secret;
   try {
     await api("/api/settings", { method: "PUT", body });
     toast("Email settings saved");
-    $("#smtp-password").value = "";
+    $("#mailjet-api-key").value = "";
+    $("#mailjet-secret-key").value = "";
     await loadEmailForm();
   } catch (err) {
     toast(err.message, true);
@@ -580,6 +585,185 @@ $("#backup-now-btn")?.addEventListener("click", async () => {
     toast(err.message || "Backup failed", true);
   } finally {
     if (btn) btn.disabled = false;
+  }
+});
+
+async function loadPricingForm() {
+  const data = await api("/api/orders/config");
+  const multiplier = $("#pricing-multiplier");
+  if (multiplier) multiplier.value = data.ten_minute_multiplier ?? 1.5;
+  const root = $("#pricing-packages");
+  if (!root) return;
+  root.innerHTML = (data.packages || []).map((pkg) => {
+    const dollars = (Number(pkg.prices?.["5"] || 0) / 100).toFixed(2);
+    return `<fieldset class="card" data-pricing-key="${esc(pkg.key)}">
+      <legend>${esc(pkg.name)}</legend>
+      <div class="row">
+        <label>Price (USD)
+          <input data-field="price" type="number" min="0.50" step="0.01" value="${esc(dollars)}" />
+        </label>
+        <label>Videos
+          <input data-field="videos" type="number" min="1" max="100" step="1" value="${esc(pkg.videos)}" />
+        </label>
+        <label>Days
+          <input data-field="days" type="number" min="1" max="60" step="1" value="${esc(pkg.days)}" />
+        </label>
+        <label>Per day
+          <input data-field="per_day" type="number" min="1" max="20" step="1" value="${esc(pkg.per_day)}" />
+        </label>
+      </div>
+      <p class="muted">${esc(pkg.timeline || "")}</p>
+    </fieldset>`;
+  }).join("");
+  const status = $("#pricing-status");
+  if (status) status.textContent = "Checkout uses the saved prices. 10-minute orders use the multiplier.";
+  await loadArtStyles(data);
+}
+
+async function loadArtStyles(config) {
+  const data = config || await api("/api/orders/config");
+  const list = $("#art-style-list");
+  const datalist = $("#art-style-ids");
+  if (datalist) {
+    datalist.innerHTML = (data.pipeline_art_styles || []).map((style) =>
+      `<option value="${esc(style.id)}">${esc(style.name)}</option>`
+    ).join("");
+  }
+  if (!list) return;
+  const styles = data.art_styles || [];
+  if (!styles.length) {
+    list.innerHTML = `<p class="muted">No art styles are offered. Add one from the pipeline list.</p>`;
+    return;
+  }
+  list.innerHTML = styles.map((style) => {
+    const thumb = style.thumbnail_url
+      ? `<img src="${esc(style.thumbnail_url)}" alt="" width="160" height="90" style="object-fit:cover;border-radius:8px;background:#e6eef6" />`
+      : `<p class="muted">No thumbnail yet</p>`;
+    return `<fieldset class="card" data-art-style="${esc(style.id)}">
+      <legend>${esc(style.name)}</legend>
+      <p class="muted">Id: <code>${esc(style.id)}</code></p>
+      ${thumb}
+      <div class="row">
+        <label>Name
+          <input data-field="name" value="${esc(style.name)}" />
+        </label>
+        <label>Replace thumbnail
+          <input data-field="file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+        </label>
+      </div>
+      <div class="row">
+        <button type="button" data-action="save-style">Save name</button>
+        <button type="button" data-action="upload-style">Upload thumbnail</button>
+        <button type="button" data-action="remove-style">Remove</button>
+      </div>
+    </fieldset>`;
+  }).join("");
+}
+
+async function uploadArtThumb(styleId, file) {
+  const headers = { Accept: "application/json" };
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const body = new FormData();
+  body.append("file", file);
+  const res = await fetch(withBase(`/api/admin/order-art-styles/${encodeURIComponent(styleId)}/thumbnail`), {
+    method: "POST",
+    headers,
+    credentials: "same-origin",
+    body,
+  });
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = { detail: text }; }
+  if (!res.ok) {
+    const detail = data?.detail || res.statusText || "Upload failed";
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  return data;
+}
+
+$("#art-style-list")?.addEventListener("click", async (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  const box = button.closest("[data-art-style]");
+  if (!box) return;
+  const styleId = box.dataset.artStyle;
+  const status = $("#art-style-status");
+  try {
+    if (button.dataset.action === "remove-style") {
+      await api(`/api/admin/order-art-styles/${encodeURIComponent(styleId)}`, { method: "DELETE" });
+      toast("Art style removed");
+    } else if (button.dataset.action === "save-style") {
+      const name = box.querySelector('[data-field="name"]')?.value || "";
+      const styles = $$("[data-art-style]").map((row) => ({
+        id: row.dataset.artStyle,
+        name: row === box ? name : (row.querySelector('[data-field="name"]')?.value || ""),
+      }));
+      await api("/api/admin/order-art-styles", { method: "PUT", body: { styles } });
+      toast("Art style saved");
+    } else if (button.dataset.action === "upload-style") {
+      const file = box.querySelector('[data-field="file"]')?.files?.[0];
+      if (!file) throw new Error("Choose a thumbnail image first.");
+      await uploadArtThumb(styleId, file);
+      toast("Thumbnail saved");
+    } else {
+      return;
+    }
+    if (status) status.textContent = "";
+    await loadArtStyles();
+  } catch (err) {
+    if (status) status.textContent = err.message || "Could not update art styles.";
+    toast(err.message, true);
+  }
+});
+
+$("#art-style-add")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const status = $("#art-style-status");
+  try {
+    await api("/api/admin/order-art-styles", {
+      method: "POST",
+      body: {
+        id: $("#art-style-id")?.value || "",
+        name: $("#art-style-name")?.value || "",
+      },
+    });
+    if ($("#art-style-id")) $("#art-style-id").value = "";
+    if ($("#art-style-name")) $("#art-style-name").value = "";
+    if (status) status.textContent = "Style added. Upload a thumbnail so buyers can see it.";
+    toast("Art style added");
+    await loadArtStyles();
+  } catch (err) {
+    if (status) status.textContent = err.message || "Could not add that style.";
+    toast(err.message, true);
+  }
+});
+
+$("#pricing-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const packages = {};
+  $$("[data-pricing-key]").forEach((box) => {
+    const key = box.dataset.pricingKey;
+    const field = (name) => box.querySelector(`[data-field="${name}"]`)?.value;
+    packages[key] = {
+      price: field("price"),
+      videos: Number(field("videos")),
+      days: Number(field("days")),
+      per_day: Number(field("per_day")),
+    };
+  });
+  try {
+    await api("/api/admin/order-pricing", {
+      method: "PUT",
+      body: {
+        ten_minute_multiplier: Number($("#pricing-multiplier").value),
+        packages,
+      },
+    });
+    toast("Pricing saved");
+    await loadPricingForm();
+  } catch (err) {
+    toast(err.message, true);
   }
 });
 

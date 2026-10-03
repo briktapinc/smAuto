@@ -150,8 +150,37 @@ def _audit_flux_by_day(limit: int = 400) -> dict[str, int]:
     return days
 
 
-def cost_report(*, limit_projects: int = 40) -> dict[str, Any]:
-    """Per-project Flux estimates plus today counters and a short daily series."""
+def _flux_images_by_day(user_id: str) -> dict[str, int]:
+    """Per-day image counts from this member's usage ledger."""
+    from studio.usage import entries_for_user
+
+    days: dict[str, int] = {}
+    for row in entries_for_user(user_id):
+        if str(row.get("metric") or "") != "images_generated":
+            continue
+        day = str(row.get("recorded_at") or "")[:10]
+        if len(day) != 10:
+            continue
+        try:
+            qty = int(round(float(row.get("quantity") or 0)))
+        except (TypeError, ValueError):
+            qty = 0
+        if qty > 0:
+            days[day] = days.get(day, 0) + qty
+    return days
+
+
+def cost_report(
+    *,
+    limit_projects: int = 40,
+    owner_id: str | None = None,
+    is_admin: bool = True,
+) -> dict[str, Any]:
+    """Per-project Flux estimates plus today counters and a short daily series.
+
+    Members receive their own project rows and ledger totals. Admins keep the
+    global spend report.
+    """
     ensure_dirs()
     from studio.projects import list_projects
     from studio.spend_guard import public_spend_status
@@ -160,8 +189,12 @@ def cost_report(*, limit_projects: int = 40) -> dict[str, Any]:
     flux_today = int(spend.get("flux_images_today") or 0)
     openai_today = int(spend.get("openai_calls_today") or 0)
 
+    metas = list_projects()
+    if not is_admin:
+        uid = (owner_id or "").strip()
+        metas = [m for m in metas if str(m.get("owner_id") or "").strip() == uid]
     projects_out: list[dict[str, Any]] = []
-    for meta in list_projects()[: max(1, int(limit_projects))]:
+    for meta in metas[: max(1, int(limit_projects))]:
         pid = str(meta.get("id") or "")
         if not pid:
             continue
@@ -200,22 +233,44 @@ def cost_report(*, limit_projects: int = 40) -> dict[str, Any]:
     if not chart:
         chart = projects_out[:12]
 
-    audit_days = _audit_flux_by_day()
-    # Merge today from spend counters (more accurate than audit for Flux units).
     today = spend.get("day") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if flux_today:
-        audit_days[today] = max(int(audit_days.get(today) or 0), flux_today)
+    if not is_admin:
+        member_days = _flux_images_by_day((owner_id or "").strip())
+        flux_today = int(member_days.get(today) or 0)
+        openai_today = 0
+        daily = []
+        for day in sorted(member_days.keys())[-14:]:
+            n = int(member_days[day])
+            daily.append(
+                {
+                    "day": day,
+                    "flux_images": n,
+                    "estimate_usd": estimate_flux_usd(n),
+                }
+            )
+        spend = {
+            **spend,
+            "day": today,
+            "openai_calls_today": openai_today,
+            "flux_images_today": flux_today,
+            "flux_usd_today_estimate": estimate_flux_usd(flux_today),
+        }
+    else:
+        audit_days = _audit_flux_by_day()
+        # Merge today from spend counters (more accurate than audit for Flux units).
+        if flux_today:
+            audit_days[today] = max(int(audit_days.get(today) or 0), flux_today)
 
-    daily = []
-    for day in sorted(audit_days.keys())[-14:]:
-        n = int(audit_days[day])
-        daily.append(
-            {
-                "day": day,
-                "flux_images": n,
-                "estimate_usd": estimate_flux_usd(n),
-            }
-        )
+        daily = []
+        for day in sorted(audit_days.keys())[-14:]:
+            n = int(audit_days[day])
+            daily.append(
+                {
+                    "day": day,
+                    "flux_images": n,
+                    "estimate_usd": estimate_flux_usd(n),
+                }
+            )
 
     rates = rates_payload()
     return {

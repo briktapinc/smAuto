@@ -1,4 +1,7 @@
-"""Multi-user membership store. All paying members share equal Studio access; admins manage billing."""
+"""Multi-user membership store. All paying members share equal Studio access; admins manage billing.
+
+Buyers are ordering accounts only. They are not the public signup default and never receive Studio access.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +16,15 @@ from studio.paths import MEMBERS_PATH, ensure_dirs
 
 _lock = threading.Lock()
 
-ROLES = ("admin", "member")
+ROLES = ("admin", "member", "buyer")
+ROLE_LABELS = {
+    "admin": "Admin",
+    "member": "Member",
+    "buyer": "Buyer",
+}
+# Public signup stays a normal member. Admins create buyers explicitly.
+SIGNUP_ROLE = "member"
+ROLE_ERROR = "role must be admin, member, or buyer"
 # Equal entitlements for every paying member (no tiers).
 ACTIVE_STATUSES = frozenset({"active", "trialing"})
 MEMBERSHIP_STATUSES = (
@@ -75,6 +86,7 @@ def _public_user(user: dict[str, Any]) -> dict[str, Any]:
         "username": user.get("username"),
         "email": user.get("email") or "",
         "role": user.get("role") or "member",
+        "role_label": role_label(user.get("role") or "member"),
         "subscription_status": user.get("subscription_status") or "none",
         "plan_tier": user.get("plan_tier") or ("admin" if (user.get("role") or "") == "admin" else "starter"),
         "stripe_customer_id": user.get("stripe_customer_id") or "",
@@ -97,9 +109,30 @@ def _public_user(user: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def is_buyer(user: dict[str, Any] | None) -> bool:
+    return bool(user) and (user.get("role") or "") == "buyer"
+
+
+def role_label(role: str | None) -> str:
+    key = (role or "").strip().lower()
+    return ROLE_LABELS.get(key, key or "Member")
+
+
+def login_landing_path(user: dict[str, Any] | None) -> str:
+    """Where the browser goes after login, signup, or a Studio session restore."""
+    if is_buyer(user):
+        return "/order"
+    return "/"
+
+
 def user_has_access(user: dict[str, Any] | None) -> bool:
-    """Admins always; every member with the same active/trialing membership."""
+    """Admins always; every member with the same active/trialing membership.
+
+    Buyers never receive Studio access, even with an active subscription flag.
+    """
     if not user or user.get("disabled"):
+        return False
+    if is_buyer(user):
         return False
     if (user.get("role") or "") == "admin":
         return True
@@ -162,6 +195,13 @@ def ensure_members_store() -> dict[str, Any]:
             data["users"] = [admin]
             _save(data)
         return data
+
+
+def list_user_records() -> list[dict[str, Any]]:
+    """Raw member rows for background jobs. Includes fields omitted from the session."""
+    ensure_members_store()
+    with _lock:
+        return [dict(user) for user in _load()["users"]]
 
 
 def list_users(*, include_disabled: bool = True) -> list[dict[str, Any]]:
@@ -274,7 +314,7 @@ def create_user(
     pw = (password or "").strip()
     role_n = (role or "member").strip().lower()
     if role_n not in ROLES:
-        raise ValueError("role must be admin or member")
+        raise ValueError(ROLE_ERROR)
     if len(name) < 2:
         raise ValueError("username must be at least 2 characters")
     if len(pw) < 6:
@@ -346,7 +386,7 @@ def update_user(user_id: str, **fields: Any) -> dict[str, Any]:
         if "role" in fields and fields["role"] is not None:
             role_n = str(fields["role"] or "").strip().lower()
             if role_n not in ROLES:
-                raise ValueError("role must be admin or member")
+                raise ValueError(ROLE_ERROR)
             # Keep at least one admin.
             if target.get("role") == "admin" and role_n != "admin":
                 admins = [u for u in data["users"] if u.get("role") == "admin" and not u.get("disabled")]
@@ -375,6 +415,7 @@ def update_user(user_id: str, **fields: Any) -> dict[str, Any]:
             "stripe_price_id",
             "current_period_end",
             "cancel_at_period_end",
+            "renewal_reminder_for",
             "must_change_password",
             "token_version",
             "hands_off",
@@ -445,9 +486,13 @@ def public_session(user: dict[str, Any]) -> dict[str, Any]:
         "username": pub["username"],
         "user_id": pub["id"],
         "role": pub["role"],
+        "role_label": pub.get("role_label") or role_label(pub.get("role")),
         "email": pub["email"],
         "has_access": pub["has_access"],
+        "redirect": login_landing_path(user),
         "subscription_status": pub["subscription_status"],
+        "cancel_at_period_end": pub["cancel_at_period_end"],
+        "current_period_end": pub["current_period_end"],
         "is_admin": pub["role"] == "admin",
         "must_change_password": bool(pub.get("must_change_password")),
         "hands_off": pub["hands_off"],
