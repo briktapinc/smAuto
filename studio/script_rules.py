@@ -354,8 +354,8 @@ HTTP /mcp auth (any one): ngrok HTTP Basic (Settings → Ngrok — Basic only, n
 owner MCP PIN (header X-MCP-Pin, query ?mcp_pin=, or Bearer <pin> — superuser/admin, unchanged),
 per-user API key Authorization: Bearer bp_live_… (create_api_key; scoped projects + per-key rate
 limit, default 60/min — owner agents use rate_limit=600+), or Studio JWT.
-Remote tip: https://…/mcp with Basic credentials from Settings → Ngrok while the tunnel is running.
-ChatGPT Desktop tip: https://…/mcp?mcp_pin=YOUR_PIN also works.
+Remote tip: https://…/mcp/ with Basic credentials from Settings → Ngrok while the tunnel is running.
+ChatGPT Desktop tip: https://…/mcp/?mcp_pin=YOUR_PIN also works.
 SaaS tools: get_my_usage, list_api_keys / create_api_key / revoke_api_key, get_queue_status,
 admin_overview / list_failed_jobs / retry_failed_job / run_backup (admin/PIN only).
 Machine-readable errors: quota_exhausted, rate_limited, upload_too_large, unauthorized.

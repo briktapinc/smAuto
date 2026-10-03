@@ -35,10 +35,12 @@ let topicQueue = [];
 let topicsBusy = false;
 let topicMeta = {};
 let topicsTimer = null;
+let jobsSyncTimer = null;
 let scheduleDialogTopicId = "";
 let jobsPage = 0;
-let jobsFilter = "all";
+let jobsFilter = "draft";
 let jobsSearch = "";
+const JOBS_SYNC_MS = 4000;
 let topicsPage = 0;
 let topicsFilter = "all";
 let topicsSearch = "";
@@ -650,7 +652,14 @@ function setStep(name) {
   if (name === "archives") {
     refreshArchives().then(() => renderArchives()).catch((err) => toast(err.message, true));
   }
-  if (name === "jobs") renderJobsQueue();
+  if (name === "jobs") {
+    renderJobsQueue();
+    refreshJobs()
+      .then(() => {
+        if (anyJobBusy() || jobIndex.some((j) => j.queued)) startPolling();
+      })
+      .catch((err) => toast(err.message, true));
+  }
   if (name === "topics") loadTopics();
   if (name === "costs") loadCosts();
   if (name === "prompts") loadPrompts();
@@ -722,7 +731,7 @@ async function restoreRoute() {
     return;
   }
   setStep(step);
-  if (step === "jobs" && jobIndex.some((j) => j.running || j.busy)) startPolling();
+  if (step === "jobs" && jobIndex.some((j) => j.running || j.busy || j.queued)) startPolling();
 }
 
 function jobLabel(item) {
@@ -741,11 +750,14 @@ function jobState(item) {
     const pos = item.queue_position || item.queue?.queue_position;
     return pos ? `queued (#${pos})` : "queued";
   }
-  if (item.running) return item.job?.detail || item.job?.step || "running";
-  if (item.stopping) return item.job?.detail || "stopping";
+  if (item.running || item.busy) {
+    const detail = displayJobDetail(item, item.job?.detail || item.job?.step || "running");
+    return detail || "running";
+  }
+  if (item.stopping) return displayJobDetail(item, item.job?.detail || "stopping") || "stopping";
   if (item.paused || item.job?.step === "paused") return "paused";
   if (item.job?.step === "stopped") return "stopped";
-  if (item.job?.error) return "error";
+  if (surfaceJobError(item)) return "error";
   if (item.has_video || item.status === "rendered") return "rendered";
   if (item.has_audio || item.status === "audio") return "audio";
   if (item.status === "scripted" || item.status === "aligned") return item.status;
@@ -791,10 +803,47 @@ function hasLocalVideo(item) {
   return ["16:9", "9:16"].some((asp) => renders[asp]?.ready);
 }
 
+/** Local mp4 verified ready — YouTube upload failures are optional after this. */
+function videoIsVerifiedRendered(item) {
+  return hasLocalVideo(item);
+}
+
+/**
+ * Blocking/job-failure message for cards, banners, and modals.
+ * Suppresses YouTube-only errors (e.g. invalid_grant) when the local video is ready.
+ */
+function surfaceJobError(item) {
+  if (!item) return "";
+  const pipelineErr = String(item.job?.error || "").trim();
+  if (pipelineErr) return pipelineErr;
+  const ytErr = String(item.job?.youtube_error || item.youtube_error || "").trim();
+  if (!ytErr) return "";
+  if (videoIsVerifiedRendered(item)) return "";
+  return ytErr;
+}
+
+/** Strip YouTube-upload failure noise from status detail when the render succeeded. */
+function displayJobDetail(item, detail) {
+  const text = String(detail || "").trim();
+  if (!text) return "";
+  if (!videoIsVerifiedRendered(item) && !item?.has_video) return text;
+  if (!/youtube upload failed|invalid_grant|token has been expired or revoked/i.test(text)) {
+    return text;
+  }
+  const cleaned = text
+    .replace(/\s*YouTube upload failed:.*$/i, "")
+    .replace(/\s*\('invalid_grant[^)]*\)[^.]*\.?/gi, "")
+    .trim();
+  if (/video is ready/i.test(text) || !cleaned) return "Video is ready.";
+  return cleaned;
+}
+
 function canStart(item) {
   if (!item) return false;
   if (item.running || item.busy) return false;
   if (item.queued || item.queue?.status === "queued") return false;
+  // Finished local/YouTube work with no surface error — Start is noise on Jobs cards.
+  if (isReady(item) && !surfaceJobError(item)) return false;
   if (item.can_start != null) return !!item.can_start;
   return true;
 }
@@ -806,12 +855,21 @@ function canStop(item) {
   return !!(item.running || item.busy);
 }
 
+function jobIsHalted(item) {
+  return !!(item?.paused || item?.job?.step === "paused" || item?.job?.step === "stopped");
+}
+
 function canResume(item) {
   if (!item) return false;
-  if (item.running) return false;
+  if (item.running || item.busy) return false;
+  if (item.queued || item.queue?.status === "queued") return false;
+  // Suppress Resume when the only issue is a YouTube upload error on a ready local video.
+  if (videoIsVerifiedRendered(item) && !surfaceJobError(item) && !jobIsHalted(item)) {
+    return false;
+  }
   if (item.can_resume != null) return !!item.can_resume;
-  if (item.job?.error || item.job?.youtube_error) return true;
-  if (item.paused || item.job?.step === "paused" || item.job?.step === "stopped") return true;
+  if (surfaceJobError(item)) return true;
+  if (jobIsHalted(item)) return true;
   if (item.resume_from && item.resume_from !== "done") return true;
   return !item.has_video;
 }
@@ -943,6 +1001,21 @@ function renderArchives() {
   }
 }
 
+function jobsEmptyMessage() {
+  if (jobsSearch.trim()) return "No jobs match this search.";
+  if (jobsFilter === "draft") {
+    return `No jobs in progress. Finished videos are under Ready or in Library. <button type="button" id="jobs-empty-create">Create a job</button>`;
+  }
+  if (jobsFilter === "ready") return "No ready videos yet.";
+  if (jobsFilter === "error") return "No jobs with errors.";
+  if (jobsFilter === "queued") return "Nothing queued.";
+  if (jobsFilter === "running") return "Nothing running right now.";
+  if (jobsFilter === "paused") return "No paused or stopped jobs.";
+  if (jobsFilter === "startable") return "No jobs that can start.";
+  if (jobsFilter === "resumable") return "No jobs that can resume.";
+  return "No jobs match this filter.";
+}
+
 function renderJobsQueue() {
   const list = $("#jobs-queue");
   if (!list) return;
@@ -954,7 +1027,7 @@ function renderJobsQueue() {
     return;
   }
   if (!filtered.length) {
-    list.innerHTML = `<p class="empty-lib">No jobs match this filter.</p>`;
+    list.innerHTML = `<p class="empty-lib">${jobsEmptyMessage()}</p>`;
     updatePager("#jobs-pager", "#jobs-page-label", "#jobs-prev", "#jobs-next", 0, 1, 0);
     return;
   }
@@ -963,11 +1036,17 @@ function renderJobsQueue() {
   updatePager("#jobs-pager", "#jobs-page-label", "#jobs-prev", "#jobs-next", pageData.page, pageData.pages, pageData.total);
   list.innerHTML = pageData.items.map((item) => {
     const queued = !!(item.queued || item.queue?.status === "queued");
-    const pulse = jobIsRendering(item) ? "rendering" : (item.running ? "running" : (queued ? "queued" : (item.paused || item.job?.step === "paused" ? "paused" : (item.job?.step === "stopped" ? "stopped" : ""))));
+    const pulse = jobIsRendering(item)
+      ? "rendering"
+      : ((item.running || item.busy)
+        ? "running"
+        : (queued
+          ? "queued"
+          : (jobIsHalted(item) ? (item.job?.step === "stopped" ? "stopped" : "paused") : "")));
     const startOff = (canStart(item) && !membershipLocked) ? "" : "disabled";
     const stopOff = canStop(item) ? "" : "disabled";
     const resumeOff = (canResume(item) && !membershipLocked) ? "" : "disabled";
-    const errRaw = item.job?.error || item.job?.youtube_error || item.youtube_error || "";
+    const errRaw = surfaceJobError(item);
     const errSmall = errRaw
       ? `<small class="job-card-error">${esc(simplifyJobError(errRaw).message)}</small>`
       : "";
@@ -977,7 +1056,7 @@ function renderJobsQueue() {
     return `<div class="job-card ${pulse}${errRaw ? " has-error" : ""}" data-id="${esc(item.id)}">
       <button type="button" class="job-card-main" data-open="${esc(item.id)}">
         <span class="dot"></span>
-        <span>
+        <span class="job-card-copy">
           <strong>${esc(jobLabel(item))}</strong>
           <small>${item.duration_seconds}s · ${esc(item.aspect || "16:9")} · ${esc(jobState(item))}</small>
           ${errSmall}
@@ -1025,25 +1104,44 @@ function jobMatchesFilter(item, filter) {
   if (filter === "all") return true;
   if (filter === "queued") return !!(item.queued || item.queue?.status === "queued");
   if (filter === "running") return !!(item.running || item.busy);
-  if (filter === "paused") {
-    return !!(item.paused || item.job?.step === "paused" || item.job?.step === "stopped");
+  if (filter === "paused") return jobIsHalted(item);
+  if (filter === "ready") return isReady(item) && !surfaceJobError(item);
+  // "In progress" (draft): active MCP/UI work + unfinished jobs — not library-ready.
+  if (filter === "draft") {
+    if (item.running || item.busy || item.queued) return true;
+    if (jobIsHalted(item)) return true;
+    if (surfaceJobError(item)) return true;
+    return !isReady(item);
   }
-  if (filter === "ready") return isReady(item);
-  if (filter === "draft") return !isReady(item) && !(item.running || item.busy || item.queued) && !item.job?.error;
-  if (filter === "error") return !!(item.job?.error || item.job?.youtube_error || item.youtube_error);
+  if (filter === "error") return !!surfaceJobError(item);
   if (filter === "startable") return canStart(item);
   if (filter === "resumable") return canResume(item);
   return true;
 }
 
+function jobActivityRank(item) {
+  if (item.running || item.busy) return 0;
+  if (item.queued || item.queue?.status === "queued") return 1;
+  if (jobIsHalted(item)) return 2;
+  if (surfaceJobError(item)) return 3;
+  if (!isReady(item)) return 4;
+  return 5;
+}
+
 function filteredJobs() {
   const q = jobsSearch.trim().toLowerCase();
-  return jobIndex.filter((item) => {
-    if (!jobMatchesFilter(item, jobsFilter)) return false;
-    if (!q) return true;
-    const hay = `${jobLabel(item)} ${item.id || ""} ${item.topic || ""} ${jobState(item)}`.toLowerCase();
-    return hay.includes(q);
-  });
+  return jobIndex
+    .filter((item) => {
+      if (!jobMatchesFilter(item, jobsFilter)) return false;
+      if (!q) return true;
+      const hay = `${jobLabel(item)} ${item.id || ""} ${item.topic || ""} ${jobState(item)}`.toLowerCase();
+      return hay.includes(q);
+    })
+    .sort((a, b) => {
+      const rank = jobActivityRank(a) - jobActivityRank(b);
+      if (rank !== 0) return rank;
+      return String(b.updated_at || b.id || "").localeCompare(String(a.updated_at || a.id || ""));
+    });
 }
 
 function renderWatchRelated() {
@@ -1062,33 +1160,35 @@ function renderJobList() {
 function setBusy(running, detail = "") {
   const banner = $("#run-status");
   const textEl = $("#run-status-text");
-  const text = detail || (running ? "Working…" : "Idle.");
-  const hasError = Boolean(current?.job?.error || current?.job?.youtube_error || current?.youtube_error) && !running;
-  const hideIdle = !running && !hasError && (!detail || detail === "Idle." || detail === "Done.");
+  const surfaceErr = surfaceJobError(current);
+  const cleanDetail = displayJobDetail(current, detail);
+  const text = cleanDetail || (running ? "Working…" : "Idle.");
+  const hasError = Boolean(surfaceErr) && !running;
+  const hideIdle = !running && !hasError && (!cleanDetail || cleanDetail === "Idle." || cleanDetail === "Done." || cleanDetail === "Video is ready.");
   const rawPct = current?.job?.progress_pct ?? current?.progress_pct;
   let pct = Number(rawPct);
   if (!Number.isFinite(pct)) pct = running ? 2 : (hasError ? 0 : 100);
   pct = Math.max(0, Math.min(100, Math.round(pct)));
-  if (hasError && shouldShowErrorModal(current?.job?.error || current?.job?.youtube_error || current?.youtube_error || detail)) {
-    showJobErrorModal(current?.job?.error || current?.job?.youtube_error || current?.youtube_error || detail);
+  if (hasError && shouldShowErrorModal(surfaceErr || cleanDetail)) {
+    showJobErrorModal(surfaceErr || cleanDetail);
   }
   if (banner) {
     banner.classList.toggle("busy", !!running);
     banner.classList.toggle("bad", hasError);
     banner.classList.toggle("clickable", hasError);
-    banner.style.setProperty("--run-pct", `${running || hasError || detail === "Done." ? pct : 0}%`);
+    banner.style.setProperty("--run-pct", `${running || hasError || cleanDetail === "Done." ? pct : 0}%`);
     banner.setAttribute("aria-valuenow", String(pct));
     if (hasError) {
-      banner.dataset.errorRaw = current?.job?.error || current?.job?.youtube_error || current?.youtube_error || detail || "";
+      banner.dataset.errorRaw = surfaceErr || cleanDetail || "";
       banner.title = "Click for details";
     } else {
       delete banner.dataset.errorRaw;
       banner.removeAttribute("title");
     }
-    const shortErr = hasError ? simplifyJobError(text).message : text;
+    const shortErr = hasError ? simplifyJobError(surfaceErr || text).message : text;
     const label = running
       ? `${jobLabel(current || {})} · ${text} · ${pct}% (safe to refresh)`
-      : (hasError ? `${shortErr} · Details` : (detail || ""));
+      : (hasError ? `${shortErr} · Details` : (cleanDetail || ""));
     if (textEl) textEl.textContent = label;
     else banner.textContent = label;
     banner.hidden = hideIdle;
@@ -1190,7 +1290,7 @@ async function loadJob(id, { poll = true } = {}) {
   fillJobYoutube();
   renderJobList();
   const detail = current.job?.error || current.job?.detail || "";
-  if (!(current.job?.error || current.job?.youtube_error || current.youtube_error)) {
+  if (!surfaceJobError(current)) {
     lastErrorModalKey = "";
   }
   setBusy(!!current.running, detail);
@@ -1595,7 +1695,7 @@ function handleJobActionClick(e) {
     e.preventDefault();
     e.stopPropagation();
     const item = jobIndex.find((j) => j.id === errBtn.dataset.jobError);
-    const raw = item?.job?.error || item?.job?.youtube_error || item?.youtube_error || "";
+    const raw = surfaceJobError(item);
     if (raw) showJobErrorModal(raw, { force: true });
     return true;
   }
@@ -2071,7 +2171,55 @@ function updateVoiceHint() {
 }
 
 function anyJobBusy() {
-  return jobIndex.some((j) => j.running || j.busy);
+  return jobIndex.some((j) => j.running || j.busy || j.queued);
+}
+
+function jobsActivitySignature(items, snap) {
+  const runIds = (snap?.running_project_ids || []).join(",");
+  const queuedIds = (snap?.queued || [])
+    .map((j) => j.project_id || j.id)
+    .join(",");
+  const cardSig = (items || [])
+    .map((j) => [
+      j.id,
+      j.running ? 1 : 0,
+      j.busy ? 1 : 0,
+      j.queued ? 1 : 0,
+      j.paused ? 1 : 0,
+      j.status || "",
+      j.job?.step || "",
+      j.has_video ? 1 : 0,
+      j.progress_pct ?? j.job?.progress_pct ?? "",
+      surfaceJobError(j) ? 1 : 0,
+    ].join(":"))
+    .join("|");
+  return `${runIds}#${queuedIds}#${(items || []).length}#${cardSig}`;
+}
+
+function startJobsSync() {
+  if (jobsSyncTimer) return;
+  jobsSyncTimer = setInterval(() => {
+    if (!$("#view-jobs")?.classList.contains("on")) return;
+    syncJobsFromServer().catch(() => {});
+  }, JOBS_SYNC_MS);
+}
+
+/** Keep Jobs in sync with MCP/queue activity while the Jobs view is open. */
+async function syncJobsFromServer() {
+  if (tickInFlight) return;
+  // Fast poll already covers running/queued work; this catches MCP creates while idle.
+  if (pollTimer) return;
+  const onJobs = $("#view-jobs")?.classList.contains("on");
+  if (!onJobs) return;
+  const prevSig = jobsActivitySignature(jobIndex, jobQueueSnap);
+  try {
+    await refreshJobQueueSnap();
+    await refreshJobs(current?.id);
+  } catch {
+    return;
+  }
+  const nextSig = jobsActivitySignature(jobIndex, jobQueueSnap);
+  if (nextSig !== prevSig && anyJobBusy()) startPolling();
 }
 
 function startPolling() {
@@ -2091,7 +2239,8 @@ async function tickJob() {
   try {
     // Full job-list refresh is expensive; only every few ticks (or when current finishes).
     tickJobsCounter += 1;
-    const wantJobs = tickJobsCounter === 1 || tickJobsCounter % 3 === 0;
+    const onJobs = $("#view-jobs")?.classList.contains("on");
+    const wantJobs = tickJobsCounter === 1 || tickJobsCounter % 3 === 0 || onJobs;
     if (wantJobs) await refreshJobs(current?.id);
     else if (current?.id) {
       // Still sync flags from cached index when we skip the network list call
@@ -2111,7 +2260,7 @@ async function tickJob() {
       current.busy = busy;
       current.job = job;
       current.progress_pct = job.progress_pct;
-      setBusy(running, job.error || job.detail || job.step || "");
+      setBusy(running, displayJobDetail(current, job.error || job.detail || job.step || ""));
       const prev = lastTickState[current.id] || {};
       const match = jobIndex.find((j) => j.id === current.id);
       const hasVideo = !!(match?.has_video || current.has_video);
@@ -3057,7 +3206,7 @@ function fillMcpSettings(data) {
   if (pinStatus) {
     pinStatus.textContent = data.mcp_pin_set
       ? "PIN: set (hashed at rest — enter a new value to change)"
-      : "PIN: not set — HTTP /mcp will refuse connections until you save a PIN";
+      : "PIN: not set — HTTP /mcp/ will refuse connections until you save a PIN";
   }
   const pinInput = $("#mcp-pin-input");
   if (pinInput) pinInput.value = "";
@@ -3075,7 +3224,7 @@ function fillMcpSettings(data) {
     publicInput.placeholder = pub
       ? ""
       : (data.public_tunnel === "tailscale"
-        ? "Start Tailscale Funnel to publish /mcp"
+        ? "Start Tailscale Funnel to publish /mcp/"
         : "Start ngrok or select Tailscale");
   }
   setTunnelRadios(data.public_tunnel || "");
@@ -3116,7 +3265,7 @@ function fillMcpSettings(data) {
   if (snippet && data.codex_snippet) snippet.value = data.codex_snippet;
   const chrome = document.querySelector(".chrome-mcp");
   if (chrome && data.mcp_build) {
-    chrome.innerHTML = `MCP <code>/mcp</code> · <span title="${esc(data.mcp_build)}">${esc(String(data.mcp_build).slice(0, 24))}</span>`;
+    chrome.innerHTML = `MCP <code>/mcp/</code> · <span title="${esc(data.mcp_build)}">${esc(String(data.mcp_build).slice(0, 24))}</span>`;
   }
 }
 
@@ -3361,7 +3510,7 @@ function syncNgrokCommandPreview() {
   if (code) code.textContent = cmd;
   if (line) line.textContent = `Command: ${cmd}`;
   const mcp = $("#ngrok-mcp-url");
-  if (mcp) mcp.value = url ? `${url.replace(/\/$/, "")}/mcp` : "";
+  if (mcp) mcp.value = url ? `${url.replace(/\/$/, "")}/mcp/` : "";
 }
 $("#ngrok-url")?.addEventListener("input", syncNgrokCommandPreview);
 $("#ngrok-local-port")?.addEventListener("input", syncNgrokCommandPreview);
@@ -3372,7 +3521,7 @@ async function pollGentleHealth() {
     if (health?.gentle) applyGentleStatus(health.gentle);
     const chrome = document.querySelector(".chrome-mcp");
     if (chrome && health?.mcp_build) {
-      chrome.innerHTML = `MCP <code>${esc(health.mcp || "/mcp")}</code> · ${esc(String(health.mcp_build).slice(0, 28))}`;
+      chrome.innerHTML = `MCP <code>${esc(health.mcp || "/mcp/")}</code> · ${esc(String(health.mcp_build).slice(0, 28))}`;
     }
   } catch {
     setGentleChrome({ ok: false, backend: "none", url: lastGentleUrl || "" });
@@ -3704,7 +3853,7 @@ function fillSettings(data) {
   if (pinStatus) {
     pinStatus.textContent = data.mcp_pin_set
       ? "PIN: set (hashed at rest — enter a new value to change)"
-      : "PIN: not set — HTTP /mcp will refuse connections until you save a PIN";
+      : "PIN: not set — HTTP /mcp/ will refuse connections until you save a PIN";
   }
   const pinPill = $("#mcp-pin-pill");
   if (pinPill) {
@@ -4285,7 +4434,9 @@ function fillWatchYoutube() {
     return;
   }
   line.hidden = false;
-  const uploadErr = current?.youtube_error || current?.job?.youtube_error;
+  const uploadErr = videoIsVerifiedRendered(current)
+    ? ""
+    : (current?.youtube_error || current?.job?.youtube_error);
   if (ytUrl) {
     line.classList.remove("bad");
     const privacy = current.youtube?.privacy || current.youtube_privacy || "unlisted";
@@ -4340,7 +4491,9 @@ function fillJobYoutube() {
   syncYoutubeUploadButtons();
   fillWatchYoutube();
   if (!line) return;
-  const uploadErr = current.youtube_error || current.job?.youtube_error;
+  const uploadErr = videoIsVerifiedRendered(current)
+    ? ""
+    : (current.youtube_error || current.job?.youtube_error);
   if (current.youtube?.url) {
     line.textContent = `Uploaded as ${current.youtube.privacy || "unlisted"}: ${current.youtube.url}`;
   } else if (uploadErr) {
@@ -5595,6 +5748,7 @@ async function boot() {
   await restoreRoute();
   await loadVoices();
   startTopicsPoll();
+  startJobsSync();
 }
 
 async function checkSession() {
@@ -6277,6 +6431,7 @@ $("#logout-btn")?.addEventListener("click", async () => {
   setAuthToken("");
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   if (topicsTimer) { clearInterval(topicsTimer); topicsTimer = null; }
+  if (jobsSyncTimer) { clearInterval(jobsSyncTimer); jobsSyncTimer = null; }
   // Leave Studio (/app) for the marketing site root — not the login-only page.
   location.replace("/");
 });
@@ -6289,7 +6444,7 @@ $("#jobs-search")?.addEventListener("input", (e) => {
 $("#jobs-filters")?.addEventListener("click", (e) => {
   const btn = e.target.closest("[data-jobs-filter]");
   if (!btn) return;
-  jobsFilter = btn.dataset.jobsFilter || "all";
+  jobsFilter = btn.dataset.jobsFilter || "draft";
   jobsPage = 0;
   $$("#jobs-filters [data-jobs-filter]").forEach((el) => {
     el.classList.toggle("on", el === btn);

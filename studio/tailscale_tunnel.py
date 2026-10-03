@@ -143,9 +143,9 @@ def tailscale_status(*, fresh: bool = False) -> dict[str, Any]:
     if public:
         out["running"] = True
         out["public_url"] = public
-        out["mcp_url"] = f"{public}/mcp"
+        out["mcp_url"] = f"{public.rstrip('/')}/mcp/"
         out["local_target"] = proxy
-        out["detail"] = f"Funnel on: {public}/mcp"
+        out["detail"] = f"Funnel on: {public.rstrip('/')}/mcp/"
     else:
         out["detail"] = "Tailscale is installed. Funnel is off."
     _cache = dict(out)

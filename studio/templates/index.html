@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Stickman Automation</title>
-  <link rel="stylesheet" href="/static/app.css?v=logout1" />
+  <link rel="stylesheet" href="/static/app.css?v=jobs-sync1" />
   <style>
     /* Hide workspace until session boot finishes (no chrome flash on expiry). */
     html:not(.studio-ready) #studio-app { display: none !important; }
@@ -146,7 +146,7 @@
               </svg>
             </button>
           </p>
-          <p class="chrome-mcp admin-only">MCP <code>/mcp</code></p>
+          <p class="chrome-mcp admin-only">MCP <code>/mcp/</code></p>
         </div>
         <div class="chrome-actions">
           <label class="chrome-hands-off admin-only" title="Walk-away: auto-generate, schedule, render, and upload as private. Interval and queue live in Settings.">
@@ -243,12 +243,12 @@
         <div class="list-toolbar" id="jobs-toolbar">
           <input type="search" id="jobs-search" placeholder="Search jobs…" aria-label="Search jobs" />
           <div class="filter-pills" id="jobs-filters" role="group" aria-label="Job filters">
-            <button type="button" data-jobs-filter="all" class="on">All</button>
+            <button type="button" data-jobs-filter="all">All</button>
+            <button type="button" data-jobs-filter="draft" class="on">In progress</button>
             <button type="button" data-jobs-filter="queued">Queued</button>
             <button type="button" data-jobs-filter="running">Running</button>
             <button type="button" data-jobs-filter="paused">Paused / stopped</button>
             <button type="button" data-jobs-filter="ready">Ready</button>
-            <button type="button" data-jobs-filter="draft">In progress</button>
             <button type="button" data-jobs-filter="error">Errors</button>
             <button type="button" data-jobs-filter="startable">Can Start</button>
             <button type="button" data-jobs-filter="resumable">Can Resume</button>
@@ -970,7 +970,7 @@
                   <button type="button" id="tailscale-start" class="primary">Start Tailscale Funnel</button>
                   <button type="button" id="tailscale-stop">Stop Funnel</button>
                 </div>
-                <p class="hint" id="tunnel-hint">Ngrok uses the Basic username and password on the Ngrok card. Tailscale Funnel uses the MCP PIN on the public <code>https://…ts.net/mcp</code> URL.</p>
+                <p class="hint" id="tunnel-hint">Ngrok uses the Basic username and password on the Ngrok card. Tailscale Funnel uses the MCP PIN on the public <code>https://…ts.net/mcp/</code> URL.</p>
               </div>
               <div class="field-group">
                 <div class="settings-status mcp-status-row">
@@ -988,7 +988,7 @@
                   <input name="mcp_pin" id="mcp-pin-input" type="password" placeholder="Set or change PIN" autocomplete="new-password" />
                 </label>
                 <p class="meta" id="mcp-pin-status">PIN: …</p>
-                <p class="hint" id="mcp-auth-hint">How HTTP <code>/mcp</code> authenticates (pick one):
+                <p class="hint" id="mcp-auth-hint">How HTTP <code>/mcp/</code> authenticates (pick one):
                   (1) <strong>Ngrok Basic only</strong> — username/password from Settings → Ngrok; do <em>not</em> also send <code>Authorization: Bearer</code> (many clients drop Basic when both are set).
                   (2) <strong>MCP PIN</strong> — <code>?mcp_pin=…</code> or header <code>X-MCP-Pin</code> (this is what Tailscale Funnel uses).
                   (3) <strong>Studio JWT</strong> — <code>Authorization: Bearer &lt;jwt&gt;</code> after login (per-member).
@@ -1038,7 +1038,7 @@
           <details class="card settings-card admin-only" id="settings-ngrok-card" hidden>
             <summary class="lib-heading settings-card-summary">Ngrok</summary>
             <div class="settings-fields">
-              <p class="hint settings-lead">Expose Studio (and MCP at <code>/mcp</code>) on your reserved ngrok domain. Edge basic-auth runs first; Studio then trusts the tunnel hop automatically. Point local port at Studio’s listen port (default <strong>7878</strong>).</p>
+              <p class="hint settings-lead">Expose Studio (and MCP at <code>/mcp/</code>) on your reserved ngrok domain. Edge basic-auth runs first; Studio then trusts the tunnel hop automatically. Point local port at Studio’s listen port (default <strong>7878</strong>).</p>
               <div class="field-group">
                 <div class="settings-status gentle-status">
                   <div class="settings-pills">
@@ -1058,7 +1058,7 @@
                 </label>
                 <label>Public MCP URL
                   <div class="row mcp-copy-row">
-                    <input id="ngrok-mcp-url" type="text" readonly value="" placeholder="…/mcp" />
+                    <input id="ngrok-mcp-url" type="text" readonly value="" placeholder="…/mcp/" />
                     <button type="button" id="ngrok-copy-mcp">Copy</button>
                   </div>
                 </label>
@@ -1328,6 +1328,6 @@
       </div>
     </form>
   </dialog>
-  <script src="/static/app.js?v=logout1"></script>
+  <script src="/static/app.js?v=jobs-sync1"></script>
 </body>
 </html>

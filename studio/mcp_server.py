@@ -260,7 +260,7 @@ def handshake_instructions() -> str:
         "(3) Per-user API key Authorization: Bearer bp_live_… (create_api_key; scoped to that user; "
         "per-key rate limit, default 60/min — use rate_limit=600+ for agent polling). "
         "(4) Studio JWT (Bearer/cookie) for per-member access. "
-        "ChatGPT tip: public https://…/mcp with Basic, or …/mcp?mcp_pin=YOUR_PIN. "
+        "ChatGPT tip: public https://…/mcp/ with Basic, or …/mcp/?mcp_pin=YOUR_PIN. "
         "SaaS: get_my_usage (plan quotas), get_queue_status (leases/attempts/block_reason), "
         "admin_overview / list_failed_jobs / retry_failed_job / run_backup (admin/PIN only). "
         "Errors may include error_code=quota_exhausted|rate_limited|upload_too_large|unauthorized. "
@@ -455,7 +455,7 @@ def studio_settings_payload() -> dict:
 
     data["gpu_lock"] = gpu_lock_public()
     data["stdio"] = "python -m studio.mcp_server"
-    data["http_mcp"] = "/mcp"
+    data["http_mcp"] = "/mcp/"
     return data
 
 
@@ -469,7 +469,7 @@ def studio_health_payload() -> dict:
 
     pub = public_settings()
     public = resolve_public_base_url().rstrip("/")
-    mcp_path = "/mcp"
+    mcp_path = "/mcp/"
     mcp_url = f"{public}{mcp_path}" if public else mcp_path
     deps = check_dependencies()
     return {

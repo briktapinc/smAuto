@@ -651,7 +651,12 @@ class AuthASGIMiddleware:
             await self.app(scope, receive, send)
             return
         path = _strip_studio_prefix(scope.get("path") or "")
-        if len(path) > 1 and path.endswith("/"):
+        # Keep /mcp/ trailing slash — Starlette Mount("/mcp") 307s bare /mcp, and
+        # stripping /mcp/ → /mcp recreates that redirect for authenticated clients.
+        if studio_auth.is_mcp_path(path):
+            if path == "/mcp":
+                path = "/mcp/"
+        elif len(path) > 1 and path.endswith("/"):
             path = path.rstrip("/")
         if path != (scope.get("path") or ""):
             scope["path"] = path
@@ -801,6 +806,22 @@ class McpAuthASGIMiddleware:
             )
             await body(scope, receive, send)
             return
+        await self.app(scope, receive, send)
+
+
+class McpTrailingSlashASGIMiddleware:
+    """Rewrite /mcp → /mcp/ in-process so POST does not depend on client-followed 307s."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http":
+            path = scope.get("path") or ""
+            if path == "/mcp":
+                scope = dict(scope)
+                scope["path"] = "/mcp/"
+                scope["raw_path"] = b"/mcp/"
         await self.app(scope, receive, send)
 
 
@@ -1177,7 +1198,8 @@ def create_app() -> FastAPI:
         openapi_url="/openapi.json",
     )
     # Last add_middleware = outermost on the request.
-    # CORS → RateLimit (ASGI) → McpAuth (ASGI) → Audit (ASGI) → Auth (ASGI) → app
+    # CORS → RateLimit → McpAuth → Audit → Auth → McpTrailingSlash → app
+    app.add_middleware(McpTrailingSlashASGIMiddleware)
     app.add_middleware(AuthASGIMiddleware)
     app.add_middleware(AuditASGIMiddleware)
     app.add_middleware(McpAuthASGIMiddleware)
@@ -2109,9 +2131,10 @@ def create_app() -> FastAPI:
         local = local_base_url(settings)
         public = resolve_public_base_url(settings)
         prefix = _studio_prefix()
-        mcp_path = f"{prefix}/mcp" if mcp_app is not None else None
-        # public already includes /app when mounted under a subpath
-        mcp_url = f"{public.rstrip('/')}/mcp" if mcp_app is not None and public else mcp_path
+        mcp_path = f"{prefix}/mcp/" if mcp_app is not None else None
+        # public already includes /app when mounted under a subpath; trailing slash
+        # required — many MCP clients do not follow POST 307 from /mcp → /mcp/.
+        mcp_url = f"{public.rstrip('/')}/mcp/" if mcp_app is not None and public else mcp_path
         out = {
             "ok": True,
             "host": host,

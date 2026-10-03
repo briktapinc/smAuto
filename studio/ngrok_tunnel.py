@@ -220,7 +220,7 @@ def config_from_settings(data: dict[str, Any] | None = None) -> dict[str, Any]:
         "ngrok_basic_auth_user": user,
         "ngrok_basic_auth_password_set": bool(password),
         "public_url": public_url,
-        "mcp_url": f"{public_url.rstrip('/')}/mcp" if public_url else "",
+        "mcp_url": f"{public_url.rstrip('/')}/mcp/" if public_url else "",
         "local_port": local_port,
         "command": build_command_line(local_port, public_url or "<your-ngrok-url>", basic_auth=True),
     }
@@ -639,7 +639,7 @@ def start_ngrok(*, wait: float = 2.5) -> dict[str, Any]:
         status = ngrok_status(reveal_password=True)
         status["detail"] = (
             f"ngrok started → {public_url} (local :{local_port}) with basic auth "
-            f"user={username}. Remote MCP: {public_url.rstrip('/')}/mcp "
+            f"user={username}. Remote MCP: {public_url.rstrip('/')}/mcp/ "
             f"(HTTP Basic only — {username} + password from this card)."
         )
         status["basic_auth_generated"] = bool(creds.get("generated"))

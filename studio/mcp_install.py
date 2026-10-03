@@ -12,11 +12,24 @@ from studio.paths import REPO_ROOT
 
 SERVER_KEY_PREFERRED = "lazykh"
 SERVER_KEY_ALIAS = "bubble-pod"
-MCP_HTTP_PATH = "/mcp"
+# Trailing slash required: Starlette Mount("/mcp") issues POST 307 /mcp → /mcp/
+# and many MCP clients do not follow POST redirects.
+MCP_HTTP_PATH = "/mcp/"
 
 
 def _python_exe() -> str:
     return sys.executable or "python"
+
+
+def ensure_mcp_url(url: str | None) -> str:
+    """Normalize an MCP HTTP URL (or studio base) to end with /mcp/."""
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    base = raw.rstrip("/")
+    if base.endswith("/mcp"):
+        return base + "/"
+    return base + MCP_HTTP_PATH
 
 
 def studio_http_base() -> str:
@@ -159,7 +172,7 @@ def mcp_settings_payload(*, http_mounted: bool = True) -> dict[str, Any]:
     entry = stdio_server_entry()
     local_base = studio_http_base().rstrip("/")
     public_base = studio_public_base().rstrip("/")
-    http_url = f"{local_base}{MCP_HTTP_PATH}"
+    http_url = ensure_mcp_url(local_base)
     pub = public_settings()
     pin_set = bool(pub.get("mcp_pin_set") or mcp_pin_configured())
     ngrok = None
@@ -183,26 +196,26 @@ def mcp_settings_payload(*, http_mounted: bool = True) -> dict[str, Any]:
     ts_mcp = (tailscale or {}).get("mcp_url") if ts_public else None
     # Selected tunnel wins. With no selection, a live ngrok URL still overrides the public base.
     if tunnel == "tailscale" and ts_mcp:
-        public_mcp = str(ts_mcp).rstrip("/")
+        public_mcp = ensure_mcp_url(ts_mcp)
         public_url = str(ts_public).rstrip("/")
     elif tunnel == "ngrok" and ngrok_mcp:
-        public_mcp = str(ngrok_mcp).rstrip("/")
+        public_mcp = ensure_mcp_url(ngrok_mcp)
         public_url = str(ngrok_public).rstrip("/")
     elif tunnel == "ngrok" and str(pub.get("ngrok_url") or "").startswith("http"):
         public_url = str(pub.get("ngrok_url") or "").rstrip("/")
-        public_mcp = f"{public_url}{MCP_HTTP_PATH}"
+        public_mcp = ensure_mcp_url(public_url)
     elif tunnel == "":
         if ngrok_mcp:
-            public_mcp = str(ngrok_mcp).rstrip("/")
+            public_mcp = ensure_mcp_url(ngrok_mcp)
             public_url = str(ngrok_public).rstrip("/")
         elif public_base:
-            public_mcp = f"{public_base}{MCP_HTTP_PATH}"
+            public_mcp = ensure_mcp_url(public_base)
             public_url = public_base
         else:
             public_mcp = None
             public_url = None
     elif public_base and public_base != local_base:
-        public_mcp = f"{public_base}{MCP_HTTP_PATH}"
+        public_mcp = ensure_mcp_url(public_base)
         public_url = public_base
     else:
         public_mcp = None
@@ -213,7 +226,7 @@ def mcp_settings_payload(*, http_mounted: bool = True) -> dict[str, Any]:
     pin_query = "?mcp_pin=YOUR_MCP_PIN"
     prod = is_production()
     if tunnel == "tailscale":
-        shown = public_mcp or f"{local_base}{MCP_HTTP_PATH}"
+        shown = public_mcp or ensure_mcp_url(local_base)
         chatgpt_hint = (
             f"Tailscale Funnel is the public tunnel. Remote MCP URL: {shown}. "
             "Authenticate with the MCP PIN (?mcp_pin= / X-MCP-Pin) or a Studio JWT. "
@@ -229,7 +242,7 @@ def mcp_settings_payload(*, http_mounted: bool = True) -> dict[str, Any]:
             "Authenticate with HTTP Basic only — username/password from Settings → Ngrok "
             "(do not also send Authorization: Bearer; many clients drop Basic when both are set). "
             "Optional alternatives: append ?mcp_pin=YOUR_MCP_PIN, header X-MCP-Pin, or a Studio JWT. "
-            f"Example PIN URL: {shown.rstrip('/')}{pin_query}. "
+            f"Example PIN URL: {shown}{pin_query}. "
             "After Studio updates: fully quit ChatGPT, reopen, /mcp, new thread."
         )
     elif prod or (public_base and public_base != local_base):
@@ -248,7 +261,7 @@ def mcp_settings_payload(*, http_mounted: bool = True) -> dict[str, Any]:
             "Authenticate with HTTP Basic only — username/password from Settings → Ngrok "
             "(do not also send Authorization: Bearer; many clients drop Basic when both are set). "
             "Optional alternatives: append ?mcp_pin=YOUR_MCP_PIN, header X-MCP-Pin, or a Studio JWT. "
-            f"Example PIN URL: {(public_mcp or http_url).rstrip('/')}{pin_query}. "
+            f"Example PIN URL: {public_mcp or http_url}{pin_query}. "
             "Local-only: "
             f"{http_url} with the same Basic credentials, PIN, or JWT. "
             "After Studio updates: fully quit ChatGPT, reopen, /mcp, new thread."
@@ -282,7 +295,7 @@ def mcp_settings_payload(*, http_mounted: bool = True) -> dict[str, Any]:
             "not HTTP JWT/PIN/Basic. Click Install Claude config to write mcpServers.lazykh, then quit and reopen Claude."
         ),
         "auth_hint": (
-            "HTTP /mcp auth (any one): (1) MCP PIN via ?mcp_pin= / X-MCP-Pin / Bearer <pin> "
+            "HTTP /mcp/ auth (any one): (1) MCP PIN via ?mcp_pin= / X-MCP-Pin / Bearer <pin> "
             "(use this for Tailscale Funnel). "
             "(2) Studio login JWT. (3) ngrok HTTP Basic from Settings → Ngrok when Ngrok is the selected tunnel — "
             "send Basic only, not Basic+Bearer. Edge ngrok checks Basic then strips Authorization; "
