@@ -150,6 +150,7 @@ DEFAULTS = {
     "hands_off_interval_hours": 0.0,
     "hands_off_min_queue": 5,
     "max_concurrent_jobs": 1,
+    "completed_job_retention_days": 7,
     "per_user_concurrency": 1,
     "admin_concurrency": 1,
     "owner_priority": True,
@@ -575,6 +576,17 @@ def normalize_max_concurrent_jobs(value: Any, default: int = 1) -> int:
     except (TypeError, ValueError):
         return int(default)
     return max(1, min(32, n))
+
+
+def normalize_completed_job_retention_days(value: Any, default: int = 7) -> int:
+    """Days to keep the latest completed (uploaded) job before auto-cleanup (1–365)."""
+    if value is None or value == "":
+        return int(default)
+    try:
+        n = int(round(float(value)))
+    except (TypeError, ValueError):
+        return int(default)
+    return max(1, min(365, n))
 
 
 def normalize_registration_mode(value: str | None, default: str = "invite_only") -> str:
@@ -1094,6 +1106,9 @@ def load_settings() -> dict[str, Any]:
     data["hands_off_interval_hours"] = normalize_hands_off_interval_hours(data.get("hands_off_interval_hours"))
     data["hands_off_min_queue"] = normalize_hands_off_min_queue(data.get("hands_off_min_queue"))
     data["max_concurrent_jobs"] = normalize_max_concurrent_jobs(data.get("max_concurrent_jobs"))
+    data["completed_job_retention_days"] = normalize_completed_job_retention_days(
+        data.get("completed_job_retention_days")
+    )
     data["per_user_concurrency"] = normalize_max_concurrent_jobs(
         data.get("per_user_concurrency"), 1
     )
@@ -1215,6 +1230,8 @@ def save_settings(updates: dict[str, Any]) -> dict[str, Any]:
                 data[key] = normalize_hands_off_min_queue(value)
             elif key == "max_concurrent_jobs":
                 data[key] = normalize_max_concurrent_jobs(value)
+            elif key == "completed_job_retention_days":
+                data[key] = normalize_completed_job_retention_days(value)
             elif key == "per_user_concurrency":
                 data[key] = normalize_max_concurrent_jobs(value, 1)
             elif key == "admin_concurrency":
@@ -1389,6 +1406,9 @@ def public_settings() -> dict[str, Any]:
     data["hands_off_interval_hours"] = normalize_hands_off_interval_hours(data.get("hands_off_interval_hours"))
     data["hands_off_min_queue"] = normalize_hands_off_min_queue(data.get("hands_off_min_queue"))
     data["max_concurrent_jobs"] = normalize_max_concurrent_jobs(data.get("max_concurrent_jobs"))
+    data["completed_job_retention_days"] = normalize_completed_job_retention_days(
+        data.get("completed_job_retention_days")
+    )
     data["per_user_concurrency"] = normalize_max_concurrent_jobs(
         data.get("per_user_concurrency"), 1
     )

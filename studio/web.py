@@ -272,6 +272,7 @@ class SettingsBody(BaseModel):
     hands_off_interval_hours: float | None = None
     hands_off_min_queue: int | None = None
     max_concurrent_jobs: int | None = None
+    completed_job_retention_days: int | None = None
     per_user_concurrency: int | None = None
     admin_concurrency: int | None = None
     owner_priority: bool | None = None
@@ -730,6 +731,9 @@ class AuthASGIMiddleware:
                 # api, projects|jobs, {id}, …
                 if len(parts) >= 3 and parts[0] == "api" and parts[1] in ("projects", "jobs"):
                     project_id = parts[2]
+                    # Collection actions under /api/jobs/… (not a project id).
+                    if parts[1] == "jobs" and project_id in ("cleanup",):
+                        break
                     if project_id and project_id not in (".", ".."):
                         try:
                             from studio.tenant import require_project_access
@@ -1123,6 +1127,18 @@ def create_app() -> FastAPI:
                 pass
             time.sleep(15 * 60)
 
+    def _job_cleanup_loop() -> None:
+        # Run once shortly after boot, then once a day.
+        time.sleep(45)
+        while True:
+            try:
+                from studio.job_cleanup import run_scheduled_cleanup
+
+                run_scheduled_cleanup()
+            except Exception:
+                pass
+            time.sleep(24 * 60 * 60)
+
     @asynccontextmanager
     async def studio_lifespan(app):
         inner_cm = None
@@ -1135,6 +1151,7 @@ def create_app() -> FastAPI:
         threading.Thread(target=_ngrok_boot, daemon=True, name="ngrok-boot").start()
         threading.Thread(target=_topic_scheduler_loop, daemon=True, name="topic-scheduler").start()
         threading.Thread(target=_renewal_reminder_loop, daemon=True, name="renewal-reminders").start()
+        threading.Thread(target=_job_cleanup_loop, daemon=True, name="job-cleanup").start()
         try:
             from studio.restart import clear_stale_gpu_lock
 
@@ -2480,6 +2497,8 @@ def create_app() -> FastAPI:
             updates["hands_off_min_queue"] = body.hands_off_min_queue
         if body.max_concurrent_jobs is not None:
             updates["max_concurrent_jobs"] = body.max_concurrent_jobs
+        if body.completed_job_retention_days is not None:
+            updates["completed_job_retention_days"] = body.completed_job_retention_days
         if body.per_user_concurrency is not None:
             updates["per_user_concurrency"] = body.per_user_concurrency
         if body.admin_concurrency is not None:
@@ -3072,6 +3091,40 @@ def create_app() -> FastAPI:
             owner_id=user.get("id"),
             is_admin=(user.get("role") or "") == "admin",
         )
+
+    @app.get("/api/jobs/cleanup")
+    def jobs_cleanup_preview(request: Request):
+        user = studio_auth.require_session(request)
+        from studio.job_cleanup import cleanup_completed_jobs
+
+        is_admin = (user.get("role") or "") == "admin"
+        try:
+            return cleanup_completed_jobs(
+                owner_id=user.get("id"),
+                is_admin=is_admin,
+                dry_run=True,
+                source="api",
+                username=str(user.get("username") or user.get("email") or ""),
+            )
+        except Exception as exc:
+            raise _err(exc)
+
+    @app.post("/api/jobs/cleanup")
+    def jobs_cleanup_run(request: Request):
+        user = studio_auth.require_session(request)
+        from studio.job_cleanup import cleanup_completed_jobs
+
+        is_admin = (user.get("role") or "") == "admin"
+        try:
+            return cleanup_completed_jobs(
+                owner_id=user.get("id"),
+                is_admin=is_admin,
+                dry_run=False,
+                source="api",
+                username=str(user.get("username") or user.get("email") or ""),
+            )
+        except Exception as exc:
+            raise _err(exc)
 
     @app.get("/api/archives")
     def archives_list(request: Request):

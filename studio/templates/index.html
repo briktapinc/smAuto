@@ -253,6 +253,7 @@
             <button type="button" data-jobs-filter="startable">Can Start</button>
             <button type="button" data-jobs-filter="resumable">Can Resume</button>
           </div>
+          <button type="button" id="jobs-cleanup-btn" title="Delete completed jobs that are past retention or older duplicates of the same story">Clean up completed</button>
         </div>
         <div id="jobs-queue" class="jobs-queue"></div>
         <div class="library-pager" id="jobs-pager" hidden>
@@ -1213,6 +1214,10 @@
                 <input type="checkbox" id="yt-delete-after" name="youtube_delete_file_after_upload" form="settings-form" checked />
                 When video is uploaded delete file from server to save space
               </label>
+              <label>Keep completed jobs (days)
+                <input name="completed_job_retention_days" id="completed-job-retention-days" type="number" min="1" max="365" step="1" value="7" form="settings-form" />
+              </label>
+              <p class="hint">Auto-delete jobs that are rendered and uploaded to YouTube after this many days. Older completed duplicates of the same story are cleaned sooner. Running, failed, and pending-upload jobs are never auto-deleted.</p>
               <label>Default privacy
                 <select id="yt-privacy" name="youtube_privacy" form="settings-form">
                   <option value="private">private</option>
@@ -1281,6 +1286,17 @@
       <div class="dialog-actions">
         <button type="submit" value="cancel">Cancel</button>
         <button type="submit" value="confirm" class="danger">Delete forever</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="cleanup-dialog">
+    <form method="dialog" id="cleanup-form">
+      <h2>Clean up completed jobs?</h2>
+      <p id="cleanup-dialog-count">This permanently deletes eligible completed jobs.</p>
+      <p class="hint">Only jobs that are rendered and uploaded to YouTube, past the retention window, or older duplicates of the same story. Running, failed, and pending-upload jobs stay.</p>
+      <div class="dialog-actions">
+        <button type="submit" value="cancel">Cancel</button>
+        <button type="submit" value="confirm" class="danger" id="cleanup-confirm-btn">Delete completed</button>
       </div>
     </form>
   </dialog>

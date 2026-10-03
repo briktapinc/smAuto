@@ -523,6 +523,9 @@ def path_requires_membership(path: str, method: str = "GET") -> bool:
 
     if path.startswith("/api/jobs/"):
         parts = [p for p in path[len("/api/jobs/") :].split("/") if p]
+        # Collection cleanup is delete-like — allowed without active membership.
+        if parts and parts[0] == "cleanup" and m in ("GET", "POST"):
+            return False
         if len(parts) >= 2 and parts[1] in _MEMBERSHIP_ALLOWED_PROJECT_ACTIONS and m == "POST":
             return False
         if len(parts) >= 2 and parts[1] in ("start", "resume") and m == "POST":

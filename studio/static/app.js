@@ -3675,6 +3675,9 @@ $("#settings-form").addEventListener("submit", async (e) => {
   if (body.max_concurrent_jobs != null && body.max_concurrent_jobs !== "") {
     body.max_concurrent_jobs = Number(body.max_concurrent_jobs);
   }
+  if (body.completed_job_retention_days != null && body.completed_job_retention_days !== "") {
+    body.completed_job_retention_days = Number(body.completed_job_retention_days);
+  }
   if (body.ngrok_local_port != null && body.ngrok_local_port !== "") {
     body.ngrok_local_port = Number(body.ngrok_local_port);
   }
@@ -3813,6 +3816,9 @@ function fillSettings(data) {
   }
   if ($("#max-concurrent-jobs") && data.max_concurrent_jobs != null) {
     $("#max-concurrent-jobs").value = data.max_concurrent_jobs_effective ?? data.max_concurrent_jobs;
+  }
+  if ($("#completed-job-retention-days") && data.completed_job_retention_days != null) {
+    $("#completed-job-retention-days").value = data.completed_job_retention_days;
   }
   if ($("#per-user-concurrency") && data.per_user_concurrency != null) {
     $("#per-user-concurrency").value = data.per_user_concurrency_effective ?? data.per_user_concurrency;
@@ -6434,6 +6440,59 @@ $("#logout-btn")?.addEventListener("click", async () => {
   if (jobsSyncTimer) { clearInterval(jobsSyncTimer); jobsSyncTimer = null; }
   // Leave Studio (/app) for the marketing site root — not the login-only page.
   location.replace("/");
+});
+
+async function askCleanupCompleted() {
+  const dlg = $("#cleanup-dialog");
+  const countEl = $("#cleanup-dialog-count");
+  const confirmBtn = $("#cleanup-confirm-btn");
+  if (!dlg || !countEl) return;
+  if (confirmBtn) confirmBtn.disabled = true;
+  countEl.textContent = "Checking eligible completed jobs…";
+  dlg.showModal();
+  try {
+    const preview = await api("/api/jobs/cleanup");
+    const n = Number(preview?.count || 0);
+    const days = Number(preview?.retention_days || 7);
+    if (!n) {
+      countEl.textContent = `No completed jobs are eligible right now (retention ${days} days).`;
+      return;
+    }
+    countEl.textContent = `This permanently deletes ${n} completed job${n === 1 ? "" : "s"} (uploaded to YouTube; past ${days} days or older duplicates of the same story).`;
+    if (confirmBtn) confirmBtn.disabled = false;
+  } catch (err) {
+    countEl.textContent = err.message || "Could not preview cleanup.";
+  }
+}
+
+async function confirmCleanupCompleted() {
+  try {
+    const result = await api("/api/jobs/cleanup", { method: "POST", body: {} });
+    const n = Number(result?.count || 0);
+    if (current && (result?.deleted || []).some((row) => row.id === current.id)) {
+      pauseWatch();
+      stopIllustrationPolling();
+      lastIllust = null;
+      clearInterval(pollTimer);
+      pollTimer = null;
+      current = null;
+      localStorage.removeItem(STORE_JOB);
+      syncJobTabs();
+      goLibrary();
+    }
+    await refreshJobs();
+    await refreshJobQueueSnap();
+    toast(n ? `Cleaned up ${n} completed job${n === 1 ? "" : "s"}.` : "No completed jobs to clean up.");
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+$("#jobs-cleanup-btn")?.addEventListener("click", () => {
+  askCleanupCompleted();
+});
+$("#cleanup-dialog")?.addEventListener("close", () => {
+  if ($("#cleanup-dialog").returnValue === "confirm") confirmCleanupCompleted();
 });
 
 $("#jobs-search")?.addEventListener("input", (e) => {
